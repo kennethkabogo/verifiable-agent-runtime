@@ -51,10 +51,10 @@ The `cell_digest` MUST be calculated using a **Top-to-Bottom, Left-to-Right** (R
 
 For each cell in the grid:
 ```text
-digest_input += cell.codepoint_utf8 (variable length)
-digest_input += cell.fg_color_u32
-digest_input += cell.bg_color_u32
-digest_input += cell.attrs_u8
+digest_input += cell.codepoint_utf8     // UTF-8 bytes, null-padded to 4 bytes
+digest_input += cell.fg_color_rgb       // R, G, B (3 bytes)
+digest_input += cell.bg_color_rgb       // R, G, B (3 bytes)
+digest_input += cell.attrs_u8           // 1 byte bitmask
 ```
 
 #### 2.2.2 Attribute Bitmask (attrs_u8)
@@ -62,11 +62,12 @@ digest_input += cell.attrs_u8
 The 8-bit attribute mask is defined as follows:
 - **Bit 0**: Bold
 - **Bit 1**: Italic
-- **Bit 2**: Underline
+- **Bit 2**: Faint
 - **Bit 3**: Blink
 - **Bit 4**: Reverse (Inverse)
-- **Bit 5**: Strikethrough
-- **Bits 6-7**: Reserved (MUST be 0)
+- **Bit 5**: Invisible
+- **Bit 6**: Strikethrough
+- **Bit 7**: Underline
 
 ## 3. Evidence Packet Format
 
