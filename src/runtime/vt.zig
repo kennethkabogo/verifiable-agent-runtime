@@ -1,77 +1,119 @@
 const std = @import("std");
+const vt = @import("ghostty-vt");
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// Cell represents a single terminal grid cell as returned by libghostty-vt.
-///
-/// codepoint_u32 uses a fixed 4-byte (UTF-32 / u32) encoding rather than
-/// variable-length UTF-8. This is required for deterministic digest construction:
-/// a raw UTF-8 concatenation would make codepoint "AB" (2 bytes) followed by
-/// fg_color indistinguishable from codepoint "A" + codepoint "B" + fg_color if
-/// two adjacent cells happen to produce the same byte sequence. The fixed-width
-/// u32 encoding eliminates this ambiguity and matches ghostty-vt's internal cell
-/// representation.
-pub const Cell = struct {
-    codepoint_u32: u32,  // Unicode scalar value, fixed 4 bytes (not variable UTF-8)
-    fg_color_u32: u32,
-    bg_color_u32: u32,
-    attrs_u8: u8,
-};
-
-/// VerifiableTerminal maintains the terminal state and provides snapshots for audit.
-/// This acts as a wrapper around libghostty-vt's state machine.
+/// VerifiableTerminal is a bridge between the Ghostty VT state machine
+/// and our verifiable execution runtime. It handles raw PTY input and
+/// provides deterministic state digests for Remote Attestation.
 pub const VerifiableTerminal = struct {
+    terminal: vt.Terminal,
     allocator: std.mem.Allocator,
-    width: u16,
-    height: u16,
-    // cell_buffer: []Cell, // Hypothetical buffer from libghostty-vt
+    // ReadonlyStream is Ghostty's optimized stream for non-interactive state tracking.
+    stream: vt.ReadonlyStream,
 
-    pub fn init(allocator: std.mem.Allocator, w: u16, h: u16) !VerifiableTerminal {
-        return VerifiableTerminal{
+    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !VerifiableTerminal {
+        // Ghostty Terminal initialization with fixed-width/height (cols/rows).
+        var terminal = try vt.Terminal.init(allocator, .{
+            .cols = width,
+            .rows = height,
+            .max_scrollback = 0, // Enclave only cares about current state, not historical scrollback.
+        });
+
+        return .{
+            .terminal = terminal,
             .allocator = allocator,
-            .width = w,
-            .height = h,
+            // Create a readonly stream tied to this terminal.
+            .stream = terminal.vtStream(),
         };
     }
 
-    /// Processes raw terminal sequences (ANSI/XTERM) and updates internal state.
-    pub fn processInput(self: *VerifiableTerminal, data: []const u8) !void {
-        // In production, this calls ghostty_vt_write(self.vt_master, data)
-        _ = self;
-        _ = data;
+    pub fn deinit(self: *VerifiableTerminal) void {
+        self.stream.deinit();
+        self.terminal.deinit(self.allocator);
     }
 
-    /// Serializes the current terminal state (grid cells + cursor) and returns a digest.
-    ///
-    /// Cell digest input layout (per cell, all little-endian):
-    ///   codepoint_u32  — 4 bytes, fixed-width UTF-32 scalar (NOT variable UTF-8)
-    ///   fg_color_u32   — 4 bytes
-    ///   bg_color_u32   — 4 bytes
-    ///   attrs_u8       — 1 byte
-    ///
-    /// Using codepoint_u32 ensures the digest input is unambiguous: variable-length
-    /// UTF-8 would make multi-byte codepoints collide with sequences of shorter
-    /// codepoints that happen to produce the same byte run.
-    pub fn digestState(self: *VerifiableTerminal) ![32]u8 {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    /// Feed raw PTY bytes into the VT state machine.
+    pub fn processInput(self: *VerifiableTerminal, data: []const u8) void {
+        self.stream.nextSlice(data);
+    }
 
-        // Mock: Hash the visual parameters for now
-        hasher.update(std.mem.asBytes(&self.width));
-        hasher.update(std.mem.asBytes(&self.height));
+    /// Compute the L2 State Digest according to the Evidence Bundle Spec v1.1.
+    /// Format: Header(magic, version, cursor, dims) || Row-major Cell Data.
+    pub fn digestState(self: *VerifiableTerminal) [32]u8 {
+        var hasher = Sha256.init(.{});
+        const active_screen = self.terminal.screens.active;
+        const width = self.terminal.cols;
+        const height = self.terminal.rows;
 
-        // In production: Iterate through visible rows/cols and hash cell content + attributes
-        // var y: u16 = 0;
-        // while (y < self.height) : (y += 1) {
-        //     var x: u16 = 0;
-        //     while (x < self.width) : (x += 1) {
-        //         const cell: Cell = self.getCell(x, y);
-        //         hasher.update(std.mem.asBytes(&cell.codepoint_u32));  // fixed 4 bytes
-        //         hasher.update(std.mem.asBytes(&cell.fg_color_u32));
-        //         hasher.update(std.mem.asBytes(&cell.bg_color_u32));
-        //         hasher.update(std.mem.asBytes(&cell.attrs_u8));
-        //     }
-        // }
+        // 1. Hash Metadata: Format Version (1), Cursor X, Cursor Y, Width, Height
+        var meta = [_]u8{0} ** 9;
+        meta[0] = 1; // Format Version
+        std.mem.writeInt(u16, meta[1..3], active_screen.cursor.x, .little);
+        std.mem.writeInt(u16, meta[3..5], active_screen.cursor.y, .little);
+        std.mem.writeInt(u16, meta[5..7], width, .little);
+        std.mem.writeInt(u16, meta[7..9], height, .little);
+        hasher.update(&meta);
 
-        var result: [32]u8 = undefined;
-        hasher.final(&result);
-        return result;
+        // 2. Hash Cells in Row-Major Order
+        var y: u16 = 0;
+        while (y < height) : (y += 1) {
+            var x: u16 = 0;
+            while (x < width) : (x += 1) {
+                const pt = vt.point.Point{ .active = .{ .x = x, .y = y } };
+                // Ghostty uses a sparse Page system. We pin the active point to get the cell.
+                const pin = active_screen.pages.pin(pt).?;
+                const rac = pin.rowAndCell();
+                const cell = rac.cell;
+
+                // A. Codepoint (Serialized as UTF-8, null-padded to 4 bytes)
+                var cp_buf = [_]u8{0} ** 4;
+                if (cell.hasGrapheme()) {
+                    // Pull from the page's grapheme storage.
+                    const page = &pin.node.data;
+                    if (page.lookupGrapheme(cell)) |cps| {
+                        // Take the primary (first) codepoint of the grapheme cluster.
+                        const len = std.unicode.utf8Encode(cps[0], &cp_buf) catch 0;
+                        _ = len;
+                    }
+                } else {
+                    const len = std.unicode.utf8Encode(cell.codepoint(), &cp_buf) catch 0;
+                    _ = len;
+                }
+                hasher.update(&cp_buf);
+
+                // B. Colors and Attributes
+                const page = &pin.node.data;
+                const style = page.styles.get(page.memory, cell.style_id);
+                
+                // Resolve final colors against the terminal-wide palette.
+                const fg = style.fg(.{
+                    .default = self.terminal.colors.foreground.get().?,
+                    .palette = &self.terminal.colors.palette.current,
+                });
+                
+                // bg() is an optional color, fallback to terminal background.
+                const bg = style.bg(cell, &self.terminal.colors.palette.current) orelse self.terminal.colors.background.get().?;
+
+                hasher.update(&[_]u8{ fg.r, fg.g, fg.b });
+                hasher.update(&[_]u8{ bg.r, bg.g, bg.b });
+
+                // C. Map SGR attributes to v1.1 8-bit bitmask.
+                var attr_mask: u8 = 0;
+                if (style.flags.bold) attr_mask |= 1 << 0;
+                if (style.flags.italic) attr_mask |= 1 << 1;
+                if (style.flags.faint) attr_mask |= 1 << 2;
+                if (style.flags.blink) attr_mask |= 1 << 3;
+                if (style.flags.inverse) attr_mask |= 1 << 4;
+                if (style.flags.invisible) attr_mask |= 1 << 5;
+                if (style.flags.strikethrough) attr_mask |= 1 << 6;
+                // Ghostty supports many underline types (curly, double, etc.); we flatten to one bit.
+                if (style.flags.underline != .none) attr_mask |= 1 << 7;
+                hasher.update(&[_]u8{attr_mask});
+            }
+        }
+
+        var out: [32]u8 = undefined;
+        hasher.final(&out);
+        return out;
     }
 };

@@ -35,12 +35,12 @@ pub const SecureLogger = struct {
         hasher.final(&self.stream_hash);
 
         // 2. Update Terminal State Machine
-        try self.vt.processInput(data);
+        self.vt.processInput(data);
     }
 
     /// Generates a signed bundle of the stream hash and the current terminal state.
     pub fn getEvidenceBundle(self: *SecureLogger) ![]u8 {
-        const state_digest = try self.vt.digestState();
+        const state_digest = self.vt.digestState();
         const stream_h = try hex(self.allocator, &self.stream_hash);
         defer self.allocator.free(stream_h);
         const state_h = try hex(self.allocator, &state_digest);

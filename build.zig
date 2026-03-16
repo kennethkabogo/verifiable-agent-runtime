@@ -73,15 +73,20 @@ pub fn build(b: *std.Build) void {
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
-                // Here "VAR" is the name you will use in your source code to
-                // import this module (e.g. `@import("VAR")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
                 .{ .name = "VAR", .module = mod },
             },
         }),
     });
+
+    // Add ghostty-vt dependency
+    const ghostty_dep = b.dependency("ghostty", .{
+        .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = target.query.cpu_arch }),
+        .optimize = optimize,
+        .@"app-runtime" = .none,
+    });
+    const ghostty_vt = ghostty_dep.module("ghostty-vt");
+    exe.root_module.addImport("ghostty-vt", ghostty_vt);
+    mod.addImport("ghostty-vt", ghostty_vt);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
