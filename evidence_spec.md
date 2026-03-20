@@ -51,7 +51,7 @@ The `cell_digest` MUST be calculated using a **Top-to-Bottom, Left-to-Right** (R
 
 For each cell in the grid:
 ```text
-digest_input += cell.codepoint_utf8     // UTF-8 bytes, null-padded to 4 bytes
+digest_input += cell.codepoint_utf8     // UTF-8 encoded into a zero-initialized [4]u8 (left-aligned, not UTF-32)
 digest_input += cell.fg_color_rgb       // R, G, B (3 bytes)
 digest_input += cell.bg_color_rgb       // R, G, B (3 bytes)
 digest_input += cell.attrs_u8           // 1 byte bitmask

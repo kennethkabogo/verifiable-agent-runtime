@@ -78,9 +78,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add ghostty-vt dependency
+    // Add ghostty-vt dependency.
+    // When the user targets Linux (e.g. cross-compiling for the enclave), pass
+    // the resolved target through unchanged. On non-Linux hosts building natively
+    // we still honour the requested target rather than forcing .linux, which would
+    // break a native macOS/Windows dev build.
+    const ghostty_target = if (target.result.os.tag == .linux)
+        target
+    else
+        b.resolveTargetQuery(target.query);
     const ghostty_dep = b.dependency("ghostty", .{
-        .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = target.query.cpu_arch }),
+        .target = ghostty_target,
         .optimize = optimize,
         .@"app-runtime" = .none,
     });

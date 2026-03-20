@@ -1,17 +1,30 @@
 const std = @import("std");
 const VerifiableTerminal = @import("vt.zig").VerifiableTerminal;
 
-/// SecureLogger handles the PTY master logic and provides a verifiable hash chain 
+/// SecureLogger handles the PTY master logic and provides a verifiable hash chain
 /// of both the terminal stream and the reconstructed terminal state.
 pub const SecureLogger = struct {
     allocator: std.mem.Allocator,
     stream_hash: [32]u8,
     vt: VerifiableTerminal,
 
-    pub fn init(allocator: std.mem.Allocator) !SecureLogger {
+    /// init anchors the hash chain to the session by computing the Bootstrap Nonce
+    /// as the initial stream hash value (spec §1.2):
+    ///   H_stream[0] = SHA-256(AttestationDoc || SessionID)
+    pub fn init(
+        allocator: std.mem.Allocator,
+        attestation_doc: []const u8,
+        session_id: [16]u8,
+    ) !SecureLogger {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(attestation_doc);
+        hasher.update(&session_id);
+        var bootstrap_nonce: [32]u8 = undefined;
+        hasher.final(&bootstrap_nonce);
+
         return SecureLogger{
             .allocator = allocator,
-            .stream_hash = [_]u8{0} ** 32,
+            .stream_hash = bootstrap_nonce,
             .vt = try VerifiableTerminal.init(allocator, 80, 24),
         };
     }
@@ -26,15 +39,14 @@ pub const SecureLogger = struct {
         return result;
     }
 
-    /// Appends new output chunk and updates the hash chain.
+    /// Appends a new output chunk and advances the hash chain (spec §2.1):
+    ///   H_stream[n] = SHA-256(H_stream[n-1] || data_chunk[n])
     pub fn logOutput(self: *SecureLogger, data: []const u8) !void {
-        // 1. Update Stream Hash (the raw byte chain)
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(&self.stream_hash);
         hasher.update(data);
         hasher.final(&self.stream_hash);
 
-        // 2. Update Terminal State Machine
         self.vt.processInput(data);
     }
 
