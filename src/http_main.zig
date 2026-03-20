@@ -32,7 +32,8 @@ pub fn main() !void {
     defer protocol.deinit();
 
     // 2. Anchor the L1 hash chain to this session via the bootstrap nonce.
-    var logger = try SecureLogger.init(allocator, protocol.quote.doc, protocol.session_id);
+    //    Pass the keypair so every evidence bundle carries a real Ed25519 signature.
+    var logger = try SecureLogger.init(allocator, protocol.quote.doc, protocol.session_id, protocol.keypair);
 
     // 3. Compute and store the bootstrap nonce so GET /session can expose it
     //    to external verifiers: bootstrap_nonce = SHA-256(attestation_doc || session_id)

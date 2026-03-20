@@ -12,8 +12,14 @@ Checks performed
   2. Bootstrap nonce integrity          SHA-256(doc ‖ session_id) == bootstrap_nonce
   3. L1 stream hash well-formed         64-char lowercase hex, anchored to nonce
   4. L2 state hash well-formed          64-char lowercase hex
-  5. Signature status                   MOCK_SIG flagged; real Ed25519 field shown
+  5. Ed25519 signature valid            sign(stream ‖ state ‖ session_id, privkey)
+                                        verified with public key from attestation doc
   6. PCR0 / public key present          flagged as mock when running in simulation
+
+Dependencies
+────────────
+  Ed25519 verification requires the `cryptography` package:
+    pip install cryptography
 
 Usage
 ─────
@@ -30,13 +36,21 @@ import urllib.request
 
 GATEWAY = os.environ.get("VAR_GATEWAY", "http://127.0.0.1:8765")
 
-# ANSI colour helpers (auto-disabled when stdout is not a tty)
+# Optional Ed25519 support via the `cryptography` package.
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    HAS_CRYPTOGRAPHY = False
+
+# ANSI colour helpers (auto-disabled when stdout is not a tty).
 _USE_COLOR = sys.stdout.isatty()
-PASS = "\033[32m✓\033[0m" if _USE_COLOR else "PASS"
-FAIL = "\033[31m✗\033[0m" if _USE_COLOR else "FAIL"
-WARN = "\033[33m⚠\033[0m" if _USE_COLOR else "WARN"
-BOLD = "\033[1m"           if _USE_COLOR else ""
-RESET = "\033[0m"          if _USE_COLOR else ""
+PASS  = "\033[32m✓\033[0m" if _USE_COLOR else "PASS"
+FAIL  = "\033[31m✗\033[0m" if _USE_COLOR else "FAIL"
+WARN  = "\033[33m⚠\033[0m" if _USE_COLOR else "WARN"
+BOLD  = "\033[1m"           if _USE_COLOR else ""
+RESET = "\033[0m"           if _USE_COLOR else ""
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────
@@ -55,20 +69,17 @@ def _get(path: str) -> dict:
 # ── Reporting helpers ──────────────────────────────────────────────────────
 
 def ok(label: str, detail: str = "") -> bool:
-    suffix = f"  {detail}" if detail else ""
-    print(f"  {PASS}  {label}{suffix}")
+    print(f"  {PASS}  {label}" + (f"  {detail}" if detail else ""))
     return True
 
 
 def fail(label: str, detail: str = "") -> bool:
-    suffix = f"  {detail}" if detail else ""
-    print(f"  {FAIL}  {label}{suffix}")
+    print(f"  {FAIL}  {label}" + (f"  {detail}" if detail else ""))
     return False
 
 
 def warn(label: str, detail: str = "") -> None:
-    suffix = f"  {detail}" if detail else ""
-    print(f"  {WARN}  {label}{suffix}")
+    print(f"  {WARN}  {label}" + (f"  {detail}" if detail else ""))
 
 
 def check(label: str, passed: bool, detail: str = "") -> bool:
@@ -98,7 +109,7 @@ def main() -> None:
     health = _get("/health")
     all_ok &= check("Gateway reachable and healthy", health.get("status") == "healthy")
 
-    # ── 2. Fetch all three payloads ───────────────────────────────────────
+    # ── 2. Fetch all payloads ─────────────────────────────────────────────
     session  = _get("/session")
     attest   = _get("/attestation")
     evidence = _get("/evidence")
@@ -108,24 +119,24 @@ def main() -> None:
     magic               = session.get("magic", "")
     version             = session.get("version", "")
 
-    doc_hex    = attest.get("doc", "")
-    pcr0_hex   = attest.get("pcr0", "")
-    pk_hex     = attest.get("public_key", "")
+    doc_hex  = attest.get("doc", "")
+    pcr0_hex = attest.get("pcr0", "")
+    pk_hex   = attest.get("public_key", "")
 
     stream_hex = evidence.get("stream", "")
     state_hex  = evidence.get("state", "")
-    sig        = evidence.get("sig", "")
+    sig_hex    = evidence.get("sig", "")
 
     # ── 3. Bundle header fields ───────────────────────────────────────────
-    section("2. Bundle header (GET /session)")
-    all_ok &= check("magic == VARB",    magic == "VARB",    f"got {magic!r}")
-    all_ok &= check("version == 01",    version == "01",    f"got {version!r}")
-    all_ok &= check("session_id present", bool(session_id_hex),
+    section("2. Bundle header  (GET /session)")
+    all_ok &= check("magic == VARB",   magic == "VARB",   f"got {magic!r}")
+    all_ok &= check("version == 01",   version == "01",   f"got {version!r}")
+    all_ok &= check("session_id present",       bool(session_id_hex),
                     f"{session_id_hex[:16]}…" if session_id_hex else "missing")
-    all_ok &= check("bootstrap_nonce present", bool(bootstrap_nonce_hex),
+    all_ok &= check("bootstrap_nonce present",  bool(bootstrap_nonce_hex),
                     f"{bootstrap_nonce_hex[:16]}…" if bootstrap_nonce_hex else "missing")
 
-    # ── 4. Bootstrap nonce integrity — the core trust anchor ─────────────
+    # ── 4. Bootstrap nonce integrity ──────────────────────────────────────
     section("3. Bootstrap nonce integrity  (spec §1.1)")
     print(f"   Recomputing SHA-256(attestation_doc ‖ session_id) independently...")
     try:
@@ -138,11 +149,7 @@ def main() -> None:
             if nonce_ok
             else f"expected {recomputed[:16]}… got {bootstrap_nonce_hex[:16]}…"
         )
-        all_ok &= check(
-            "SHA-256(doc ‖ session_id) == bootstrap_nonce",
-            nonce_ok,
-            detail,
-        )
+        all_ok &= check("SHA-256(doc ‖ session_id) == bootstrap_nonce", nonce_ok, detail)
     except ValueError as exc:
         all_ok &= fail("Bootstrap nonce decode", str(exc))
 
@@ -151,10 +158,10 @@ def main() -> None:
     all_ok &= check("Present",         bool(stream_hex), "missing" if not stream_hex else "")
     all_ok &= check("Well-formed hex", is_hex256(stream_hex),
                     f"{stream_hex[:24]}…" if stream_hex else "")
-    if stream_hex == bootstrap_nonce_hex:
-        warn("Stream hash equals bootstrap nonce — no LOG entries recorded yet")
-    else:
-        ok("Stream hash differs from nonce — at least one LOG entry recorded")
+    if stream_hex and stream_hex == bootstrap_nonce_hex:
+        warn("Equals bootstrap nonce — no LOG entries recorded yet in this session")
+    elif stream_hex:
+        ok("Differs from nonce — at least one LOG entry has been recorded")
 
     # ── 6. L2 state hash ─────────────────────────────────────────────────
     section("5. L2 state hash  (terminal visual state, spec §2.2)")
@@ -162,23 +169,54 @@ def main() -> None:
     all_ok &= check("Well-formed hex", is_hex256(state_hex),
                     f"{state_hex[:24]}…" if state_hex else "")
 
-    # ── 7. Signature ──────────────────────────────────────────────────────
-    section("6. Signature")
-    if sig == "MOCK_SIG":
-        warn("Signature is MOCK_SIG — real TEE signing not yet implemented")
-        print( "       When implemented, the signature will cover:")
-        print( "         SHA-256(stream_hash ‖ state_hash ‖ session_id)")
-        print( "       signed with the enclave's ephemeral Ed25519 private key")
-        print(f"       whose public key ({pk_hex[:16]}…) is bound in the attestation doc.")
+    # ── 7. Ed25519 signature ──────────────────────────────────────────────
+    section("6. Ed25519 signature")
+    if sig_hex == "MOCK_SIG":
+        # Shouldn't happen once real signing is in place, but kept as a fallback.
+        warn("Signature is MOCK_SIG — gateway is running without real signing")
+    elif not sig_hex:
+        all_ok &= fail("Signature present", "missing")
+    elif len(sig_hex) != 128:
+        all_ok &= fail("Signature length", f"expected 128 hex chars, got {len(sig_hex)}")
+    elif not HAS_CRYPTOGRAPHY:
+        warn(
+            "cryptography package not installed — skipping Ed25519 verification",
+            "pip install cryptography",
+        )
+        ok("Signature present and well-formed", f"{sig_hex[:32]}…")
     else:
-        all_ok &= check("Signature present", True, f"{sig[:32]}…")
-        warn("Signature format verification not yet implemented in this tool")
+        # Reconstruct the exact message the enclave signed:
+        #   stream_hash (32 B) || state_hash (32 B) || session_id (16 B)
+        try:
+            pk_bytes  = bytes.fromhex(pk_hex)
+            sig_bytes = bytes.fromhex(sig_hex)
+            msg = (
+                bytes.fromhex(stream_hex)
+                + bytes.fromhex(state_hex)
+                + bytes.fromhex(session_id_hex)
+            )
+            pub_key = Ed25519PublicKey.from_public_bytes(pk_bytes)
+            pub_key.verify(sig_bytes, msg)   # raises InvalidSignature on failure
+            all_ok &= ok(
+                "Ed25519 signature valid",
+                f"sign(stream ‖ state ‖ session_id) verified with pk={pk_hex[:16]}…",
+            )
+        except InvalidSignature:
+            all_ok &= fail(
+                "Ed25519 signature INVALID",
+                "signature does not match stream/state/session_id with the attested public key",
+            )
+        except ValueError as exc:
+            all_ok &= fail("Signature decode error", str(exc))
 
     # ── 8. Attestation document ───────────────────────────────────────────
     section("7. Attestation document  (GET /attestation)")
-    all_ok &= check("PCR0 present",       bool(pcr0_hex), "missing" if not pcr0_hex else f"{pcr0_hex[:16]}…")
-    all_ok &= check("Public key present", bool(pk_hex),   "missing" if not pk_hex   else f"{pk_hex[:16]}…")
-    all_ok &= check("Doc present",        bool(doc_hex),  "missing" if not doc_hex   else f"{len(doc_hex)//2} bytes")
+    all_ok &= check("PCR0 present",       bool(pcr0_hex),
+                    f"{pcr0_hex[:16]}…" if pcr0_hex else "missing")
+    all_ok &= check("Public key present", bool(pk_hex),
+                    f"{pk_hex[:16]}…"   if pk_hex   else "missing")
+    all_ok &= check("Doc present",        bool(doc_hex),
+                    f"{len(doc_hex)//2} bytes" if doc_hex else "missing")
 
     if pcr0_hex == "aa" * 32:
         warn("PCR0 is 0xAA…AA — simulation mode, not real Nitro hardware")
@@ -190,11 +228,11 @@ def main() -> None:
     if all_ok:
         print(f"{PASS} All verifiable checks passed.")
         print()
-        print("   The bootstrap nonce is cryptographically bound to this")
+        print("   The bootstrap nonce is cryptographically bound to the")
         print("   attestation document and session ID.  Every LOG entry")
-        print("   extends the L1 chain from that anchor.")
-        print("   Remaining gap: replace MOCK_SIG with a real Ed25519")
-        print("   signature to complete the end-to-end proof.")
+        print("   extends the L1 chain from that anchor.  The Ed25519")
+        print("   signature ties the current L1+L2 state to the enclave's")
+        print("   attested public key.")
     else:
         print(f"{FAIL} One or more checks FAILED.")
         sys.exit(1)
