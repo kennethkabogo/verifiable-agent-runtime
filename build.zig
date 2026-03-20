@@ -96,6 +96,30 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("ghostty-vt", ghostty_vt);
     mod.addImport("ghostty-vt", ghostty_vt);
 
+    // HTTP gateway executable — same session bootstrap as VAR but exposes a
+    // REST-ish API on loopback so any co-located skill (Python, JS, …) can
+    // participate in the verifiable evidence chain without speaking the custom
+    // vsock line protocol.
+    const gateway_exe = b.addExecutable(.{
+        .name = "VAR-gateway",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "VAR", .module = mod },
+            },
+        }),
+    });
+    gateway_exe.root_module.addImport("ghostty-vt", ghostty_vt);
+    b.installArtifact(gateway_exe);
+
+    const run_gateway_cmd = b.addRunArtifact(gateway_exe);
+    run_gateway_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_gateway_cmd.addArgs(args);
+    const run_gateway_step = b.step("run-gateway", "Run the HTTP gateway");
+    run_gateway_step.dependOn(&run_gateway_cmd.step);
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden

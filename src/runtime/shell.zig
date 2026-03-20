@@ -7,6 +7,7 @@ pub const SecureLogger = struct {
     allocator: std.mem.Allocator,
     stream_hash: [32]u8,
     vt: VerifiableTerminal,
+    mutex: std.Thread.Mutex = .{},
 
     /// init anchors the hash chain to the session by computing the Bootstrap Nonce
     /// as the initial stream hash value (spec §1.2):
@@ -42,6 +43,9 @@ pub const SecureLogger = struct {
     /// Appends a new output chunk and advances the hash chain (spec §2.1):
     ///   H_stream[n] = SHA-256(H_stream[n-1] || data_chunk[n])
     pub fn logOutput(self: *SecureLogger, data: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(&self.stream_hash);
         hasher.update(data);
@@ -51,7 +55,11 @@ pub const SecureLogger = struct {
     }
 
     /// Generates a signed bundle of the stream hash and the current terminal state.
+    /// Returns an allocated string in the vsock line-protocol format.
     pub fn getEvidenceBundle(self: *SecureLogger) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const state_digest = self.vt.digestState();
         const stream_h = try hex(self.allocator, &self.stream_hash);
         defer self.allocator.free(stream_h);
@@ -62,5 +70,22 @@ pub const SecureLogger = struct {
             stream_h,
             state_h,
         });
+    }
+
+    /// Returns the evidence bundle as a JSON object for the HTTP gateway.
+    /// Caller must free the returned slice using `allocator`.
+    pub fn getEvidenceBundleJson(self: *SecureLogger, allocator: std.mem.Allocator) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const state_digest = self.vt.digestState();
+        const stream_h = try hex(allocator, &self.stream_hash);
+        defer allocator.free(stream_h);
+        const state_h = try hex(allocator, &state_digest);
+        defer allocator.free(state_h);
+
+        return std.fmt.allocPrint(allocator,
+            \\{{"stream":"{s}","state":"{s}","sig":"MOCK_SIG"}}
+        , .{ stream_h, state_h });
     }
 };
