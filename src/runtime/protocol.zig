@@ -1,6 +1,7 @@
 const std = @import("std");
 const AttestationQuote = @import("attestation.zig").AttestationQuote;
 const SecureVault = @import("vault.zig").SecureVault;
+const Ed25519 = std.crypto.sign.Ed25519;
 
 /// ProtocolHandler manages the secure handshake between the host and the enclave.
 pub const ProtocolHandler = struct {
@@ -8,9 +9,15 @@ pub const ProtocolHandler = struct {
     vault: *SecureVault,
     session_id: [16]u8,
     quote: AttestationQuote,
+    /// Ephemeral Ed25519 signing keypair generated fresh for every session.
+    /// The public key is bound into the attestation document so a verifier can
+    /// confirm that any signature originated from inside this enclave instance.
+    /// The private key never leaves the enclave process.
+    keypair: Ed25519.KeyPair,
 
-    /// init generates a UUID v4 session ID and requests an attestation quote from
-    /// the NSM (real hardware) or the mock fallback (simulation / CI).
+    /// init generates a UUID v4 session ID, an ephemeral Ed25519 keypair, and
+    /// requests an attestation quote from the NSM (real hardware) or the mock
+    /// fallback (simulation / CI).
     pub fn init(allocator: std.mem.Allocator, vault: *SecureVault) !ProtocolHandler {
         // UUID v4: 128 random bits with version/variant nibbles set per RFC 4122.
         var session_id: [16]u8 = undefined;
@@ -18,8 +25,10 @@ pub const ProtocolHandler = struct {
         session_id[6] = (session_id[6] & 0x0f) | 0x40; // version = 4
         session_id[8] = (session_id[8] & 0x3f) | 0x80; // variant = 10xx
 
-        // Ephemeral enclave public key (mock; real key would come from key generation).
-        const pk = [_]u8{0x12} ** 32;
+        // Generate a fresh ephemeral keypair.  The public key is bound into the
+        // attestation quote so the NSM (or mock) can certify it.
+        const keypair = try Ed25519.KeyPair.generate();
+        const pk = keypair.public_key.toBytes();
         const quote = try AttestationQuote.generate(allocator, pk);
 
         return ProtocolHandler{
@@ -27,6 +36,7 @@ pub const ProtocolHandler = struct {
             .vault = vault,
             .session_id = session_id,
             .quote = quote,
+            .keypair = keypair,
         };
     }
 

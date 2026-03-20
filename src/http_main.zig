@@ -32,25 +32,36 @@ pub fn main() !void {
     defer protocol.deinit();
 
     // 2. Anchor the L1 hash chain to this session via the bootstrap nonce.
-    var logger = try SecureLogger.init(allocator, protocol.quote.doc, protocol.session_id);
+    //    Pass the keypair so every evidence bundle carries a real Ed25519 signature.
+    var logger = try SecureLogger.init(allocator, protocol.quote.doc, protocol.session_id, protocol.keypair);
 
-    // 3. Emit the session root-of-trust header so operators can record it.
+    // 3. Compute and store the bootstrap nonce so GET /session can expose it
+    //    to external verifiers: bootstrap_nonce = SHA-256(attestation_doc || session_id)
+    var bn_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    bn_hasher.update(protocol.quote.doc);
+    bn_hasher.update(&protocol.session_id);
+    var bootstrap_nonce: [32]u8 = undefined;
+    bn_hasher.final(&bootstrap_nonce);
+
+    // 4. Emit the session root-of-trust header so operators can record it.
     const header = try protocol.prepareHandshake();
     defer allocator.free(header);
     std.log.info("[VAR-gateway] Session root: {s}", .{header});
 
-    // 4. Resolve bind address from environment or use the default.
+    // 5. Resolve bind address from environment or use the default.
     const host = std.posix.getenv("VAR_HOST") orelse "127.0.0.1";
     const port_str = std.posix.getenv("VAR_PORT") orelse "8765";
     const port = std.fmt.parseInt(u16, port_str, 10) catch 8765;
 
-    // 5. Start HTTP gateway — blocks forever serving skills.
+    // 6. Start HTTP gateway — blocks forever serving skills.
     var gw = http.GatewayServer.init(
         allocator,
         .{ .host = host, .port = port },
         &vault,
         &logger,
         &protocol.quote,
+        protocol.session_id,
+        bootstrap_nonce,
     );
     try gw.serve();
 }

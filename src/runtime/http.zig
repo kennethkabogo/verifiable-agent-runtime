@@ -11,6 +11,7 @@
 ///   POST /log            {"msg":"…"}  (+X-Skill-Id header)  → 200 {"status":"ok"}
 ///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…"}
 ///   GET  /attestation                                        → 200 {"pcr0":"…","public_key":"…","doc":"…"}
+///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01"}
 ///   GET  /health                                             → 200 {"status":"healthy"}
 ///
 const std = @import("std");
@@ -39,6 +40,11 @@ pub const GatewayServer = struct {
     vault: *SecureVault,
     logger: *SecureLogger,
     quote: *AttestationQuote,
+    /// UUID v4 session identifier (16 raw bytes).
+    session_id: [16]u8,
+    /// Bootstrap nonce = SHA-256(attestation_doc ‖ session_id).
+    /// Exposed via GET /session so an external verifier can recompute and confirm it.
+    bootstrap_nonce: [32]u8,
 
     pub fn init(
         allocator: Allocator,
@@ -46,6 +52,8 @@ pub const GatewayServer = struct {
         vault: *SecureVault,
         logger: *SecureLogger,
         quote: *AttestationQuote,
+        session_id: [16]u8,
+        bootstrap_nonce: [32]u8,
     ) GatewayServer {
         return .{
             .allocator = allocator,
@@ -53,6 +61,8 @@ pub const GatewayServer = struct {
             .vault = vault,
             .logger = logger,
             .quote = quote,
+            .session_id = session_id,
+            .bootstrap_nonce = bootstrap_nonce,
         };
     }
 
@@ -180,6 +190,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleEvidence(server, stream, req);
     if (get and mem.eql(u8, req.path, "/attestation"))
         return handleAttestation(server, stream, req);
+    if (get and mem.eql(u8, req.path, "/session"))
+        return handleSession(server, stream, req);
     if (get and mem.eql(u8, req.path, "/health"))
         return writeResponse(stream, 200, "{\"status\":\"healthy\"}");
 
@@ -242,6 +254,22 @@ fn handleAttestation(server: *GatewayServer, stream: net.Stream, req: ParsedRequ
         server.allocator,
         "{{\"pcr0\":\"{s}\",\"public_key\":\"{s}\",\"doc\":\"{s}\"}}",
         .{ pcr0_h, pk_h, doc_h },
+    );
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
+}
+
+fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    _ = req;
+    const sid_h = try fmtHex(server.allocator, &server.session_id);
+    defer server.allocator.free(sid_h);
+    const nonce_h = try fmtHex(server.allocator, &server.bootstrap_nonce);
+    defer server.allocator.free(nonce_h);
+
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"session_id\":\"{s}\",\"bootstrap_nonce\":\"{s}\",\"magic\":\"VARB\",\"version\":\"01\"}}",
+        .{ sid_h, nonce_h },
     );
     defer server.allocator.free(body);
     try writeResponse(stream, 200, body);
