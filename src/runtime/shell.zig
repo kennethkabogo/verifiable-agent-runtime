@@ -9,6 +9,10 @@ pub const SecureLogger = struct {
     stream_hash: [32]u8,
     vt: VerifiableTerminal,
     mutex: std.Thread.Mutex = .{},
+    /// Monotonically increasing counter incremented on every evidence emission.
+    /// Included in the signed message so each bundle is unique even when the
+    /// stream state has not changed, and a verifier can detect skipped packets.
+    sequence: u64,
     /// Ephemeral Ed25519 keypair used to sign each evidence bundle.
     /// The corresponding public key is bound in the session's attestation quote.
     keypair: Ed25519.KeyPair,
@@ -16,28 +20,29 @@ pub const SecureLogger = struct {
     /// signature to a specific session without trusting the gateway.
     session_id: [16]u8,
 
-    /// init anchors the hash chain to the session by computing the Bootstrap Nonce
-    /// as the initial stream hash value (spec §1.2):
-    ///   H_stream[0] = SHA-256(AttestationDoc || SessionID)
+    /// init anchors the hash chain to the session.  The caller passes the
+    /// pre-computed bootstrap_nonce (SHA-256(attestation_doc || session_id))
+    /// from ProtocolHandler so the value is never computed more than once.
+    ///
+    ///   H_stream[0] = bootstrap_nonce   (spec §1.2)
     pub fn init(
         allocator: std.mem.Allocator,
-        attestation_doc: []const u8,
+        bootstrap_nonce: [32]u8,
         session_id: [16]u8,
         keypair: Ed25519.KeyPair,
     ) !SecureLogger {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(attestation_doc);
-        hasher.update(&session_id);
-        var bootstrap_nonce: [32]u8 = undefined;
-        hasher.final(&bootstrap_nonce);
-
         return SecureLogger{
             .allocator = allocator,
             .stream_hash = bootstrap_nonce,
             .vt = try VerifiableTerminal.init(allocator, 80, 24),
+            .sequence = 0,
             .keypair = keypair,
             .session_id = session_id,
         };
+    }
+
+    pub fn deinit(self: *SecureLogger) void {
+        self.vt.deinit();
     }
 
     fn hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -64,18 +69,21 @@ pub const SecureLogger = struct {
         self.vt.processInput(data);
     }
 
-    /// Signs the current stream and state hashes with the session keypair.
+    /// Signs the current stream hash, state hash, session ID, and sequence
+    /// number with the session keypair.
     ///
-    /// Message = stream_hash (32 B) || state_hash (32 B) || session_id (16 B)
+    /// Message layout (88 bytes):
+    ///   stream_hash (32) || state_hash (32) || session_id (16) || sequence (8, LE)
     ///
-    /// This binds the signature to both the full log history (L1) and the
-    /// current terminal visual state (L2), and ties it to this specific session
-    /// so replaying signatures across sessions is impossible.
-    fn signEvidence(self: *SecureLogger, stream_hash: [32]u8, state_hash: [32]u8) !Ed25519.Signature {
-        var msg: [80]u8 = undefined;
+    /// Including the sequence makes each bundle's signature unique even when
+    /// the stream state hasn't changed, and lets a verifier detect replay or
+    /// skipped packets.
+    fn signEvidence(self: *SecureLogger, stream_hash: [32]u8, state_hash: [32]u8, sequence: u64) !Ed25519.Signature {
+        var msg: [88]u8 = undefined;
         @memcpy(msg[0..32], &stream_hash);
         @memcpy(msg[32..64], &state_hash);
         @memcpy(msg[64..80], &self.session_id);
+        std.mem.writeInt(u64, msg[80..88], sequence, .little);
         return self.keypair.sign(&msg, null);
     }
 
@@ -85,8 +93,11 @@ pub const SecureLogger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        self.sequence += 1;
+        const seq = self.sequence;
+
         const state_digest = self.vt.digestState();
-        const sig = try self.signEvidence(self.stream_hash, state_digest);
+        const sig = try self.signEvidence(self.stream_hash, state_digest, seq);
         const sig_bytes = sig.toBytes();
 
         const stream_h = try hex(self.allocator, &self.stream_hash);
@@ -96,10 +107,11 @@ pub const SecureLogger = struct {
         const sig_h = try hex(self.allocator, &sig_bytes);
         defer self.allocator.free(sig_h);
 
-        return std.fmt.allocPrint(self.allocator, "EVIDENCE:stream={s}:state={s}:sig={s}", .{
+        return std.fmt.allocPrint(self.allocator, "EVIDENCE:stream={s}:state={s}:sig={s}:seq={d}", .{
             stream_h,
             state_h,
             sig_h,
+            seq,
         });
     }
 
@@ -109,8 +121,11 @@ pub const SecureLogger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        self.sequence += 1;
+        const seq = self.sequence;
+
         const state_digest = self.vt.digestState();
-        const sig = try self.signEvidence(self.stream_hash, state_digest);
+        const sig = try self.signEvidence(self.stream_hash, state_digest, seq);
         const sig_bytes = sig.toBytes();
 
         const stream_h = try hex(allocator, &self.stream_hash);
@@ -121,7 +136,7 @@ pub const SecureLogger = struct {
         defer allocator.free(sig_h);
 
         return std.fmt.allocPrint(allocator,
-            \\{{"stream":"{s}","state":"{s}","sig":"{s}"}}
-        , .{ stream_h, state_h, sig_h });
+            \\{{"stream":"{s}","state":"{s}","sig":"{s}","sequence":{d}}}
+        , .{ stream_h, state_h, sig_h, seq });
     }
 };

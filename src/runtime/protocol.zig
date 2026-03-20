@@ -8,6 +8,10 @@ pub const ProtocolHandler = struct {
     allocator: std.mem.Allocator,
     vault: *SecureVault,
     session_id: [16]u8,
+    /// Bootstrap Nonce = SHA-256(attestation_doc || session_id).
+    /// Computed once in init() and reused by both the bundle header and the
+    /// SecureLogger so there is a single authoritative value for the session.
+    bootstrap_nonce: [32]u8,
     quote: AttestationQuote,
     /// Ephemeral Ed25519 signing keypair generated fresh for every session.
     /// The public key is bound into the attestation document so a verifier can
@@ -17,7 +21,8 @@ pub const ProtocolHandler = struct {
 
     /// init generates a UUID v4 session ID, an ephemeral Ed25519 keypair, and
     /// requests an attestation quote from the NSM (real hardware) or the mock
-    /// fallback (simulation / CI).
+    /// fallback (simulation / CI).  The bootstrap nonce is computed here, once,
+    /// so every downstream consumer uses the identical value.
     pub fn init(allocator: std.mem.Allocator, vault: *SecureVault) !ProtocolHandler {
         // UUID v4: 128 random bits with version/variant nibbles set per RFC 4122.
         var session_id: [16]u8 = undefined;
@@ -31,10 +36,20 @@ pub const ProtocolHandler = struct {
         const pk = keypair.public_key.toBytes();
         const quote = try AttestationQuote.generate(allocator, pk);
 
+        // Bootstrap Nonce = SHA-256(AttestationDoc || SessionID).
+        // Computed once here so the logger, the bundle header, and the HTTP
+        // gateway all share the same value rather than recomputing independently.
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(quote.doc);
+        hasher.update(&session_id);
+        var bootstrap_nonce: [32]u8 = undefined;
+        hasher.final(&bootstrap_nonce);
+
         return ProtocolHandler{
             .allocator = allocator,
             .vault = vault,
             .session_id = session_id,
+            .bootstrap_nonce = bootstrap_nonce,
             .quote = quote,
             .keypair = keypair,
         };
@@ -53,16 +68,9 @@ pub const ProtocolHandler = struct {
     ///   Bootstrap Nonce SHA-256(AttestationDoc || SessionID)  (32 bytes)
     ///   Attestation Doc raw doc bytes
     pub fn prepareHandshake(self: *ProtocolHandler) ![]u8 {
-        // Bootstrap Nonce = SHA-256(AttestationDoc || SessionID)
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(self.quote.doc);
-        hasher.update(&self.session_id);
-        var bootstrap_nonce: [32]u8 = undefined;
-        hasher.final(&bootstrap_nonce);
-
         const sid_h = try hex(self.allocator, &self.session_id);
         defer self.allocator.free(sid_h);
-        const nonce_h = try hex(self.allocator, &bootstrap_nonce);
+        const nonce_h = try hex(self.allocator, &self.bootstrap_nonce);
         defer self.allocator.free(nonce_h);
         const quote_str = try self.quote.serialize(self.allocator);
         defer self.allocator.free(quote_str);

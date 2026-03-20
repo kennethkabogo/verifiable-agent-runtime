@@ -31,19 +31,13 @@ pub fn main() !void {
     var protocol = try ProtocolHandler.init(allocator, &vault);
     defer protocol.deinit();
 
-    // 2. Anchor the L1 hash chain to this session via the bootstrap nonce.
-    //    Pass the keypair so every evidence bundle carries a real Ed25519 signature.
-    var logger = try SecureLogger.init(allocator, protocol.quote.doc, protocol.session_id, protocol.keypair);
+    // 2. Anchor the L1 hash chain to this session.  bootstrap_nonce was computed
+    //    once in ProtocolHandler.init() — pass it directly so the logger, the
+    //    bundle header, and GET /session all expose the identical value.
+    var logger = try SecureLogger.init(allocator, protocol.bootstrap_nonce, protocol.session_id, protocol.keypair);
+    defer logger.deinit();
 
-    // 3. Compute and store the bootstrap nonce so GET /session can expose it
-    //    to external verifiers: bootstrap_nonce = SHA-256(attestation_doc || session_id)
-    var bn_hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    bn_hasher.update(protocol.quote.doc);
-    bn_hasher.update(&protocol.session_id);
-    var bootstrap_nonce: [32]u8 = undefined;
-    bn_hasher.final(&bootstrap_nonce);
-
-    // 4. Emit the session root-of-trust header so operators can record it.
+    // 3. Emit the session root-of-trust header so operators can record it.
     const header = try protocol.prepareHandshake();
     defer allocator.free(header);
     std.log.info("[VAR-gateway] Session root: {s}", .{header});
@@ -61,7 +55,7 @@ pub fn main() !void {
         &logger,
         &protocol.quote,
         protocol.session_id,
-        bootstrap_nonce,
+        protocol.bootstrap_nonce,
     );
     try gw.serve();
 }

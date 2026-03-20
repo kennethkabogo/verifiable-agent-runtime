@@ -126,6 +126,7 @@ def main() -> None:
     stream_hex = evidence.get("stream", "")
     state_hex  = evidence.get("state", "")
     sig_hex    = evidence.get("sig", "")
+    sequence   = evidence.get("sequence", None)
 
     # ── 3. Bundle header fields ───────────────────────────────────────────
     section("2. Bundle header  (GET /session)")
@@ -153,7 +154,7 @@ def main() -> None:
     except ValueError as exc:
         all_ok &= fail("Bootstrap nonce decode", str(exc))
 
-    # ── 5. L1 stream hash ─────────────────────────────────────────────────
+    # ── 5. L1 stream hash + sequence ──────────────────────────────────────
     section("4. L1 stream hash  (PTY byte-stream chain, spec §2.1)")
     all_ok &= check("Present",         bool(stream_hex), "missing" if not stream_hex else "")
     all_ok &= check("Well-formed hex", is_hex256(stream_hex),
@@ -162,6 +163,8 @@ def main() -> None:
         warn("Equals bootstrap nonce — no LOG entries recorded yet in this session")
     elif stream_hex:
         ok("Differs from nonce — at least one LOG entry has been recorded")
+    all_ok &= check("Sequence number present", sequence is not None,
+                    f"seq={sequence}" if sequence is not None else "missing")
 
     # ── 6. L2 state hash ─────────────────────────────────────────────────
     section("5. L2 state hash  (terminal visual state, spec §2.2)")
@@ -185,15 +188,18 @@ def main() -> None:
         )
         ok("Signature present and well-formed", f"{sig_hex[:32]}…")
     else:
-        # Reconstruct the exact message the enclave signed:
-        #   stream_hash (32 B) || state_hash (32 B) || session_id (16 B)
+        # Reconstruct the exact message the enclave signed (88 bytes):
+        #   stream_hash (32) || state_hash (32) || session_id (16) || sequence (8 LE)
         try:
+            import struct
             pk_bytes  = bytes.fromhex(pk_hex)
             sig_bytes = bytes.fromhex(sig_hex)
+            seq_bytes = struct.pack("<Q", sequence if sequence is not None else 0)
             msg = (
                 bytes.fromhex(stream_hex)
                 + bytes.fromhex(state_hex)
                 + bytes.fromhex(session_id_hex)
+                + seq_bytes
             )
             pub_key = Ed25519PublicKey.from_public_bytes(pk_bytes)
             pub_key.verify(sig_bytes, msg)   # raises InvalidSignature on failure
