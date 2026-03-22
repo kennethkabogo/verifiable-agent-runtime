@@ -83,14 +83,22 @@ pub const ProtocolHandler = struct {
     }
 
     /// Step 2: Processes incoming encrypted secrets from the host.
-    /// Format: "SECRET:<key>:<encrypted_val>"
+    /// Format: "SECRET:<key>:<value>"
+    ///
+    /// The value may itself contain colons (e.g. URLs, base64, JWT tokens) so
+    /// we only split on the first two delimiters and treat the remainder of the
+    /// line as the value verbatim.
     pub fn handleSecrets(self: *ProtocolHandler, packet: []const u8) !void {
-        var it = std.mem.tokenizeScalar(u8, packet, ':');
-        const prefix = it.next() orelse return error.InvalidPacket;
-        if (!std.mem.eql(u8, prefix, "SECRET")) return;
+        const prefix_end = std.mem.indexOfScalar(u8, packet, ':') orelse return error.InvalidPacket;
+        if (!std.mem.eql(u8, packet[0..prefix_end], "SECRET")) return;
 
-        const key = it.next() orelse return error.InvalidKey;
-        const secret = it.next() orelse return error.InvalidSecret;
+        const rest = packet[prefix_end + 1 ..];
+        const key_end = std.mem.indexOfScalar(u8, rest, ':') orelse return error.InvalidKey;
+        const key = rest[0..key_end];
+        const secret = rest[key_end + 1 ..];
+
+        if (key.len == 0) return error.InvalidKey;
+        if (secret.len == 0) return error.InvalidSecret;
 
         // In a real TEE, we would decrypt the secret using our private key here.
         // For simulation, we assume the host sent it in cleartext or we "auto-decrypt".

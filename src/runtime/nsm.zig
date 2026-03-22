@@ -122,39 +122,45 @@ fn encodeCborRequest(
     var pos: usize = 0;
 
     // Outer map: 1 entry  {"Attestation": ...}
+    if (pos + 1 > buf.len) return error.CborBufferOverflow;
     buf[pos] = 0xa1;
     pos += 1;
 
     // Key: text "Attestation" (length 11 → 0x6b)
-    pos = writeCborText(buf, pos, "Attestation");
+    pos = try writeCborText(buf, pos, "Attestation");
 
     // Count inner map entries (only present fields included)
     var inner_count: u8 = 0;
     if (nonce != null) inner_count += 1;
     if (public_key != null) inner_count += 1;
+    if (pos + 1 > buf.len) return error.CborBufferOverflow;
     buf[pos] = 0xa0 | inner_count;
     pos += 1;
 
     if (nonce) |n| {
-        pos = writeCborText(buf, pos, "nonce");
+        pos = try writeCborText(buf, pos, "nonce");
         pos = try writeCborBytes(buf, pos, n);
     }
     if (public_key) |pk| {
-        pos = writeCborText(buf, pos, "public_key");
+        pos = try writeCborText(buf, pos, "public_key");
         pos = try writeCborBytes(buf, pos, pk);
     }
 
     return pos;
 }
 
-fn writeCborText(buf: []u8, start: usize, s: []const u8) usize {
+/// Writes a CBOR text string into buf[start..].  Returns the new position.
+/// Returns error.CborBufferOverflow if the string does not fit.
+fn writeCborText(buf: []u8, start: usize, s: []const u8) !usize {
     var pos = start;
     const len = s.len;
     if (len < 24) {
+        if (pos + 1 + len > buf.len) return error.CborBufferOverflow;
         buf[pos] = 0x60 | @as(u8, @intCast(len));
         pos += 1;
     } else {
         // one-byte extended length (supports strings up to 255 bytes)
+        if (pos + 2 + len > buf.len) return error.CborBufferOverflow;
         buf[pos] = 0x78;
         pos += 1;
         buf[pos] = @intCast(len);
@@ -164,13 +170,17 @@ fn writeCborText(buf: []u8, start: usize, s: []const u8) usize {
     return pos + len;
 }
 
+/// Writes a CBOR byte string into buf[start..].  Returns the new position.
+/// Returns error.CborBufferOverflow or error.CborBytesTooLong on failure.
 fn writeCborBytes(buf: []u8, start: usize, b: []const u8) !usize {
     var pos = start;
     const len = b.len;
     if (len < 24) {
+        if (pos + 1 + len > buf.len) return error.CborBufferOverflow;
         buf[pos] = 0x40 | @as(u8, @intCast(len));
         pos += 1;
     } else if (len < 256) {
+        if (pos + 2 + len > buf.len) return error.CborBufferOverflow;
         buf[pos] = 0x58;
         pos += 1;
         buf[pos] = @intCast(len);

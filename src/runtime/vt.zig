@@ -61,7 +61,14 @@ pub const VerifiableTerminal = struct {
             while (x < width) : (x += 1) {
                 const pt = vt.point.Point{ .active = .{ .x = x, .y = y } };
                 // Ghostty uses a sparse Page system. We pin the active point to get the cell.
-                const pin = active_screen.pages.pin(pt).?;
+                // pin() returns null when the point falls outside the active page region
+                // (shouldn't happen with fixed 80×24 dimensions, but we emit zero bytes
+                // rather than panic so the digest stays deterministic and the enclave keeps
+                // running).
+                const pin = active_screen.pages.pin(pt) orelse {
+                    hasher.update(&[_]u8{0} ** (4 + 3 + 3 + 1)); // cp + fg + bg + attrs
+                    continue;
+                };
                 const rac = pin.rowAndCell();
                 const cell = rac.cell;
 
