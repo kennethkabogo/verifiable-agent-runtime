@@ -27,9 +27,11 @@ pub fn main() !void {
     var protocol = try ProtocolHandler.init(allocator, &vault);
     defer protocol.deinit();
 
-    // 2. Anchor the L1 hash chain to this session via the bootstrap nonce.
-    //    Pass the keypair so every evidence bundle carries a real Ed25519 signature.
-    var logger = try SecureLogger.init(allocator, protocol.quote.doc, protocol.session_id, protocol.keypair);
+    // 2. Anchor the L1 hash chain to this session.  bootstrap_nonce was computed
+    //    once in ProtocolHandler.init() — pass it directly so the logger and the
+    //    bundle header always use the identical value.
+    var logger = try SecureLogger.init(allocator, protocol.bootstrap_nonce, protocol.session_id, protocol.keypair);
+    defer logger.deinit();
 
     // 3. Listen for one incoming agent connection (vsock on Nitro, TCP in simulation).
     var server = try VsockServer.listen(5005);
