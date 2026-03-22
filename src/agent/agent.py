@@ -209,6 +209,7 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("  Evidence Bundle")
     print("=" * 60)
+    print(f"  Prev Hash  (L1-1): {ev_fields.get('prev_stream', '?')}")
     print(f"  Stream Hash (L1) : {ev_fields.get('stream', '?')}")
     print(f"  State Hash  (L2) : {ev_fields.get('state', '?')}")
     print(f"  Signature        : {ev_fields.get('sig', '?')}")

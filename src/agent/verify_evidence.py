@@ -123,10 +123,11 @@ def main() -> None:
     pcr0_hex = attest.get("pcr0", "")
     pk_hex   = attest.get("public_key", "")
 
-    stream_hex = evidence.get("stream", "")
-    state_hex  = evidence.get("state", "")
-    sig_hex    = evidence.get("sig", "")
-    sequence   = evidence.get("sequence", None)
+    prev_stream_hex = evidence.get("prev_stream", "")
+    stream_hex      = evidence.get("stream", "")
+    state_hex       = evidence.get("state", "")
+    sig_hex         = evidence.get("sig", "")
+    sequence        = evidence.get("sequence", None)
 
     # ── 3. Bundle header fields ───────────────────────────────────────────
     section("2. Bundle header  (GET /session)")
@@ -156,13 +157,17 @@ def main() -> None:
 
     # ── 5. L1 stream hash + sequence ──────────────────────────────────────
     section("4. L1 stream hash  (PTY byte-stream chain, spec §2.1)")
-    all_ok &= check("Present",         bool(stream_hex), "missing" if not stream_hex else "")
-    all_ok &= check("Well-formed hex", is_hex256(stream_hex),
+    all_ok &= check("prev_stream present",     bool(prev_stream_hex),
+                    "missing" if not prev_stream_hex else f"{prev_stream_hex[:24]}…")
+    all_ok &= check("prev_stream well-formed", is_hex256(prev_stream_hex),
+                    f"{prev_stream_hex[:24]}…" if prev_stream_hex else "")
+    all_ok &= check("stream present",          bool(stream_hex), "missing" if not stream_hex else "")
+    all_ok &= check("stream well-formed hex",  is_hex256(stream_hex),
                     f"{stream_hex[:24]}…" if stream_hex else "")
     if stream_hex and stream_hex == bootstrap_nonce_hex:
-        warn("Equals bootstrap nonce — no LOG entries recorded yet in this session")
+        warn("stream == bootstrap nonce — no LOG entries recorded yet in this session")
     elif stream_hex:
-        ok("Differs from nonce — at least one LOG entry has been recorded")
+        ok("stream differs from nonce — at least one LOG entry has been recorded")
     all_ok &= check("Sequence number present", sequence is not None,
                     f"seq={sequence}" if sequence is not None else "missing")
 
@@ -188,24 +193,41 @@ def main() -> None:
         )
         ok("Signature present and well-formed", f"{sig_hex[:32]}…")
     else:
-        # Reconstruct the exact message the enclave signed (88 bytes):
-        #   stream_hash (32) || state_hash (32) || session_id (16) || sequence (8 LE)
+        # Reconstruct the 161-byte message the enclave signed (spec §3.1 + snapshot ext):
+        #
+        #   Magic        ( 4)  b"VARE"
+        #   FormatVer    ( 1)  0x01
+        #   Sequence     ( 8)  u64 little-endian
+        #   PrevL1Hash   (32)  H_stream at the previous evidence emission
+        #   L1Hash       (32)  H_stream at this emission
+        #   L2Hash       (32)  terminal state digest
+        #   PayloadLen   ( 4)  u32 LE; 0 in snapshot mode (no discrete payload bytes)
+        #   SHA-256("")  (32)  SHA-256(b"") — snapshot mode: no payload bytes
+        #   SessionID    (16)  snapshot-mode extension binding sig to this session
+        #
+        # Total: 4+1+8+32+32+32+4+32+16 = 161 bytes
         try:
+            import hashlib
             import struct
             pk_bytes  = bytes.fromhex(pk_hex)
             sig_bytes = bytes.fromhex(sig_hex)
-            seq_bytes = struct.pack("<Q", sequence if sequence is not None else 0)
             msg = (
-                bytes.fromhex(stream_hex)
-                + bytes.fromhex(state_hex)
-                + bytes.fromhex(session_id_hex)
-                + seq_bytes
+                b"VARE"                                                        #  4
+                + bytes([0x01])                                                #  1
+                + struct.pack("<Q", sequence if sequence is not None else 0)   #  8
+                + bytes.fromhex(prev_stream_hex)                               # 32
+                + bytes.fromhex(stream_hex)                                    # 32
+                + bytes.fromhex(state_hex)                                     # 32
+                + struct.pack("<I", 0)                                         #  4
+                + hashlib.sha256(b"").digest()                                 # 32
+                + bytes.fromhex(session_id_hex)                                # 16
             )
+            assert len(msg) == 161, f"unexpected message length: {len(msg)}"
             pub_key = Ed25519PublicKey.from_public_bytes(pk_bytes)
             pub_key.verify(sig_bytes, msg)   # raises InvalidSignature on failure
             all_ok &= ok(
                 "Ed25519 signature valid",
-                f"sign(stream ‖ state ‖ session_id) verified with pk={pk_hex[:16]}…",
+                f"161-byte spec §3.1 message verified with pk={pk_hex[:16]}…",
             )
         except InvalidSignature:
             all_ok &= fail(
