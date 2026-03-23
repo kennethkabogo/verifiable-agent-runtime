@@ -3,6 +3,7 @@ const SecureVault = @import("runtime/vault.zig").SecureVault;
 const SecureLogger = @import("runtime/shell.zig").SecureLogger;
 const ProtocolHandler = @import("runtime/protocol.zig").ProtocolHandler;
 const VsockServer = @import("runtime/vsock.zig").VsockServer;
+const sealed_state = @import("runtime/sealed_state.zig");
 
 /// Line-based agent protocol (all messages newline-terminated):
 ///
@@ -12,6 +13,10 @@ const VsockServer = @import("runtime/vsock.zig").VsockServer;
 ///   Agent   → Enclave LOG:<message>
 ///   Agent   → Enclave GET_EVIDENCE
 ///   Enclave → Agent   EVIDENCE:stream=<hex>:state=<hex>:sig=<...>
+///   Agent   → Enclave HIBERNATE
+///   Enclave → Agent   SEALED_STATE:<hex_blob>     (then enclave exits cleanly)
+///   Agent   → Enclave RESUME:<hex_blob>           (sent after READY to restore state)
+///   Enclave → Agent   RESUMED:session=<hex>:seq=<n>
 ///
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -52,7 +57,8 @@ pub fn main() !void {
     _ = try conn.send("READY\n");
 
     // 6. Protocol dispatch loop.
-    var line_buf: [4096]u8 = undefined;
+    // 64 KiB accommodates RESUME blobs carrying a full vault of secrets.
+    var line_buf: [65536]u8 = undefined;
     while (true) {
         const line = conn.readLine(&line_buf) catch |err| {
             std.debug.print("[VAR] Read error: {any}\n", .{err});
@@ -74,6 +80,59 @@ pub fn main() !void {
             _ = try conn.send("\n");
             std.debug.print("[VAR] Evidence bundle sent.\n", .{});
             break;
+        } else if (std.mem.eql(u8, line, "HIBERNATE")) {
+            // Capture and seal all runtime state, send the opaque blob to the
+            // agent/host for external storage, then exit cleanly.
+            var captured = try sealed_state.capture(allocator, &vault, &logger);
+            defer captured.deinit();
+
+            const blob = try sealed_state.seal(allocator, &captured);
+            defer allocator.free(blob);
+
+            const hex_blob = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(blob)});
+            defer allocator.free(hex_blob);
+
+            const response = try std.fmt.allocPrint(allocator, "SEALED_STATE:{s}\n", .{hex_blob});
+            defer allocator.free(response);
+
+            _ = try conn.send(response);
+            std.debug.print("[VAR] State sealed and sent ({d} bytes). Hibernating.\n", .{blob.len});
+            break;
+        } else if (std.mem.startsWith(u8, line, "RESUME:")) {
+            // Unseal a previously hibernated state blob and restore vault + logger.
+            const hex_blob = line[7..];
+            if (hex_blob.len == 0 or hex_blob.len % 2 != 0) {
+                std.debug.print("[VAR] RESUME: invalid hex blob length.\n", .{});
+                continue;
+            }
+
+            const blob = try allocator.alloc(u8, hex_blob.len / 2);
+            defer allocator.free(blob);
+            _ = try std.fmt.hexToBytes(blob, hex_blob);
+
+            var captured = sealed_state.unseal(allocator, blob) catch |err| {
+                std.debug.print("[VAR] RESUME: unseal failed: {any}\n", .{err});
+                _ = try conn.send("RESUME_ERROR:unseal_failed\n");
+                continue;
+            };
+            defer captured.deinit();
+
+            try sealed_state.restoreVault(&captured, &vault);
+            try sealed_state.restoreLogger(&captured, &logger);
+
+            const sid_hex = try std.fmt.allocPrint(
+                allocator, "{}", .{std.fmt.fmtSliceHexLower(&captured.session_id)},
+            );
+            defer allocator.free(sid_hex);
+            const resumed_msg = try std.fmt.allocPrint(
+                allocator, "RESUMED:session={s}:seq={d}\n", .{ sid_hex, captured.sequence },
+            );
+            defer allocator.free(resumed_msg);
+
+            _ = try conn.send(resumed_msg);
+            std.debug.print("[VAR] State restored. Session {s} resumed at seq {d}.\n", .{
+                sid_hex, captured.sequence,
+            });
         } else {
             std.debug.print("[VAR] Unknown message (ignored): {s}\n", .{line});
         }
