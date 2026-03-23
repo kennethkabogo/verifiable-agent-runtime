@@ -147,17 +147,15 @@ pub const SecureLogger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        self.sequence += 1;
-        const seq = self.sequence;
-
-        // Snapshot the prev pointer before it is updated.
+        // Use next_seq as a local so sequence is only committed after the full
+        // bundle is successfully constructed.  If any allocation below fails,
+        // self.sequence and self.prev_stream_hash remain unchanged and the
+        // caller can retry without creating a gap in the continuity chain.
+        const next_seq = self.sequence + 1;
         const prev_hash = self.prev_stream_hash;
         const state_digest = self.vt.digestState();
-        const sig = try self.signEvidence(prev_hash, self.stream_hash, state_digest, seq);
+        const sig = try self.signEvidence(prev_hash, self.stream_hash, state_digest, next_seq);
         const sig_bytes = sig.toBytes();
-
-        // Advance prev_stream_hash for the next emission.
-        self.prev_stream_hash = self.stream_hash;
 
         const prev_h = try hex(self.allocator, &prev_hash);
         defer self.allocator.free(prev_h);
@@ -168,10 +166,16 @@ pub const SecureLogger = struct {
         const sig_h = try hex(self.allocator, &sig_bytes);
         defer self.allocator.free(sig_h);
 
-        return std.fmt.allocPrint(self.allocator,
+        const result = try std.fmt.allocPrint(self.allocator,
             "EVIDENCE:prev_stream={s}:stream={s}:state={s}:sig={s}:seq={d}",
-            .{ prev_h, stream_h, state_h, sig_h, seq },
+            .{ prev_h, stream_h, state_h, sig_h, next_seq },
         );
+
+        // Commit state only after the bundle is fully built.
+        self.sequence = next_seq;
+        self.prev_stream_hash = self.stream_hash;
+
+        return result;
     }
 
     /// Returns the evidence bundle as a JSON object for the HTTP gateway.
@@ -180,17 +184,14 @@ pub const SecureLogger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        self.sequence += 1;
-        const seq = self.sequence;
-
-        // Snapshot the prev pointer before it is updated.
+        // Same commit-last ordering as getEvidenceBundle: build the complete
+        // JSON string before touching any persistent state so that an OOM
+        // error leaves the continuity chain intact for a subsequent call.
+        const next_seq = self.sequence + 1;
         const prev_hash = self.prev_stream_hash;
         const state_digest = self.vt.digestState();
-        const sig = try self.signEvidence(prev_hash, self.stream_hash, state_digest, seq);
+        const sig = try self.signEvidence(prev_hash, self.stream_hash, state_digest, next_seq);
         const sig_bytes = sig.toBytes();
-
-        // Advance prev_stream_hash for the next emission.
-        self.prev_stream_hash = self.stream_hash;
 
         const prev_h = try hex(allocator, &prev_hash);
         defer allocator.free(prev_h);
@@ -201,8 +202,14 @@ pub const SecureLogger = struct {
         const sig_h = try hex(allocator, &sig_bytes);
         defer allocator.free(sig_h);
 
-        return std.fmt.allocPrint(allocator,
+        const result = try std.fmt.allocPrint(allocator,
             \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d}}}
-        , .{ prev_h, stream_h, state_h, sig_h, seq });
+        , .{ prev_h, stream_h, state_h, sig_h, next_seq });
+
+        // Commit state only after the bundle is fully built.
+        self.sequence = next_seq;
+        self.prev_stream_hash = self.stream_hash;
+
+        return result;
     }
 };

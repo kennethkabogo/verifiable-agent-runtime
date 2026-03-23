@@ -209,7 +209,16 @@ fn writeCborBytes(buf: []u8, start: usize, b: []const u8) !usize {
 // ---------------------------------------------------------------------------
 
 fn extractAttestationDoc(allocator: std.mem.Allocator, resp: []const u8) ![]u8 {
-    const needle = "document";
+    // Search for the CBOR-encoded text key "document":
+    //   0x68  = major type 1 (text string), additional info 8 (length = 8)
+    //   followed by the 8 ASCII bytes of "document"
+    //
+    // Anchoring the search to the full 9-byte CBOR encoding (type byte +
+    // content) is far more specific than searching for the bare ASCII bytes.
+    // A search for "document" alone would match wherever those 8 bytes appear
+    // inside any VALUE in the response (e.g. embedded in the doc payload
+    // itself), causing the scanner to lock onto the wrong position.
+    const needle = "\x68document";
     const idx = std.mem.indexOf(u8, resp, needle) orelse return error.NoDocumentKey;
     var pos = idx + needle.len;
 
