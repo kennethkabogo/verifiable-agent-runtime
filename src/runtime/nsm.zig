@@ -16,6 +16,10 @@ const NSM_IOCTL_REQUEST: u32 = 0xC020_0A00;
 
 const NSM_REQUEST_MAX_SIZE: usize = 0x1000;
 const NSM_RESPONSE_MAX_SIZE: usize = 0x3000;
+/// Real Nitro attestation documents are 1–3 KiB (COSE_Sign1 + certificate chain).
+/// 16 KiB is a generous upper bound that still prevents runaway heap allocation
+/// from a crafted CBOR length field.
+const MAX_DOC_LEN: usize = 0x4000;
 
 /// Mirrors `struct nsm_iovec` from the Nitro kernel driver (include/uapi/linux/nsm.h).
 /// addr/len describe a caller-owned buffer; _pad makes the C struct layout explicit.
@@ -91,6 +95,10 @@ fn requestReal(
     if (std.os.linux.getErrno(rc) != .SUCCESS) return error.NsmIoctlFailed;
 
     // The driver updates response.len with the actual bytes written.
+    // Validate before using as a slice bound: a buggy or adversarial driver
+    // returning a value larger than the buffer would cause an out-of-bounds
+    // slice and undefined behaviour.
+    if (raw.response.len > NSM_RESPONSE_MAX_SIZE) return error.NsmResponseTooLarge;
     const resp_slice = resp_buf[0..raw.response.len];
     return extractAttestationDoc(allocator, resp_slice);
 }
@@ -229,6 +237,10 @@ fn extractAttestationDoc(allocator: std.mem.Allocator, resp: []const u8) ![]u8 {
         else => return error.UnsupportedCborLength,
     };
 
+    // Sanity-cap the claimed length before any allocation: prevents a crafted
+    // CBOR length field from triggering a large heap allocation that would then
+    // be immediately freed by a TruncatedResponse error.
+    if (doc_len > MAX_DOC_LEN) return error.DocTooLarge;
     if (pos + doc_len > resp.len) return error.TruncatedResponse;
     return try allocator.dupe(u8, resp[pos..][0..doc_len]);
 }

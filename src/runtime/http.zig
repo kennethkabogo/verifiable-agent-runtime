@@ -23,6 +23,13 @@ const SecureVault = @import("vault.zig").SecureVault;
 const SecureLogger = @import("shell.zig").SecureLogger;
 const AttestationQuote = @import("attestation.zig").AttestationQuote;
 
+// ── Limits ─────────────────────────────────────────────────────────────────
+
+/// Maximum byte length of any single JSON string value extracted from a
+/// request body.  Prevents oversized allocations even when the caller crafts
+/// a value that fills the entire request buffer.
+const MAX_FIELD_BYTES: usize = 8192;
+
 // ── Configuration ──────────────────────────────────────────────────────────
 
 pub const GatewayConfig = struct {
@@ -148,20 +155,65 @@ fn parseRequest(buf: []u8, len: usize) ?ParsedRequest {
 fn handleConnection(server: *GatewayServer, conn: net.Server.Connection) void {
     defer conn.stream.close();
 
-    // Read into a fixed stack buffer.  16 KiB is ample for any gateway request.
+    // Fixed stack buffer — caps total request size (headers + body) at 16 KiB.
     var buf: [16384]u8 = undefined;
     var total: usize = 0;
 
-    // Read until we see the end-of-headers sentinel.
-    while (total < buf.len) {
-        const n = conn.stream.read(buf[total..]) catch return;
-        if (n == 0) break;
-        total += n;
-        if (mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) break;
+    // Phase 1: read until we see the end-of-headers sentinel (\r\n\r\n).
+    const header_end: usize = blk: {
+        while (total < buf.len) {
+            const n = conn.stream.read(buf[total..]) catch {
+                writeError(conn.stream, 400, "Bad Request") catch {};
+                return;
+            };
+            if (n == 0) break;
+            total += n;
+            if (mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |pos| break :blk pos;
+        }
+        writeError(conn.stream, 400, "Bad Request") catch {};
+        return;
+    };
+
+    // Extract Content-Length from the header block so we know exactly how many
+    // body bytes to expect.  Parsing here (rather than relying on parseRequest)
+    // lets us read the full body before handing off, eliminating the silent
+    // partial-body acceptance that the single-extra-read approach had.
+    var content_length: usize = 0;
+    {
+        var lines = mem.splitSequence(u8, buf[0..header_end], "\r\n");
+        _ = lines.next(); // skip request line
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            const colon = mem.indexOfScalar(u8, line, ':') orelse continue;
+            const name = mem.trim(u8, line[0..colon], " \t");
+            if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+                const val = mem.trim(u8, line[colon + 1 ..], " \t");
+                content_length = std.fmt.parseInt(usize, val, 10) catch 0;
+            }
+        }
     }
-    // One more read to pick up the body when it arrives in a separate TCP segment.
-    if (total < buf.len) {
-        const n = conn.stream.read(buf[total..]) catch 0;
+
+    // Phase 2: read until the body is fully received.
+    //
+    // Guard against integer overflow and buffer exhaustion before reading any
+    // body bytes.  body_start <= total is guaranteed by Phase 1 (we found the
+    // sentinel, so total >= header_end + 4 = body_start).
+    const body_start = header_end + 4;
+    if (content_length > buf.len - body_start) {
+        writeError(conn.stream, 413, "Request Too Large") catch {};
+        return;
+    }
+    const needed = body_start + content_length;
+    while (total < needed) {
+        const n = conn.stream.read(buf[total..needed]) catch {
+            writeError(conn.stream, 400, "Bad Request") catch {};
+            return;
+        };
+        if (n == 0) {
+            // Client closed the connection before sending the full body.
+            writeError(conn.stream, 400, "Bad Request") catch {};
+            return;
+        }
         total += n;
     }
 
@@ -291,8 +343,23 @@ fn jsonGetString(json: []const u8, key: []const u8, allocator: Allocator) ?[]u8 
     if (rest.len == 0 or rest[0] != '"') return null;
     rest = rest[1..]; // skip opening quote
 
+    // Scan to the closing quote, respecting backslash escapes so that a value
+    // containing \" does not cause early truncation.  The raw (un-unescaped)
+    // bytes are returned — correct for opaque values like API keys and log
+    // messages that callers treat as byte strings, not decoded JSON text.
+    // A hard cap at MAX_FIELD_BYTES prevents outsized allocations.
     var end: usize = 0;
-    while (end < rest.len and rest[end] != '"') end += 1;
+    while (end < rest.len and end < MAX_FIELD_BYTES) {
+        if (rest[end] == '\\') {
+            // Skip the backslash and the character it escapes; any valid JSON
+            // escape sequence is exactly two characters at this level.
+            end += if (end + 1 < rest.len) 2 else 1;
+            continue;
+        }
+        if (rest[end] == '"') break;
+        end += 1;
+    }
+    if (end >= MAX_FIELD_BYTES) return null; // value exceeds hard cap
     return allocator.dupe(u8, rest[0..end]) catch null;
 }
 
@@ -313,6 +380,7 @@ fn writeResponse(stream: net.Stream, status: u16, body: []const u8) !void {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        413 => "Request Entity Too Large",
         500 => "Internal Server Error",
         else => "Unknown",
     };

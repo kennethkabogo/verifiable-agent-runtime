@@ -3,6 +3,12 @@ const AttestationQuote = @import("attestation.zig").AttestationQuote;
 const SecureVault = @import("vault.zig").SecureVault;
 const Ed25519 = std.crypto.sign.Ed25519;
 
+/// Maximum byte length for a secret key name.
+const MAX_SECRET_KEY_LEN: usize = 256;
+/// Maximum byte length for a secret value — ample for JWTs, PEM private keys,
+/// and Anthropic API keys, while preventing memory-exhaustion via the line protocol.
+const MAX_SECRET_VALUE_LEN: usize = 8192;
+
 /// ProtocolHandler manages the secure handshake between the host and the enclave.
 pub const ProtocolHandler = struct {
     allocator: std.mem.Allocator,
@@ -99,6 +105,8 @@ pub const ProtocolHandler = struct {
 
         if (key.len == 0) return error.InvalidKey;
         if (secret.len == 0) return error.InvalidSecret;
+        if (key.len > MAX_SECRET_KEY_LEN) return error.KeyTooLong;
+        if (secret.len > MAX_SECRET_VALUE_LEN) return error.SecretTooLong;
 
         // In a real TEE, we would decrypt the secret using our private key here.
         // For simulation, we assume the host sent it in cleartext or we "auto-decrypt".
