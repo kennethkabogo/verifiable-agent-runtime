@@ -189,38 +189,79 @@ flowchart TD
 - Python 3.x (host proxy)
 - AWS Nitro-compatible instance, or any Linux machine (simulation mode auto-activates when `/dev/nsm` is absent)
 
-### Build and run
+### Build
 
 ```bash
-# Build the enclave binary
-zig build-exe src/main.zig --name var_enclave
-
-# Terminal 1 — start the host proxy
-python3 src/host/proxy.py
-
-# Terminal 2 — start the enclave runtime
-./var_enclave
+zig build
+# Produces:
+#   zig-out/bin/VAR          — vsock line-protocol runtime
+#   zig-out/bin/VAR-gateway  — HTTP REST gateway (recommended for new integrations)
 ```
 
-### Query the gateway (from inside the enclave, or a co-located agent)
+### Run — simulation mode (no AWS account needed)
+
+Simulation mode activates automatically when `/dev/nsm` is absent. The KMS
+proxy is not required; DEK wrapping uses a local mock key.
 
 ```bash
-# Store a credential
-curl -s -X POST http://127.0.0.1:8765/vault/secret \
-  -H 'Content-Type: application/json' \
-  -d '{"key":"MY_API_KEY","value":"sk-..."}'
+# Terminal 1 — HTTP gateway (listens on 127.0.0.1:8765)
+./zig-out/bin/VAR-gateway
+```
 
-# Emit a log entry
-curl -s -X POST http://127.0.0.1:8765/log \
-  -H 'Content-Type: application/json' \
-  -H 'X-Skill-Id: my-agent' \
-  -d '{"msg":"task complete"}'
+### Run — production mode (AWS Nitro)
 
-# Retrieve a signed evidence snapshot
-curl -s http://127.0.0.1:8765/evidence
+```bash
+# Terminal 1 — host-side KMS proxy (on the parent EC2 instance)
+VAR_KMS_KEY_ARN=arn:aws:kms:us-east-1:123456789012:key/… \
+AWS_DEFAULT_REGION=us-east-1 \
+python3 src/host/proxy.py --vsock
 
-# Verify the session identity
-curl -s http://127.0.0.1:8765/session
+# Terminal 2 — launch the enclave image (after packaging with nitro-cli)
+nitro-cli run-enclave \
+  --enclave-cid 16 \
+  --memory 512 \
+  --cpu-count 2 \
+  --eif-path var.eif
+```
+
+See `src/host/var-kms-proxy.service` for the systemd unit that manages the
+proxy in production, and the **Deployment** section below for KMS key policy
+setup.
+
+### Environment variables
+
+| Variable | Component | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `VAR_KMS_KEY_ARN` | enclave | — | ARN of the KMS CMK used to wrap the DEK |
+| `VAR_KMS_PROXY_PORT` | enclave + proxy | `8443` | vsock/TCP port for the KMS proxy |
+| `AWS_DEFAULT_REGION` | proxy | from credential chain | AWS region for KMS calls |
+| `VAR_GATEWAY` | verifier | `http://127.0.0.1:8765` | Gateway URL for `verify_evidence.py` |
+
+### HTTP Gateway API
+
+The `VAR-gateway` binary exposes a JSON REST API on `127.0.0.1:8765`.
+
+| Method | Path | Body / Notes | Response |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/health` | — | `{"status":"healthy"}` |
+| `GET` | `/session` | — | `{"magic","version","session_id","bootstrap_nonce"}` |
+| `GET` | `/attestation` | — | `{"pcr0","public_key","doc"}` (hex-encoded) |
+| `GET` | `/evidence` | — | `{"prev_stream","stream","state","sig","sequence"}` |
+| `POST` | `/vault/secret` | `{"key":"…","value":"…"}` | `{"status":"ok"}` |
+| `POST` | `/log` | `{"msg":"…"}` + `X-Skill-Id` header | `{"status":"ok"}` |
+
+Every `POST /log` call extends the L1 hash chain. Every `GET /evidence`
+returns a signed snapshot of the current chain state. See `evidence_spec.md`
+for the full wire format.
+
+### Verify a session
+
+```bash
+# Human-readable output
+python3 src/agent/verify_evidence.py
+
+# Machine-readable JSON (for CI / automated auditing)
+python3 src/agent/verify_evidence.py --json
 ```
 
 ---
@@ -229,21 +270,33 @@ curl -s http://127.0.0.1:8765/session
 
 ```
 src/
-├── main.zig                  Enclave entry point and lifecycle
-├── http_main.zig             HTTP gateway entry point
+├── main.zig                    Enclave entry point (vsock line protocol)
+├── http_main.zig               HTTP gateway entry point
 ├── runtime/
-│   ├── http.zig              REST gateway (POST /vault/secret, /log, GET /evidence, /session)
-│   ├── shell.zig             Verifiable PTY master — hash chain + Ed25519 signing
-│   ├── vt.zig                Terminal state machine (VT100/ANSI) and L2 digest
-│   ├── vault.zig             Memory-only credential store (wiped on exit)
-│   ├── attestation.zig       Hardware identity and quote handling
-│   ├── nsm.zig               AWS Nitro Secure Module driver + simulation fallback
-│   ├── vsock.zig             AF_VSOCK host–enclave transport
-│   └── protocol.zig          Handshake, bundle header, secret delivery
+│   ├── http.zig                REST gateway (/vault/secret, /log, /evidence, /session, /health)
+│   ├── shell.zig               Verifiable PTY — L1 hash chain + Ed25519 signing
+│   ├── vt.zig                  VT100/ANSI state machine and L2 terminal digest
+│   ├── vault.zig               Memory-only credential store (wiped on exit)
+│   ├── sealed_state.zig        Hibernate/resume — AES-256-GCM + KMS DEK wrapping
+│   ├── rsa_recipient.zig       RSA-2048 keygen + OAEP unwrap (KMS recipient flow)
+│   ├── attestation.zig         Hardware identity and NSM attestation quote
+│   ├── nsm.zig                 Nitro Secure Module driver + simulation fallback
+│   ├── vsock.zig               AF_VSOCK host–enclave transport
+│   └── protocol.zig            Handshake, bundle header, secret delivery
 ├── host/
-│   └── proxy.py              Host-side connectivity bridge
-└── agent/                    Example agent integrations
-evidence_spec.md              Formal specification of the evidence wire format (v1.1)
+│   ├── proxy.py                KMS forwarding proxy (vsock → boto3 → KMS)
+│   ├── requirements.txt        Runtime deps (boto3)
+│   ├── requirements-dev.txt    Test deps (moto, pytest)
+│   ├── var-kms-proxy.service   Systemd unit for the proxy on the parent instance
+│   └── tests/
+│       └── test_proxy.py       Proxy tests (pytest + moto)
+└── agent/
+    ├── verify_evidence.py      Standalone evidence verifier (--json for CI)
+    ├── agent.py                Example vsock agent
+    ├── gateway_skill.py        Example HTTP gateway skill
+    └── tests/
+        └── test_verify_evidence.py  Verifier tests (30 cases, real Ed25519)
+evidence_spec.md                Formal specification of the evidence wire format (v1.2)
 ```
 
 ---
