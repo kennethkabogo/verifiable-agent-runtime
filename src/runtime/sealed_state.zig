@@ -15,8 +15,10 @@
 ///     host-side vsock proxy (CID 2, port VAR_KMS_PROXY_PORT, default 8443).
 ///     The CMK key policy restricts kms:Decrypt to enclaves whose PCR0 matches
 ///     the known-good image.  Set VAR_KMS_KEY_ARN to the CMK ARN before launch.
-///     Future upgrade: Nitro "recipient" flow (ephemeral RSA + attestation doc)
-///     so the proxy never sees the plaintext DEK.
+///     Unseal uses the Nitro recipient flow (kmsDecryptWithRecipient): an
+///     ephemeral RSA-2048 keypair is generated per-unseal, the public key is
+///     bound into the NSM attestation document, and KMS returns the DEK RSA-
+///     wrapped rather than in plaintext — the proxy never sees the DEK.
 ///
 /// Sealed blob wire format (binary, then hex-encoded for the line protocol):
 ///   [sealed_dek_len : 4 bytes]   u32 LE — byte length of the wrapped key
@@ -363,7 +365,10 @@ fn hasNsmDevice() bool {
 // instance role credentials (IAM role attached to the parent instance).
 //
 // Seal flow:   enclave  →  proxy  →  kms:Encrypt  →  KMS ciphertext returned
-// Unseal flow: enclave  →  proxy  →  kms:Decrypt  →  plaintext DEK returned
+// Unseal flow: enclave  →  proxy  →  kms:Decrypt (with Recipient field)
+//              KMS returns CiphertextForRecipient (RSA-OAEP-SHA256 wrapped DEK)
+//              Enclave RSA-unwraps with ephemeral private key → plaintext DEK
+//              The proxy never sees plaintext key material.
 //
 // Key policy on the CMK restricts kms:Decrypt to callers presenting a valid
 // Nitro attestation document whose PCR0 matches the known-good enclave image:
@@ -373,11 +378,6 @@ fn hasNsmDevice() bool {
 //       "kms:RecipientAttestation:PCR0": "<sha384_hex_of_enclave_image>"
 //     }
 //   }
-//
-// Future: upgrade unsealDek to the Nitro "recipient" flow — generate an
-// ephemeral RSA-2048 key pair inside the enclave, embed the public key in the
-// NSM attestation doc, pass it as the Recipient field in kms:Decrypt so the
-// response ciphertext is RSA-wrapped and the proxy never sees the plaintext DEK.
 // ---------------------------------------------------------------------------
 
 /// Extracts a JSON string value for `key` from a flat JSON object.
@@ -532,12 +532,84 @@ fn sealDek(allocator: std.mem.Allocator, dek: [32]u8) ![]u8 {
     return out;
 }
 
+/// Calls kms:Decrypt using the Nitro recipient flow so the proxy never sees
+/// the plaintext DEK.
+///
+/// Steps:
+///   1. Generate an ephemeral RSA-2048 keypair (fresh per unseal).
+///   2. Request an NSM attestation document with the RSA public key (SPKI DER)
+///      embedded — NSM signs it, binding the key to the enclave's PCR values.
+///   3. POST TrentService.Decrypt with a Recipient field:
+///        { "KeyEncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+///          "AttestationDocument": "<base64(nsm_doc)>" }
+///      KMS verifies the NSM signature, trusts the embedded public key, and
+///      returns CiphertextForRecipient instead of Plaintext.
+///   4. Base64-decode CiphertextForRecipient (256-byte RSA-2048 block).
+///   5. RSA-OAEP-SHA256 decrypt with the ephemeral private key → 32-byte DEK.
+fn kmsDecryptWithRecipient(
+    allocator: std.mem.Allocator,
+    proxy_port: u16,
+    ciphertext_blob: []const u8,
+) ![32]u8 {
+    const nsm = @import("nsm.zig");
+    const rsa = @import("rsa_recipient.zig");
+
+    // 1. Ephemeral RSA-2048 keypair — private key never leaves the enclave.
+    var kp = try rsa.generateKeyPair(allocator);
+    defer kp.deinit(allocator);
+
+    // 2. NSM attestation doc with RSA public key (SPKI DER) bound in.
+    const attest_doc = try nsm.getAttestationDoc(allocator, null, kp.pub_key_der);
+    defer allocator.free(attest_doc);
+
+    // 3. Build the kms:Decrypt request body.
+    const enc = std.base64.standard.Encoder;
+
+    const b64_ct_len = enc.calcSize(ciphertext_blob.len);
+    const b64_ct_buf = try allocator.alloc(u8, b64_ct_len);
+    defer allocator.free(b64_ct_buf);
+    const b64_ct = enc.encode(b64_ct_buf, ciphertext_blob);
+
+    const b64_doc_len = enc.calcSize(attest_doc.len);
+    const b64_doc_buf = try allocator.alloc(u8, b64_doc_len);
+    defer allocator.free(b64_doc_buf);
+    const b64_doc = enc.encode(b64_doc_buf, attest_doc);
+
+    const req_body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"CiphertextBlob\":\"{s}\"," ++
+            "\"Recipient\":{{\"KeyEncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"," ++
+            "\"AttestationDocument\":\"{s}\"}}}}",
+        .{ b64_ct, b64_doc },
+    );
+    defer allocator.free(req_body);
+
+    const resp_body = try kmsHttpPost(allocator, proxy_port, "TrentService.Decrypt", req_body);
+    defer allocator.free(resp_body);
+
+    // 4. Extract CiphertextForRecipient (256-byte RSA-2048 block, base64-encoded).
+    const b64_wrapped = (try jsonExtractString(allocator, resp_body, "CiphertextForRecipient")) orelse
+        return error.KmsNoCiphertextForRecipient;
+    defer allocator.free(b64_wrapped);
+
+    const dec = std.base64.standard.Decoder;
+    const wrapped_len = try dec.calcSizeForSlice(b64_wrapped);
+    if (wrapped_len != 256) return error.KmsUnexpectedWrappedDekLength;
+    var wrapped: [256]u8 = undefined;
+    try dec.decode(&wrapped, b64_wrapped);
+    defer std.crypto.utils.secureZero(u8, &wrapped);
+
+    // 5. RSA-OAEP-SHA256 unwrap → 32-byte plaintext DEK.
+    return rsa.unwrapDek(&kp, &wrapped);
+}
+
 /// Unwraps a sealed DEK produced by sealDek().
-/// On real Nitro hardware: calls kms:Decrypt via the host proxy.
+/// On real Nitro hardware: uses the recipient flow (kmsDecryptWithRecipient)
+/// so the proxy never receives the plaintext DEK.
 /// In simulation: XOR with the mock wrapping key.
 fn unsealDek(allocator: std.mem.Allocator, sealed: []const u8) ![32]u8 {
     if (hasNsmDevice()) {
-        return kmsDecrypt(allocator, kmsProxyPort(), sealed);
+        return kmsDecryptWithRecipient(allocator, kmsProxyPort(), sealed);
     }
     if (sealed.len != 32) return error.InvalidSealedDekLength;
     var dek: [32]u8 = undefined;

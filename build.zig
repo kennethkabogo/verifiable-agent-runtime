@@ -78,6 +78,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // rsa_recipient.zig uses libcrypto (OpenSSL) for RSA-2048 keygen and
+    // RSAES-OAEP-SHA256 decryption in the KMS recipient flow.
+    // libC is required as a transitive dependency of libcrypto.
+    exe.linkSystemLibrary("crypto");
+    exe.linkLibC();
+
     // Add ghostty-vt dependency.
     // When the user targets Linux (e.g. cross-compiling for the enclave), pass
     // the resolved target through unchanged. On non-Linux hosts building natively
@@ -168,6 +174,10 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+
+    // exe_tests compiles main.zig → sealed_state.zig → rsa_recipient.zig.
+    exe_tests.linkSystemLibrary("crypto");
+    exe_tests.linkLibC();
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
