@@ -60,7 +60,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install cryptography pytest
+        run: pip install cryptography cbor2 pytest
 
       - name: Test
         run: pytest src/agent/tests/ -v
