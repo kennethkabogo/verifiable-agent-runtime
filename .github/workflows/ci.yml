@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+
+jobs:
+  # ── Zig build ──────────────────────────────────────────────────────────────
+  build:
+    name: Zig build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: "0.15.0"   # minimum: 0.15.2 per build.zig.zon
+
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-pkgs-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkgs-
+
+      - name: Build
+        run: zig build
+
+      - name: Test (Zig)
+        run: zig build test
+
+  # ── Host proxy tests (pytest + moto) ──────────────────────────────────────
+  test-host-proxy:
+    name: Host proxy tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r src/host/requirements-dev.txt
+
+      - name: Test
+        run: pytest src/host/tests/ -v
+
+  # ── Verifier tests (pytest + cryptography) ────────────────────────────────
+  test-verifier:
+    name: Verifier tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install cryptography pytest
+
+      - name: Test
+        run: pytest src/agent/tests/ -v
