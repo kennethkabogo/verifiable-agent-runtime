@@ -171,6 +171,7 @@ test "empty terminal digest is reproducible across instances" {
 }
 
 test "digest changes after input" {
+    if (!with_ghostty) return error.SkipZigTest;
     var term = try VerifiableTerminal.init(testing.allocator, 80, 24);
     defer term.deinit();
 
@@ -217,6 +218,7 @@ test "chunked vs whole input yields same digest" {
 }
 
 test "different inputs produce different digests" {
+    if (!with_ghostty) return error.SkipZigTest;
     var vt1 = try VerifiableTerminal.init(testing.allocator, 80, 24);
     defer vt1.deinit();
     var vt2 = try VerifiableTerminal.init(testing.allocator, 80, 24);

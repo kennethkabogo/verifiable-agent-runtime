@@ -77,6 +77,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("crypto");
     exe.linkLibC();
 
+    var ghostty_vt: ?*std.Build.Module = null;
     if (with_ghostty) {
         // Add ghostty-vt dependency.
         // When the user targets Linux (e.g. cross-compiling for the enclave), pass
@@ -92,9 +93,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .@"app-runtime" = .none,
         });
-        const ghostty_vt = ghostty_dep.module("ghostty-vt");
-        exe.root_module.addImport("ghostty-vt", ghostty_vt);
-        mod.addImport("ghostty-vt", ghostty_vt);
+        ghostty_vt = ghostty_dep.module("ghostty-vt");
+        exe.root_module.addImport("ghostty-vt", ghostty_vt.?);
+        mod.addImport("ghostty-vt", ghostty_vt.?);
     }
 
     // HTTP gateway executable — same session bootstrap as VAR but exposes a
@@ -194,7 +195,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    gateway_tests.root_module.addImport("ghostty-vt", ghostty_vt);
+    if (ghostty_vt) |vt_mod| {
+        gateway_tests.root_module.addImport("ghostty-vt", vt_mod);
+    }
     const run_gateway_tests = b.addRunArtifact(gateway_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
