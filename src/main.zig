@@ -89,7 +89,7 @@ pub fn main() !void {
             const blob = try sealed_state.seal(allocator, &captured);
             defer allocator.free(blob);
 
-            const hex_blob = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(blob)});
+            const hex_blob = try std.fmt.allocPrint(allocator, "{x}", .{blob});
             defer allocator.free(hex_blob);
 
             const response = try std.fmt.allocPrint(allocator, "SEALED_STATE:{s}\n", .{hex_blob});
@@ -121,7 +121,7 @@ pub fn main() !void {
             try sealed_state.restoreLogger(&captured, &logger);
 
             const sid_hex = try std.fmt.allocPrint(
-                allocator, "{}", .{std.fmt.fmtSliceHexLower(&captured.session_id)},
+                allocator, "{x}", .{&captured.session_id},
             );
             defer allocator.free(sid_hex);
             const resumed_msg = try std.fmt.allocPrint(

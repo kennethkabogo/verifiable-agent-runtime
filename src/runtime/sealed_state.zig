@@ -99,13 +99,13 @@ pub const CapturedState = struct {
 
     pub fn deinit(self: *CapturedState) void {
         for (self.vault_entries) |e| {
-            std.crypto.utils.secureZero(u8, @constCast(e.key));
-            std.crypto.utils.secureZero(u8, @constCast(e.value));
+            std.crypto.secureZero(u8, @constCast(e.key));
+            std.crypto.secureZero(u8, @constCast(e.value));
             self.allocator.free(e.key);
             self.allocator.free(e.value);
         }
         self.allocator.free(self.vault_entries);
-        std.crypto.utils.secureZero(u8, &self.secret_key_bytes);
+        std.crypto.secureZero(u8, &self.secret_key_bytes);
     }
 };
 
@@ -188,8 +188,8 @@ pub fn restoreVault(state: *const CapturedState, vault: *SecureVault) !void {
     // Wipe and free all existing entries before repopulating.
     var it = vault.secrets.iterator();
     while (it.next()) |entry| {
-        std.crypto.utils.secureZero(u8, @constCast(entry.key_ptr.*));
-        std.crypto.utils.secureZero(u8, @constCast(entry.value_ptr.*));
+        std.crypto.secureZero(u8, @constCast(entry.key_ptr.*));
+        std.crypto.secureZero(u8, @constCast(entry.value_ptr.*));
         vault.allocator.free(entry.key_ptr.*);
         vault.allocator.free(entry.value_ptr.*);
     }
@@ -597,7 +597,7 @@ fn kmsDecryptWithRecipient(
     if (wrapped_len != 256) return error.KmsUnexpectedWrappedDekLength;
     var wrapped: [256]u8 = undefined;
     try dec.decode(&wrapped, b64_wrapped);
-    defer std.crypto.utils.secureZero(u8, &wrapped);
+    defer std.crypto.secureZero(u8, &wrapped);
 
     // 5. RSA-OAEP-SHA256 unwrap → 32-byte plaintext DEK.
     return rsa.unwrapDek(&kp, &wrapped);
@@ -626,7 +626,7 @@ fn unsealDek(allocator: std.mem.Allocator, sealed: []const u8) ![32]u8 {
 pub fn seal(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     const plaintext = try serialize(allocator, state);
     defer {
-        std.crypto.utils.secureZero(u8, plaintext);
+        std.crypto.secureZero(u8, plaintext);
         allocator.free(plaintext);
     }
 
@@ -634,7 +634,7 @@ pub fn seal(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     var nonce: [Aes256Gcm.nonce_length]u8 = undefined;
     std.crypto.random.bytes(&dek);
     std.crypto.random.bytes(&nonce);
-    defer std.crypto.utils.secureZero(u8, &dek);
+    defer std.crypto.secureZero(u8, &dek);
 
     const ciphertext = try allocator.alloc(u8, plaintext.len);
     defer allocator.free(ciphertext);
@@ -672,11 +672,11 @@ pub fn unseal(allocator: std.mem.Allocator, blob: []const u8) !CapturedState {
     const ciphertext = blob[pos..];
 
     const dek = try unsealDek(allocator, sealed_dek);
-    defer std.crypto.utils.secureZero(u8, @constCast(&dek));
+    defer std.crypto.secureZero(u8, @constCast(&dek));
 
     const plaintext = try allocator.alloc(u8, ciphertext.len);
     defer {
-        std.crypto.utils.secureZero(u8, plaintext);
+        std.crypto.secureZero(u8, plaintext);
         allocator.free(plaintext);
     }
 

@@ -38,7 +38,7 @@ pub const ProtocolHandler = struct {
 
         // Generate a fresh ephemeral keypair.  The public key is bound into the
         // attestation quote so the NSM (or mock) can certify it.
-        const keypair = try Ed25519.KeyPair.generate();
+        const keypair = Ed25519.KeyPair.generate();
         const pk = keypair.public_key.toBytes();
         const quote = try AttestationQuote.generate(allocator, pk);
 

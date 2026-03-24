@@ -16,10 +16,9 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
-    // It's also possible to define more custom flags to toggle optional features
-    // of this build script using `b.option()`. All defined flags (including
-    // target and optimize options) will be listed when running `zig build --help`
-    // in this directory.
+    const with_ghostty = b.option(bool, "with-ghostty", "Build with high-fidelity Ghostty VT (requires Linux or stable Ghostty version)") orelse true;
+    const options = b.addOptions();
+    options.addOption(bool, "with_ghostty", with_ghostty);
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -29,17 +28,10 @@ pub fn build(b: *std.Build) void {
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
     const mod = b.addModule("VAR", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
         .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
         .target = target,
     });
+    mod.addOptions("build_options", options);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -77,6 +69,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addOptions("build_options", options);
 
     // rsa_recipient.zig uses libcrypto (OpenSSL) for RSA-2048 keygen and
     // RSAES-OAEP-SHA256 decryption in the KMS recipient flow.
@@ -84,23 +77,25 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("crypto");
     exe.linkLibC();
 
-    // Add ghostty-vt dependency.
-    // When the user targets Linux (e.g. cross-compiling for the enclave), pass
-    // the resolved target through unchanged. On non-Linux hosts building natively
-    // we still honour the requested target rather than forcing .linux, which would
-    // break a native macOS/Windows dev build.
-    const ghostty_target = if (target.result.os.tag == .linux)
-        target
-    else
-        b.resolveTargetQuery(target.query);
-    const ghostty_dep = b.dependency("ghostty", .{
-        .target = ghostty_target,
-        .optimize = optimize,
-        .@"app-runtime" = .none,
-    });
-    const ghostty_vt = ghostty_dep.module("ghostty-vt");
-    exe.root_module.addImport("ghostty-vt", ghostty_vt);
-    mod.addImport("ghostty-vt", ghostty_vt);
+    if (with_ghostty) {
+        // Add ghostty-vt dependency.
+        // When the user targets Linux (e.g. cross-compiling for the enclave), pass
+        // the resolved target through unchanged. On non-Linux hosts building natively
+        // we still honour the requested target rather than forcing .linux, which would
+        // break a native macOS/Windows dev build.
+        const ghostty_target = if (target.result.os.tag == .linux)
+            target
+        else
+            b.resolveTargetQuery(target.query);
+        const ghostty_dep = b.dependency("ghostty", .{
+            .target = ghostty_target,
+            .optimize = optimize,
+            .@"app-runtime" = .none,
+        });
+        const ghostty_vt = ghostty_dep.module("ghostty-vt");
+        exe.root_module.addImport("ghostty-vt", ghostty_vt);
+        mod.addImport("ghostty-vt", ghostty_vt);
+    }
 
     // HTTP gateway executable — same session bootstrap as VAR but exposes a
     // REST-ish API on loopback so any co-located skill (Python, JS, …) can
@@ -117,7 +112,15 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    gateway_exe.root_module.addImport("ghostty-vt", ghostty_vt);
+    gateway_exe.root_module.addOptions("build_options", options);
+    if (with_ghostty) {
+        const ghostty_dep = b.dependency("ghostty", .{
+            .target = target,
+            .optimize = optimize,
+            .@"app-runtime" = .none,
+        });
+        gateway_exe.root_module.addImport("ghostty-vt", ghostty_dep.module("ghostty-vt"));
+    }
     b.installArtifact(gateway_exe);
 
     const run_gateway_cmd = b.addRunArtifact(gateway_exe);
