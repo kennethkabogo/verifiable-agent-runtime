@@ -1,3 +1,6 @@
 zig-out/
 zig-cache/
 var_enclave
+__pycache__/
+*.pyc
+*.pyo
