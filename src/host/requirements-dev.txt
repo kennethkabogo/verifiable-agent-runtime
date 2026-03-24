@@ -1,0 +1,10 @@
+# Development / test dependencies.
+# Includes runtime deps.
+#
+# Install:  pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# moto[kms] provides an in-process AWS KMS mock; no LocalStack or real AWS needed.
+moto[kms]>=5.0.0
+pytest>=8.0.0

@@ -1,0 +1,84 @@
+# /etc/systemd/system/var-kms-proxy.service
+#
+# Systemd unit for the VAR KMS forwarding proxy.
+#
+# Installation on the Nitro parent instance:
+#
+#   1. Copy proxy.py to /opt/var/proxy.py (or adjust ExecStart below).
+#   2. Install runtime deps:
+#        pip3 install -r /opt/var/requirements.txt
+#   3. Copy this unit file:
+#        sudo cp var-kms-proxy.service /etc/systemd/system/
+#   4. Reload and enable:
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now var-kms-proxy
+#   5. Check logs:
+#        sudo journalctl -u var-kms-proxy -f
+#
+# IAM auth is handled by the EC2 instance role attached to the parent instance.
+# The instance role must have kms:Encrypt and kms:Decrypt on the CMK ARN used
+# by the enclave (VAR_KMS_KEY_ARN).
+#
+# The CMK key policy must include the RecipientAttestation condition so only
+# the expected enclave image (matched by PCR0) can call kms:Decrypt:
+#
+#   "Condition": {
+#     "StringEqualsIgnoreCase": {
+#       "kms:RecipientAttestation:PCR0": "<sha384_of_enclave_image>"
+#     }
+#   }
+
+[Unit]
+Description=VAR KMS forwarding proxy (Nitro enclave host-side)
+Documentation=https://github.com/kennethkabogo/verifiable-agent-runtime
+# Must start after the network is up so boto3 can reach kms.<region>.amazonaws.com
+# and instance metadata (IMDS) is available for the credential chain.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Run as a dedicated unprivileged user.
+# Create with:  sudo useradd --system --no-create-home var-proxy
+User=var-proxy
+Group=var-proxy
+
+# Proxy binary and working directory.
+WorkingDirectory=/opt/var
+ExecStart=/usr/bin/python3 /opt/var/proxy.py \
+    --vsock \
+    --port ${VAR_KMS_PROXY_PORT:-8443}
+
+# Restart policy: back off on repeated failures so we don't spam KMS/IMDS.
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+# Environment.  Region must match the KMS key region.
+# These can also be set in /etc/systemd/system/var-kms-proxy.service.d/override.conf
+# via `sudo systemctl edit var-kms-proxy`.
+Environment=AWS_DEFAULT_REGION=us-east-1
+# Environment=VAR_KMS_PROXY_PORT=8443   # uncomment to override default
+
+# Hardening: restrict what the proxy process can do on the host.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Allow read access to AWS credential files and Python packages.
+ReadOnlyPaths=/etc/ssl /usr/lib/python3 /usr/local/lib/python3
+# Block access to enclave dev nodes (proxy has no reason to touch them).
+DeviceAllow=
+DevicePolicy=closed
+# Restrict to IPv4/IPv6 and vsock; no Unix sockets needed.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_VSOCK
+
+# Logging: all stdout/stderr goes to journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=var-kms-proxy
+
+[Install]
+WantedBy=multi-user.target
