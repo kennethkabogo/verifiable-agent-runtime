@@ -4,3 +4,4 @@ var_enclave
 __pycache__/
 *.pyc
 *.pyo
+.env
