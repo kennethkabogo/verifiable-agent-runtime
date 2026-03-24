@@ -266,6 +266,124 @@ python3 src/agent/verify_evidence.py --json
 
 ---
 
+## Deployment
+
+This section walks through building an Enclave Image File (EIF), setting up the
+KMS key with an attestation-gated policy, and running on a Nitro-capable EC2
+instance. Everything here requires **nitro-cli**, **docker**, and an EC2 instance
+with the Nitro Enclaves option enabled (`--enclave-options Enabled=true`).
+
+### 1. Build the EIF
+
+```bash
+# Build the Docker image and package it into an EIF.
+make build-eif
+
+# Note the PCR0 measurement printed at the end — you need it for the key policy.
+# You can re-print it at any time:
+make pcr0
+```
+
+`nitro-cli build-enclave` produces a reproducible EIF. The same source tree
+always yields the same PCR0, so PCR0 is a stable, auditable identity for the
+enclave image.
+
+### 2. Create the KMS CMK
+
+```bash
+# Create the CMK and alias.
+KEY_ID=$(aws kms create-key \
+  --description "VAR enclave DEK-wrapping key" \
+  --query 'KeyMetadata.KeyId' --output text)
+aws kms create-alias --alias-name alias/var-enclave --target-key-id "$KEY_ID"
+
+KEY_ARN=$(aws kms describe-key --key-id alias/var-enclave \
+  --query 'KeyMetadata.Arn' --output text)
+echo "VAR_KMS_KEY_ARN=$KEY_ARN"
+```
+
+### 3. Apply the key policy
+
+Edit `infra/kms-key-policy.json` — replace the four placeholders:
+
+| Placeholder | Value |
+| :--- | :--- |
+| `ACCOUNT_ID` | Your 12-digit AWS account ID |
+| `KEY_ADMIN_ARN` | IAM principal that manages the key |
+| `INSTANCE_ROLE_ARN` | Role attached to the parent EC2 instance |
+| `PCR0_HEX` | Output of `make pcr0` |
+
+Then apply it:
+
+```bash
+aws kms put-key-policy \
+  --key-id alias/var-enclave \
+  --policy-name default \
+  --policy file://infra/kms-key-policy.json
+```
+
+The `AllowDecryptOnlyFromVerifiedEnclave` statement ensures `kms:Decrypt`
+succeeds only when the attestation document bundled with the request carries
+the expected PCR0.  Re-apply this policy any time you rebuild the EIF.
+
+### 4. Attach the IAM instance role policy
+
+Edit `infra/iam-instance-role-policy.json` — replace `REGION`, `ACCOUNT_ID`,
+and `KEY_ID` — then attach it to the role running the KMS proxy:
+
+```bash
+aws iam put-role-policy \
+  --role-name var-enclave-host \
+  --policy-name VAREnclaveKMS \
+  --policy-document file://infra/iam-instance-role-policy.json
+```
+
+### 5. Install the KMS proxy on the parent instance
+
+```bash
+# Copy proxy.py, requirements.txt, and the systemd unit, then enable.
+make install-proxy
+
+# Set the key ARN — edit the override file created by systemctl edit:
+sudo systemctl edit var-kms-proxy
+# Add under [Service]:
+#   Environment=VAR_KMS_KEY_ARN=arn:aws:kms:us-east-1:…:key/…
+#   Environment=AWS_DEFAULT_REGION=us-east-1
+
+sudo systemctl restart var-kms-proxy
+sudo journalctl -u var-kms-proxy -f   # verify it started cleanly
+```
+
+### 6. Run the enclave
+
+```bash
+# Start the enclave (adjust ENCLAVE_MEMORY and ENCLAVE_CPUS as needed).
+ENCLAVE_MEMORY=1024 ENCLAVE_CPUS=2 make run
+
+# Stream the console.
+make logs
+
+# Terminate.
+make stop
+```
+
+### Makefile reference
+
+| Target | Description |
+| :--- | :--- |
+| `make build` | `zig build` — compile both binaries |
+| `make build-eif` | Build Docker image + EIF, print PCR0 |
+| `make push-ecr` | Push Docker image to ECR |
+| `make run` | `nitro-cli run-enclave` with configurable CID/memory/CPUs |
+| `make stop` | Terminate the running enclave |
+| `make logs` | Stream the enclave console |
+| `make pcr0` | Print PCR0 from the EIF |
+| `make install-proxy` | Install and enable `var-kms-proxy.service` on the host |
+| `make test` | `zig build test` + `pytest` for both Python suites |
+| `make clean` | Remove `zig-out/`, `zig-cache/`, and the EIF |
+
+---
+
 ## Project structure
 
 ```
