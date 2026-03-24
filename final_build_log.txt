@@ -1,0 +1,51 @@
+test
++- run test failure
+error: the host system (aarch64-macos.26.3.1...26.3.1-none) is unable to execute binaries from the target (aarch64-linux.5.10...6.16-musl)
+test
++- run test failure
+error: the host system (aarch64-macos.26.3.1...26.3.1-none) is unable to execute binaries from the target (aarch64-linux.5.10...6.16-musl)
+
+Build Summary: 17/20 steps succeeded; 2 failed
+test transitive failure
++- run test failure
+|  +- compile test Debug aarch64-linux success 1s MaxRSS:265M
+|     +- WriteFile  cached
+|     +- compile lib simdutf Debug aarch64-linux cached 42ms MaxRSS:33M
+|     +- WriteFile hwy cached
+|     +- compile lib highway Debug aarch64-linux cached 45ms MaxRSS:34M
+|     +- WriteFile  cached
+|     +- compile lib utfcpp Debug aarch64-linux cached 29ms MaxRSS:33M
+|     +- compile lib simdutf Debug aarch64-linux (reused)
+|     +- compile lib highway Debug aarch64-linux (reused)
+|     +- compile lib utfcpp Debug aarch64-linux (reused)
+|     +- options cached
+|     +- options cached
+|     +- WriteFile props.zig cached
+|     |  +- run exe props-unigen cached
+|     |  |  +- compile exe props-unigen Debug native cached 40ms MaxRSS:34M
+|     |  |     +- run exe uucode_build_tables (tables.zig) cached
+|     |  |        +- compile exe uucode_build_tables Debug native cached 47ms MaxRSS:34M
+|     |  +- run exe symbols-unigen cached
+|     |     +- compile exe symbols-unigen Debug native cached 40ms MaxRSS:34M
+|     |        +- run exe uucode_build_tables (tables.zig) (+1 more reused dependencies)
+|     +- WriteFile props.zig (+2 more reused dependencies)
+|     +- run exe uucode_build_tables (tables.zig) (+1 more reused dependencies)
++- run test failure
+   +- compile test Debug aarch64-linux success 1s MaxRSS:264M
+      +- WriteFile  (reused)
+      +- compile lib simdutf Debug aarch64-linux (reused)
+      +- WriteFile hwy (reused)
+      +- compile lib highway Debug aarch64-linux (reused)
+      +- WriteFile  (reused)
+      +- compile lib utfcpp Debug aarch64-linux (reused)
+      +- compile lib simdutf Debug aarch64-linux (reused)
+      +- compile lib highway Debug aarch64-linux (reused)
+      +- compile lib utfcpp Debug aarch64-linux (reused)
+      +- options (reused)
+      +- options (reused)
+      +- WriteFile props.zig (+2 more reused dependencies)
+      +- WriteFile props.zig (+2 more reused dependencies)
+      +- run exe uucode_build_tables (tables.zig) (+1 more reused dependencies)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/385ae9682593499f7ca3fa7d26eacb19/build /opt/homebrew/Cellar/zig/0.15.2/bin/zig /opt/homebrew/Cellar/zig/0.15.2/lib/zig /Users/kennjoroge/VAR .zig-cache /Users/kennjoroge/.cache/zig --seed 0x7af814a8 -Z4c392a0fa55b40ba test -Dtarget=aarch64-linux --summary all

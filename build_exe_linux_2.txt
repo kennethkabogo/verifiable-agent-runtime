@@ -1,0 +1,27 @@
+
+Build Summary: 18/18 steps succeeded
+install success
++- install VAR success
+   +- compile exe VAR Debug aarch64-linux success 2s MaxRSS:464M
+      +- WriteFile  cached
+      +- compile lib simdutf Debug aarch64-linux cached 30ms MaxRSS:33M
+      +- WriteFile hwy cached
+      +- compile lib highway Debug aarch64-linux cached 31ms MaxRSS:34M
+      +- WriteFile  cached
+      +- compile lib utfcpp Debug aarch64-linux cached 30ms MaxRSS:33M
+      +- compile lib simdutf Debug aarch64-linux (reused)
+      +- compile lib highway Debug aarch64-linux (reused)
+      +- compile lib utfcpp Debug aarch64-linux (reused)
+      +- options cached
+      +- options cached
+      +- WriteFile props.zig cached
+      |  +- run exe props-unigen cached
+      |  |  +- compile exe props-unigen Debug native cached 39ms MaxRSS:34M
+      |  |     +- run exe uucode_build_tables (tables.zig) cached
+      |  |        +- compile exe uucode_build_tables Debug native cached 37ms MaxRSS:34M
+      |  +- run exe symbols-unigen cached
+      |     +- compile exe symbols-unigen Debug native cached 39ms MaxRSS:34M
+      |        +- run exe uucode_build_tables (tables.zig) (+1 more reused dependencies)
+      +- WriteFile props.zig (+2 more reused dependencies)
+      +- run exe uucode_build_tables (tables.zig) (+1 more reused dependencies)
+

@@ -1,0 +1,44 @@
+install
++- install VAR
+   +- compile exe VAR Debug aarch64-linux 1 errors
+src/runtime/vt.zig:90:64: error: no field named 'current' in struct 'terminal.color.DynamicRGB'
+                    .default = self.terminal.colors.foreground.current,
+                                                               ^~~~~~~
+/Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src/terminal/color.zig:239:24: note: struct declared here
+pub const DynamicRGB = struct {
+                       ^~~~~~
+referenced by:
+    getEvidenceBundle: src/runtime/shell.zig:43:49
+    main: src/main.zig:44:50
+    4 reference(s) hidden; use '-freference-trace=6' to see all references
+error: the following command failed with 1 compilation errors:
+/opt/homebrew/Cellar/zig/0.15.2/bin/zig build-exe -ODebug -target aarch64-linux -mcpu baseline --dep VAR --dep ghostty-vt -Mroot=/Users/kennjoroge/VAR/src/main.zig -target aarch64-linux -mcpu baseline --dep ghostty-vt -MVAR=/Users/kennjoroge/VAR/src/root.zig .zig-cache/o/3deb263eb451ff0708e6492d568d07b0/libsimdutf.a .zig-cache/o/c77325399f906ccc8c62eed17e4d4523/libhighway.a .zig-cache/o/31336ccaa0c8d83af8c7723bcdcc6dfb/libutfcpp.a /Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src/simd/base64.cpp /Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src/simd/codepoint_width.cpp /Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src/simd/index_of.cpp /Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src/simd/vt.cpp -ODebug -target aarch64-linux -mcpu baseline -I .zig-cache/o/1b0e6499039a3a89d078472298db7c5e -I .zig-cache/o/45039aab331e8db7b8d2900b06745fe5 -I .zig-cache/o/5155e8a0f4dfec59e17a2fcd4c6cb7a6 -I /Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src --dep build_options --dep terminal_options --dep unicode_tables --dep symbols_tables --dep uucode -Mghostty-vt=/Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src/lib_vt.zig -Mbuild_options=.zig-cache/c/76ec1252d4670e9488f27e1cff1359cb/options.zig -Mterminal_options=.zig-cache/c/3de0dfdc11de3af7fe46c52c7b5e01bb/options.zig -Municode_tables=.zig-cache/o/a43764e53bd13e87524f725c653298e7/props.zig -Msymbols_tables=.zig-cache/o/a43764e53bd13e87524f725c653298e7/symbols.zig -ODebug -target aarch64-linux -mcpu baseline --dep types.zig --dep config.zig --dep types.x.zig --dep tables --dep get.zig -Muucode=/Users/kennjoroge/.cache/zig/p/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9/src/root.zig -ODebug -target aarch64-linux -mcpu baseline --dep config.zig --dep get.zig -Mtypes.zig=/Users/kennjoroge/.cache/zig/p/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9/src/types.zig -ODebug -target aarch64-linux -mcpu baseline --dep types.zig -Mconfig.zig=/Users/kennjoroge/.cache/zig/p/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9/src/config.zig -ODebug -target aarch64-linux -mcpu baseline --dep config.x.zig -Mtypes.x.zig=/Users/kennjoroge/.cache/zig/p/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9/src/x/types.x.zig -ODebug -target aarch64-linux -mcpu baseline --dep types.zig --dep types.x.zig --dep config.zig --dep build_config -Mtables=.zig-cache/o/4933e7c5df7b81e2b705215ed710b3f5/tables.zig -ODebug -target aarch64-linux -mcpu baseline --dep types.zig --dep tables -Mget.zig=/Users/kennjoroge/.cache/zig/p/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9/src/get.zig -ODebug -target aarch64-linux -mcpu baseline --dep types.x.zig --dep types.zig --dep config.zig -Mconfig.x.zig=/Users/kennjoroge/.cache/zig/p/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9/src/x/config.x.zig -target aarch64-linux -mcpu baseline --dep types.zig --dep config.zig --dep types.x.zig --dep config.x.zig -Mbuild_config=/Users/kennjoroge/.cache/zig/p/ghostty-1.3.2-dev-5UdBC3zy-wR7mukH96i_-4vjcgTF1VI9p_E7G-oiDPZv/src/build/uucode_config.zig -lc++ -lc --cache-dir .zig-cache --global-cache-dir /Users/kennjoroge/.cache/zig --name VAR --zig-lib-dir /opt/homebrew/Cellar/zig/0.15.2/lib/zig/ --listen=-
+
+Build Summary: 15/18 steps succeeded; 1 failed
+install transitive failure
++- install VAR transitive failure
+   +- compile exe VAR Debug aarch64-linux 1 errors
+      +- WriteFile  cached
+      +- compile lib simdutf Debug aarch64-linux cached 27ms MaxRSS:33M
+      +- WriteFile hwy cached
+      +- compile lib highway Debug aarch64-linux cached 30ms MaxRSS:34M
+      +- WriteFile  cached
+      +- compile lib utfcpp Debug aarch64-linux cached 17ms MaxRSS:33M
+      +- compile lib simdutf Debug aarch64-linux (reused)
+      +- compile lib highway Debug aarch64-linux (reused)
+      +- compile lib utfcpp Debug aarch64-linux (reused)
+      +- options cached
+      +- options cached
+      +- WriteFile props.zig cached
+      |  +- run exe props-unigen cached
+      |  |  +- compile exe props-unigen Debug native cached 40ms MaxRSS:34M
+      |  |     +- run exe uucode_build_tables (tables.zig) cached
+      |  |        +- compile exe uucode_build_tables Debug native cached 35ms MaxRSS:34M
+      |  +- run exe symbols-unigen cached
+      |     +- compile exe symbols-unigen Debug native cached 39ms MaxRSS:34M
+      |        +- run exe uucode_build_tables (tables.zig) (+1 more reused dependencies)
+      +- WriteFile props.zig (+2 more reused dependencies)
+      +- run exe uucode_build_tables (tables.zig) (+1 more reused dependencies)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/1a3d0b8b310749795a322eabb496894c/build /opt/homebrew/Cellar/zig/0.15.2/bin/zig /opt/homebrew/Cellar/zig/0.15.2/lib/zig /Users/kennjoroge/VAR .zig-cache /Users/kennjoroge/.cache/zig --seed 0x3ce1dece -Z1a4755755b57f864 -Dtarget=aarch64-linux --summary all
