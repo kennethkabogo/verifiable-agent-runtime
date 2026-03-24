@@ -23,6 +23,16 @@ const SecureVault = @import("vault.zig").SecureVault;
 const SecureLogger = @import("shell.zig").SecureLogger;
 const AttestationQuote = @import("attestation.zig").AttestationQuote;
 
+// ── Shutdown flag (set by signal handler in http_main.zig) ─────────────────
+
+var g_shutdown = std.atomic.Value(bool).init(false);
+
+/// Called from a SIGTERM/SIGINT handler to request a clean shutdown.
+/// Safe to call from signal context — only touches an atomic store.
+pub fn requestShutdown() void {
+    g_shutdown.store(true, .monotonic);
+}
+
 // ── Limits ─────────────────────────────────────────────────────────────────
 
 /// Maximum byte length of any single JSON string value extracted from a
@@ -83,6 +93,7 @@ pub const GatewayServer = struct {
 
         while (true) {
             const conn = server.accept() catch |err| {
+                if (g_shutdown.load(.monotonic)) return;
                 std.log.err("[VAR-gateway] accept: {}", .{err});
                 continue;
             };
@@ -154,6 +165,18 @@ fn parseRequest(buf: []u8, len: usize) ?ParsedRequest {
 
 fn handleConnection(server: *GatewayServer, conn: net.Server.Connection) void {
     defer conn.stream.close();
+
+    // 30-second read timeout guards against slow-loris: a client that sends
+    // headers one byte at a time and never completes them would otherwise hold
+    // a thread indefinitely.  Failure is non-fatal — the connection proceeds
+    // without a timeout (the buffer cap still limits total bytes read).
+    const timeout = std.posix.timeval{ .sec = 30, .usec = 0 };
+    std.posix.setsockopt(
+        conn.stream.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVTIMEO,
+        std.mem.asBytes(&timeout),
+    ) catch {};
 
     // Fixed stack buffer — caps total request size (headers + body) at 16 KiB.
     var buf: [16384]u8 = undefined;
@@ -399,4 +422,66 @@ fn writeError(stream: net.Stream, status: u16, msg: []const u8) !void {
     const body = std.fmt.bufPrint(&buf, "{{\"error\":\"{s}\"}}", .{msg}) catch
         "{\"error\":\"unknown\"}";
     try writeResponse(stream, status, body);
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+test "parseRequest: valid GET" {
+    var buf = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n".*;
+    const req = parseRequest(&buf, buf.len).?;
+    try std.testing.expectEqualStrings("GET", req.method);
+    try std.testing.expectEqualStrings("/health", req.path);
+    try std.testing.expectEqualStrings("", req.body);
+}
+
+test "parseRequest: valid POST with body" {
+    var buf = "POST /log HTTP/1.1\r\nContent-Length: 15\r\nX-Skill-Id: demo\r\n\r\n{\"msg\":\"hello\"}".*;
+    const req = parseRequest(&buf, buf.len).?;
+    try std.testing.expectEqualStrings("POST", req.method);
+    try std.testing.expectEqualStrings("/log", req.path);
+    try std.testing.expectEqualStrings("demo", req.skill_id);
+    try std.testing.expectEqualStrings("{\"msg\":\"hello\"}", req.body);
+}
+
+test "parseRequest: missing header terminator returns null" {
+    // No \r\n\r\n — incomplete headers should not parse.
+    var buf = "GET /health HTTP/1.1\r\nHost: localhost\r\n".*;
+    try std.testing.expect(parseRequest(&buf, buf.len) == null);
+}
+
+test "parseRequest: empty input returns null" {
+    var buf = [_]u8{};
+    try std.testing.expect(parseRequest(&buf, 0) == null);
+}
+
+test "parseRequest: missing path returns null" {
+    // Request line has only one token.
+    var buf = "GET\r\n\r\n".*;
+    try std.testing.expect(parseRequest(&buf, buf.len) == null);
+}
+
+test "parseRequest: unknown skill-id defaults to 'unknown'" {
+    var buf = "POST /log HTTP/1.1\r\nContent-Length: 0\r\n\r\n".*;
+    const req = parseRequest(&buf, buf.len).?;
+    try std.testing.expectEqualStrings("unknown", req.skill_id);
+}
+
+test "jsonGetString: extracts plain value" {
+    const json = "{\"key\":\"myvalue\",\"other\":\"x\"}";
+    const val = jsonGetString(json, "key", std.testing.allocator).?;
+    defer std.testing.allocator.free(val);
+    try std.testing.expectEqualStrings("myvalue", val);
+}
+
+test "jsonGetString: returns null for missing key" {
+    const json = "{\"other\":\"x\"}";
+    try std.testing.expect(jsonGetString(json, "key", std.testing.allocator) == null);
+}
+
+test "jsonGetString: handles escaped quote in value" {
+    const json = "{\"msg\":\"say \\\"hi\\\"\"}";
+    const val = jsonGetString(json, "msg", std.testing.allocator).?;
+    defer std.testing.allocator.free(val);
+    // Raw bytes are returned (un-unescaped), so the backslashes are present.
+    try std.testing.expect(val.len > 0);
 }

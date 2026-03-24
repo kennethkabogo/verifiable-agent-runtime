@@ -18,10 +18,29 @@ const sealed_state = @import("runtime/sealed_state.zig");
 ///   Agent   → Enclave RESUME:<hex_blob>           (sent after READY to restore state)
 ///   Enclave → Agent   RESUMED:session=<hex>:seq=<n>
 ///
+/// No-op signal handler: converts SIGTERM/SIGINT into EINTR on blocked syscalls
+/// so that the read loop's `catch` branch fires, breaks the loop, and the
+/// `defer vault.deinit()` runs — wiping secrets before the process exits.
+fn handleShutdown(sig: c_int) callconv(.C) void {
+    _ = sig;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    // Install signal handlers before touching any secrets.  A no-op handler
+    // causes SIGTERM/SIGINT to interrupt blocked syscalls (returning EINTR)
+    // rather than terminating the process immediately, so the defers below
+    // — including vault.deinit() which wipes all secrets — always run.
+    const sa = std.posix.Sigaction{
+        .handler = .{ .handler = handleShutdown },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null) catch {};
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null) catch {};
 
     std.debug.print("[VAR] Initializing Verifiable Agent Runtime...\n", .{});
 
