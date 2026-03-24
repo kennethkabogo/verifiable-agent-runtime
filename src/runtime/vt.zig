@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 const vt = @import("ghostty-vt");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -124,3 +125,75 @@ pub const VerifiableTerminal = struct {
         return out;
     }
 };
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+test "empty terminal digest is reproducible across instances" {
+    // Two freshly-initialised terminals with no input must produce the same
+    // hash — proves the digest is a pure function of visible state, not of
+    // any pointer address or allocation order.
+    var vt1 = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer vt1.deinit();
+    var vt2 = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer vt2.deinit();
+
+    try testing.expectEqualSlices(u8, &vt1.digestState(), &vt2.digestState());
+}
+
+test "digest changes after input" {
+    var term = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer term.deinit();
+
+    const before = term.digestState();
+    term.processInput("hello");
+    const after = term.digestState();
+
+    // The screen changed, so the hash must differ.
+    try testing.expect(!std.mem.eql(u8, &before, &after));
+}
+
+test "same input on two instances produces identical digest" {
+    // Core determinism claim: the digest is a function of the rendered screen,
+    // not of when or how bytes arrived.  Feeding identical bytes to two
+    // independent terminals must yield the same final hash.
+    var vt1 = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer vt1.deinit();
+    var vt2 = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer vt2.deinit();
+
+    const input = "VAR determinism test\r\n";
+    vt1.processInput(input);
+    vt2.processInput(input);
+
+    try testing.expectEqualSlices(u8, &vt1.digestState(), &vt2.digestState());
+}
+
+test "chunked vs whole input yields same digest" {
+    // Bytes arriving in different chunk sizes must produce the same terminal
+    // state — the VT state machine must be stateless with respect to framing.
+    var whole = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer whole.deinit();
+    var chunked = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer chunked.deinit();
+
+    const input = "chunk test ABCDE\r\n";
+    whole.processInput(input);
+    // Feed the same bytes one at a time.
+    for (input) |byte| {
+        chunked.processInput(&[_]u8{byte});
+    }
+
+    try testing.expectEqualSlices(u8, &whole.digestState(), &chunked.digestState());
+}
+
+test "different inputs produce different digests" {
+    var vt1 = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer vt1.deinit();
+    var vt2 = try VerifiableTerminal.init(testing.allocator, 80, 24);
+    defer vt2.deinit();
+
+    vt1.processInput("agent action A");
+    vt2.processInput("agent action B");
+
+    try testing.expect(!std.mem.eql(u8, &vt1.digestState(), &vt2.digestState()));
+}

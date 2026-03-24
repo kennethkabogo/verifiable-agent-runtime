@@ -182,12 +182,25 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    // Test executable for the HTTP gateway (http_main.zig → http.zig tests).
+    // Separate from exe_tests because the gateway does not use libcrypto/libC.
+    const gateway_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    gateway_tests.root_module.addImport("ghostty-vt", ghostty_vt);
+    const run_gateway_tests = b.addRunArtifact(gateway_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_gateway_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
