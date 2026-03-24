@@ -147,7 +147,9 @@ pub const VerifiableTerminal = struct {
                         hasher.update(&[_]u8{attr_mask});
                     }
                 }
-                return hasher.final();
+                var digest: [32]u8 = undefined;
+                hasher.final(&digest);
+                return digest;
             }
             fn mock(s: *VerifiableTerminal) [32]u8 { _ = s; return [_]u8{0xDD} ** 32; }
         };
