@@ -119,7 +119,9 @@ def _verify_nitro_cose(doc_bytes: bytes) -> "tuple[bool, str, dict | None]":
     if leaf_der is None:
         return False, "payload missing 'certificate' field", None
 
-    # Chain order from Nitro docs: [leaf, ...intermediates, root]
+    # Nitro cabundle order: [leaf_parent, ..., root] (leaf-to-root, leaf not included).
+    # If verification fails on real hardware with "cert[0] not signed by cert[1]",
+    # try reversing: chain_ders = [leaf_der] + list(reversed(cabundle))
     chain_ders = [leaf_der] + list(cabundle)
     try:
         certs = [_load_cert(der) for der in chain_ders]
@@ -158,8 +160,13 @@ def _verify_nitro_cose(doc_bytes: bytes) -> "tuple[bool, str, dict | None]":
     except Exception as exc:
         return False, f"COSE signature verify error: {exc}", None
 
-    depth   = len(certs)
-    leaf_cn = certs[0].subject.rfc4514_string().split("CN=")[-1][:40]
+    depth = len(certs)
+    try:
+        from cryptography.x509.oid import NameOID as _NameOID
+        cn_attrs = certs[0].subject.get_attributes_for_oid(_NameOID.COMMON_NAME)
+        leaf_cn  = cn_attrs[0].value[:40] if cn_attrs else "(no CN)"
+    except Exception:
+        leaf_cn = "(unknown)"
     return True, f"chain depth={depth}, leaf={leaf_cn}", payload
 
 # ANSI colour helpers (auto-disabled when stdout is not a tty or --json is used).
