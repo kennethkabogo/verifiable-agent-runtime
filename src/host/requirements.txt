@@ -1,0 +1,8 @@
+# Runtime dependencies for var_kms_proxy (src/host/proxy.py).
+# Tested against Python 3.11+.
+#
+# Install:  pip install -r requirements.txt
+# Dev/test: pip install -r requirements-dev.txt
+
+boto3>=1.34.0
+botocore>=1.34.0
