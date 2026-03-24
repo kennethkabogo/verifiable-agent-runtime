@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "KMS key policy for the VAR enclave DEK-wrapping CMK.",
+    "",
+    "Before applying this policy:",
+    "  1. Replace ACCOUNT_ID with your 12-digit AWS account ID.",
+    "  2. Replace KEY_ADMIN_ARN with the IAM principal that manages the key",
+    "     (e.g. arn:aws:iam::ACCOUNT_ID:role/key-admin).",
+    "  3. Replace INSTANCE_ROLE_ARN with the EC2 instance role that runs the",
+    "     KMS proxy (e.g. arn:aws:iam::ACCOUNT_ID:role/var-enclave-host).",
+    "  4. Replace PCR0_HEX with the PCR0 measurement printed by `make pcr0`.",
+    "     Re-apply this policy every time the enclave image is rebuilt."
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "KeyAdministration",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ACCOUNT_ID:role/KEY_ADMIN_ARN"
+      },
+      "Action": [
+        "kms:Create*",
+        "kms:Describe*",
+        "kms:Enable*",
+        "kms:List*",
+        "kms:Put*",
+        "kms:Update*",
+        "kms:Revoke*",
+        "kms:Disable*",
+        "kms:Get*",
+        "kms:Delete*",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowEncrypt",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ACCOUNT_ID:role/INSTANCE_ROLE_ARN"
+      },
+      "Action": [
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowDecryptOnlyFromVerifiedEnclave",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ACCOUNT_ID:role/INSTANCE_ROLE_ARN"
+      },
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:PCR0": "PCR0_HEX"
+        }
+      }
+    }
+  ]
+}

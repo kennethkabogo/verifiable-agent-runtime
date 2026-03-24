@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "IAM inline policy for the EC2 instance role that runs the VAR KMS proxy.",
+    "",
+    "This policy grants the minimum permissions required for the proxy:",
+    "  - kms:Encrypt / kms:GenerateDataKey: wrap the enclave DEK on first seal",
+    "  - kms:Decrypt: unwrap the DEK on resume (further restricted by PCR0",
+    "    attestation condition in the key policy — see kms-key-policy.json)",
+    "  - kms:DescribeKey: read key metadata for health checks",
+    "",
+    "Replace KEY_ARN with the full ARN of your CMK."
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VAREnclaveKMS",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey"
+      ],
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/KEY_ID"
+    }
+  ]
+}
