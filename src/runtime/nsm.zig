@@ -193,6 +193,16 @@ fn writeCborBytes(buf: []u8, start: usize, b: []const u8) !usize {
         pos += 1;
         buf[pos] = @intCast(len);
         pos += 1;
+    } else if (len <= 0xFFFF) {
+        // 3-byte header: major type 2 (0x59) + 2-byte big-endian length.
+        // Required for RSA-2048 SubjectPublicKeyInfo DER (~294 bytes).
+        if (pos + 3 + len > buf.len) return error.CborBufferOverflow;
+        buf[pos] = 0x59;
+        pos += 1;
+        buf[pos] = @intCast((len >> 8) & 0xFF);
+        pos += 1;
+        buf[pos] = @intCast(len & 0xFF);
+        pos += 1;
     } else {
         return error.CborBytesTooLong;
     }
