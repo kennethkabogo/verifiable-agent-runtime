@@ -21,7 +21,7 @@ const sealed_state = @import("runtime/sealed_state.zig");
 /// No-op signal handler: converts SIGTERM/SIGINT into EINTR on blocked syscalls
 /// so that the read loop's `catch` branch fires, breaks the loop, and the
 /// `defer vault.deinit()` runs — wiping secrets before the process exits.
-fn handleShutdown(sig: c_int) callconv(.C) void {
+fn handleShutdown(sig: c_int) callconv(.c) void {
     _ = sig;
 }
 
@@ -36,11 +36,11 @@ pub fn main() !void {
     // — including vault.deinit() which wipes all secrets — always run.
     const sa = std.posix.Sigaction{
         .handler = .{ .handler = handleShutdown },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.TERM, &sa, null) catch {};
-    std.posix.sigaction(std.posix.SIG.INT, &sa, null) catch {};
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
 
     std.debug.print("[VAR] Initializing Verifiable Agent Runtime...\n", .{});
 
