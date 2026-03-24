@@ -58,30 +58,42 @@ try:
     from cryptography.hazmat.primitives.asymmetric import ec as _ec
     from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
     from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature as _enc_dss
-    from cryptography.x509 import load_der_x509_certificate as _load_cert
+    from cryptography.x509 import (
+        load_der_x509_certificate as _load_cert,
+        load_pem_x509_certificate as _load_pem_cert,
+    )
     from cryptography.exceptions import InvalidSignature as _InvalidSig
     HAS_COSE = True
 except ImportError:
     HAS_COSE = False
 
-# AWS Nitro Enclaves root CA certificate (DER, base64-encoded).
+# AWS Nitro Enclaves root CA certificate (DER).
 # Source: https://aws-nitro-enclaves.amazonaws.com/AWS_NitroEnclaves_Root-G1.zip
-# Verify independently: sha256(DER) =
-#   8cf60e2b2efca96c6a9e71e851d00c1b6991cc09b3ad4e6dfe87a6a885b0c9b
-_AWS_NITRO_ROOT_DER = base64.b64decode(
-    "MIICETCCAZagAwIBAgIRAPkxdWgbkK/hHUbMtOTn+FYwCgYIKoZIzj0EAwMwSTEL"
-    "MAkGA1UEBhMCVVMxDzANBgNVBAoMBkFtYXpvbjEMMAoGA1UECwwDQVdTMRswGQYD"
-    "VQQDDBJhd3Mubml0cm8tZW5jbGF2ZXMwHhcNMTkxMDI4MTMyODA1WhcNNDkxMDI4"
-    "MTQyODA1WjBJMQswCQYDVQQGEwJVUzEPMA0GA1UECgwGQW1hem9uMQwwCkYDVQQL"
-    "DANBV1MxGzAZBgNVBAMMEmF3cy5uaXRyby1lbmNsYXZlczB2MBAGByqGSM49AgEG"
-    "BSuBBAAiA2IABExeRI1U8tmkGcl3lSuHBDv9a1Zt3CmW7P6z9PmFMdFqfOqbJJmC"
-    "jRfxuMwvLf47sLQ4s1P1MBGo0jK6zGwK1KHdMlzK7BrKPKNJ+tAWH6KllRJ2aeI"
-    "t9pDFlSEMSHmqKNjMGEwHQYDVR0OBBYEFJAltQ3ZGFATfJbh/BLSiuNAQTPmMB8G"
-    "A1UdIwQYMBaAFJAltQ3ZGFATfJbh/BLSiuNAQTPmMA8GA1UdEwEB/wQFMAMBAf8w"
-    "DgYDVR0PAQH/BAQDAgGGMAoGCCqGSM49BAMDA2kAMGYCMQDkMigE5pwEHf3m9iiR"
-    "E1FUHPHYMPLVMEUg+lMIpO9lh2HKo8OEFiKmMBiSkTwRjnkCMQCJ0IGzUdM6yk7E"
-    "nnF01Gq3MfhLTi2VBkK2kGiLklwaCBnwWS3/CGAbxlRqJ6XBPEE="
+# SHA256(ZIP):  8cf60e2b2efca96c6a9e71e851d00c1b6991cc09eadbe64a6a1d1b1eb9faff7c
+# SHA256(DER):  3cbb6f612339e9290fc9c9349760e0f2535d8f8d257c1833995cdf810c1da36a
+# Verify before trusting: https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html
+_AWS_NITRO_ROOT_PEM = (
+    b"-----BEGIN CERTIFICATE-----\n"
+    b"MIICETCCAZagAwIBAgIRAPkxdWgbkK/hHUbMtOTn+FYwCgYIKoZIzj0EAwMwSTEL\n"
+    b"MAkGA1UEBhMCVVMxDzANBgNVBAoMBkFtYXpvbjEMMAoGA1UECwwDQVdTMRswGQYD\n"
+    b"VQQDDBJhd3Mubml0cm8tZW5jbGF2ZXMwHhcNMTkxMDI4MTMyODA1WhcNNDkxMDI4\n"
+    b"MTQyODA1WjBJMQswCQYDVQQGEwJVUzEPMA0GA1UECgwGQW1hem9uMQwwCgYDVQQL\n"
+    b"DANBV1MxGzAZBgNVBAMMEmF3cy5uaXRyby1lbmNsYXZlczB2MBAGByqGSM49AgEG\n"
+    b"BQuBBAAiA2IABPwCVOumCMHzaHDimtqQvkY4MpJzbolL//Zy2YlES1BR5TSksfbb\n"
+    b"48C8WBoyt7F2Bw7eEtaaP+ohG2bnUs990d0JX28TcPQXCEPZ3BABIeTPYwEoCWZE\n"
+    b"h8l5YoQwTcU/9KNCMEAwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUkCW1DdkF\n"
+    b"R+eWw5b6cp3PmanfS5YwDgYDVR0PAQH/BAQDAgGGMAoGCCqGSM49BAMDA2kAMGYC\n"
+    b"MQCjfy+Rocm9Xue4YnwWmNJVA44fA0P5W2OpYow9OYCVRaEevL8uO1XYru5xtMPW\n"
+    b"rfMCMQCi85sWBbJwKKXdS6BptQFuZbT73o/gBh1qUxl/nNr12UO8Yfwr6wPLb+6N\n"
+    b"IwLz3/Y=\n"
+    b"-----END CERTIFICATE-----\n"
 )
+
+# Decode once at import time into DER bytes for fast comparison in _verify_nitro_cose.
+if HAS_COSE:
+    _AWS_NITRO_ROOT_DER: bytes = _load_pem_cert(_AWS_NITRO_ROOT_PEM).public_bytes(_ser.Encoding.DER)
+else:
+    _AWS_NITRO_ROOT_DER = b""  # populated once cryptography is available
 
 
 def _verify_nitro_cose(doc_bytes: bytes) -> "tuple[bool, str, dict | None]":
