@@ -18,7 +18,7 @@ pub const VerifiableTerminal = struct {
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !VerifiableTerminal {
         const Impl = struct {
             fn real(a: std.mem.Allocator, w: u16, h: u16) !VerifiableTerminal {
-                const terminal = try vt.Terminal.init(a, .{
+                var terminal = try vt.Terminal.init(a, .{
                     .cols = w,
                     .rows = h,
                     .max_scrollback = 0,
