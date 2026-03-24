@@ -3,6 +3,7 @@
 # Targets
 #   build           zig build (produces zig-out/bin/VAR and zig-out/bin/VAR-gateway)
 #   build-eif       build Docker image and package into an Enclave Image File
+#   create-ecr      create the ECR repository (idempotent; run once before push-ecr)
 #   push-ecr        push the Docker image to ECR (requires AWS credentials)
 #   run             start the enclave (requires nitro-cli and an EIF)
 #   stop            terminate the running enclave
@@ -27,7 +28,7 @@ ENCLAVE_CPUS   ?= 2
 EIF_PATH       ?= var.eif
 
 # ──────────────────────────────────────────────────────────────────────────────
-.PHONY: all build build-eif push-ecr run stop logs pcr0 install-proxy test clean
+.PHONY: all build build-eif create-ecr push-ecr run stop logs pcr0 install-proxy test clean
 
 all: build
 
@@ -45,7 +46,17 @@ build-eif:
 	@echo "EIF written to $(EIF_PATH).  PCR0:"
 	@$(MAKE) --no-print-directory pcr0
 
-# 3. Push Docker image to ECR
+# 3a. Create the ECR repository (idempotent — safe to run if it already exists)
+create-ecr:
+	aws ecr create-repository \
+	  --repository-name var-enclave \
+	  --region $(AWS_DEFAULT_REGION) \
+	  --image-scanning-configuration scanOnPush=true \
+	  --encryption-configuration encryptionType=AES256 \
+	  2>&1 | grep -v "RepositoryAlreadyExistsException" || true
+	@echo "ECR repository ready: $(ECR_REPO)"
+
+# 3b. Push Docker image to ECR (run create-ecr first if the repo does not exist)
 push-ecr:
 	aws ecr get-login-password --region $(AWS_DEFAULT_REGION) \
 	  | docker login --username AWS --password-stdin $(ECR_REPO)

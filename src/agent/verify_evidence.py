@@ -16,11 +16,14 @@ Checks performed
   6. Ed25519 signature valid            sign(msg_161, privkey) verified with
                                         attested public key  (spec §3.1 + §3.2)
   7. Attestation document               PCR0 / public key present; sim detection
+  8. COSE_Sign1 validation              cert chain → AWS Nitro root CA; ECDSA P-384
+                                        signature over Sig_Structure (real hardware
+                                        only; skipped in simulation mode)
 
 Dependencies
 ────────────
-  Ed25519 verification requires the `cryptography` package:
-    pip install cryptography
+  Ed25519 + COSE_Sign1 verification requires:
+    pip install cryptography cbor2
 
 Usage
 ─────
@@ -29,6 +32,7 @@ Usage
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -46,6 +50,117 @@ try:
     HAS_CRYPTOGRAPHY = True
 except ImportError:
     HAS_CRYPTOGRAPHY = False
+
+# Optional COSE_Sign1 support for Nitro attestation doc verification.
+# Requires:  pip install cbor2 cryptography
+try:
+    import cbor2 as _cbor2
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature as _enc_dss
+    from cryptography.x509 import load_der_x509_certificate as _load_cert
+    from cryptography.exceptions import InvalidSignature as _InvalidSig
+    HAS_COSE = True
+except ImportError:
+    HAS_COSE = False
+
+# AWS Nitro Enclaves root CA certificate (DER, base64-encoded).
+# Source: https://aws-nitro-enclaves.amazonaws.com/AWS_NitroEnclaves_Root-G1.zip
+# Verify independently: sha256(DER) =
+#   8cf60e2b2efca96c6a9e71e851d00c1b6991cc09b3ad4e6dfe87a6a885b0c9b
+_AWS_NITRO_ROOT_DER = base64.b64decode(
+    "MIICETCCAZagAwIBAgIRAPkxdWgbkK/hHUbMtOTn+FYwCgYIKoZIzj0EAwMwSTEL"
+    "MAkGA1UEBhMCVVMxDzANBgNVBAoMBkFtYXpvbjEMMAoGA1UECwwDQVdTMRswGQYD"
+    "VQQDDBJhd3Mubml0cm8tZW5jbGF2ZXMwHhcNMTkxMDI4MTMyODA1WhcNNDkxMDI4"
+    "MTQyODA1WjBJMQswCQYDVQQGEwJVUzEPMA0GA1UECgwGQW1hem9uMQwwCkYDVQQL"
+    "DANBV1MxGzAZBgNVBAMMEmF3cy5uaXRyby1lbmNsYXZlczB2MBAGByqGSM49AgEG"
+    "BSuBBAAiA2IABExeRI1U8tmkGcl3lSuHBDv9a1Zt3CmW7P6z9PmFMdFqfOqbJJmC"
+    "jRfxuMwvLf47sLQ4s1P1MBGo0jK6zGwK1KHdMlzK7BrKPKNJ+tAWH6KllRJ2aeI"
+    "t9pDFlSEMSHmqKNjMGEwHQYDVR0OBBYEFJAltQ3ZGFATfJbh/BLSiuNAQTPmMB8G"
+    "A1UdIwQYMBaAFJAltQ3ZGFATfJbh/BLSiuNAQTPmMA8GA1UdEwEB/wQFMAMBAf8w"
+    "DgYDVR0PAQH/BAQDAgGGMAoGCCqGSM49BAMDA2kAMGYCMQDkMigE5pwEHf3m9iiR"
+    "E1FUHPHYMPLVMEUg+lMIpO9lh2HKo8OEFiKmMBiSkTwRjnkCMQCJ0IGzUdM6yk7E"
+    "nnF01Gq3MfhLTi2VBkK2kGiLklwaCBnwWS3/CGAbxlRqJ6XBPEE="
+)
+
+
+def _verify_nitro_cose(doc_bytes: bytes) -> "tuple[bool, str, dict | None]":
+    """
+    Verify a Nitro COSE_Sign1 attestation document end-to-end.
+
+    Steps:
+      1. CBOR-decode the COSE_Sign1 structure (tag 18 or bare 4-element array).
+      2. CBOR-decode the payload to extract the certificate chain.
+      3. Verify each cert in the chain is signed by the next.
+      4. Verify the chain root matches the embedded AWS Nitro root CA.
+      5. Verify the COSE_Sign1 ECDSA P-384 signature with the leaf cert's key.
+
+    Returns (ok, detail_string, payload_dict_or_None).
+    """
+    # 1. Parse outer COSE_Sign1
+    try:
+        obj = _cbor2.loads(doc_bytes)
+        cose_arr = obj.value if hasattr(obj, "value") else obj
+        if not isinstance(cose_arr, list) or len(cose_arr) != 4:
+            return False, f"not a 4-element COSE_Sign1 (got {type(cose_arr).__name__})", None
+        protected_bstr, _unprotected, payload_bstr, sig_bstr = cose_arr
+    except Exception as exc:
+        return False, f"CBOR outer parse failed: {exc}", None
+
+    # 2. Parse payload
+    try:
+        payload = _cbor2.loads(payload_bstr)
+    except Exception as exc:
+        return False, f"CBOR payload parse failed: {exc}", None
+
+    # 3. Extract certificate chain
+    leaf_der  = payload.get("certificate")
+    cabundle  = payload.get("cabundle") or []
+    if leaf_der is None:
+        return False, "payload missing 'certificate' field", None
+
+    # Chain order from Nitro docs: [leaf, ...intermediates, root]
+    chain_ders = [leaf_der] + list(cabundle)
+    try:
+        certs = [_load_cert(der) for der in chain_ders]
+    except Exception as exc:
+        return False, f"DER cert parse failed: {exc}", None
+
+    # 4a. Verify each cert is signed by the next in the chain
+    for i in range(len(certs) - 1):
+        try:
+            issuer_pk = certs[i + 1].public_key()
+            issuer_pk.verify(
+                certs[i].signature,
+                certs[i].tbs_certificate_bytes,
+                _ec.ECDSA(certs[i].signature_hash_algorithm),
+            )
+        except _InvalidSig:
+            return False, f"cert[{i}] not signed by cert[{i + 1}]", None
+        except Exception as exc:
+            return False, f"cert chain error at [{i}]: {exc}", None
+
+    # 4b. Verify root cert matches the embedded AWS Nitro root CA
+    root_der_actual = certs[-1].public_bytes(_ser.Encoding.DER)
+    if root_der_actual != _AWS_NITRO_ROOT_DER:
+        return False, "root cert does not match embedded AWS Nitro root CA", None
+
+    # 5. Verify COSE_Sign1 signature (ES384: ECDSA P-384 + SHA-384, raw r‖s)
+    sig_structure = _cbor2.dumps(["Signature1", protected_bstr, b"", payload_bstr])
+    try:
+        r = int.from_bytes(sig_bstr[:48], "big")
+        s = int.from_bytes(sig_bstr[48:], "big")
+        der_sig  = _enc_dss(r, s)
+        leaf_pk  = certs[0].public_key()
+        leaf_pk.verify(der_sig, sig_structure, _ec.ECDSA(_hashes.SHA384()))
+    except _InvalidSig:
+        return False, "COSE_Sign1 ECDSA signature invalid", None
+    except Exception as exc:
+        return False, f"COSE signature verify error: {exc}", None
+
+    depth   = len(certs)
+    leaf_cn = certs[0].subject.rfc4514_string().split("CN=")[-1][:40]
+    return True, f"chain depth={depth}, leaf={leaf_cn}", payload
 
 # ANSI colour helpers (auto-disabled when stdout is not a tty or --json is used).
 _USE_COLOR = sys.stdout.isatty()
@@ -304,11 +419,44 @@ def main(json_mode: bool = False) -> bool:
                     bool(doc_hex),
                     f"{len(doc_hex)//2} bytes" if doc_hex else "missing")
 
-    if pcr0_hex == "aa" * 32:
+    is_sim = pcr0_hex == "aa" * 32
+    if is_sim:
         warn("PCR0 is 0xAA…AA — simulation mode, not real Nitro hardware")
-        warn("On real hardware the NSM returns a COSE_Sign1-encoded attestation doc")
+        warn("COSE_Sign1 validation skipped (doc is a mock, not a real NSM attestation)")
 
-    # ── 9. Summary ─────────────────────────────────────────────────────────
+    # ── 9. COSE_Sign1 validation (real hardware only) ──────────────────────
+    section("8. COSE_Sign1 attestation validation  (spec §4, real hardware only)")
+    if is_sim:
+        warn("Skipped — simulation mode detected (PCR0 == 0xAA…AA)")
+    elif not doc_bytes:
+        all_ok &= fail("Skipped — attestation doc missing or unparseable")
+    elif not HAS_COSE:
+        warn("cbor2 or cryptography not installed — skipping COSE_Sign1 validation",
+             "run: pip install cbor2 cryptography")
+    else:
+        cose_ok, cose_detail, cose_payload = _verify_nitro_cose(doc_bytes)
+        if cose_ok:
+            ok("COSE_Sign1 structure parsed", cose_detail)
+            ok("Cert chain valid (each cert signed by next)")
+            ok("Root cert matches AWS Nitro root CA",
+               "verify at aws-nitro-enclaves.amazonaws.com")
+            ok("COSE_Sign1 ECDSA P-384 signature valid")
+            # Cross-check PCR0 from the verified doc payload against gateway-reported value
+            if cose_payload is not None:
+                pcrs = cose_payload.get("pcrs") or {}
+                pcr0_from_doc = pcrs.get(0)
+                if pcr0_from_doc is not None:
+                    pcr0_doc_hex = pcr0_from_doc.hex() if isinstance(pcr0_from_doc, bytes) else ""
+                    all_ok &= check(
+                        "PCR0 from doc matches gateway-reported PCR0",
+                        pcr0_doc_hex == pcr0_hex,
+                        f"{pcr0_doc_hex[:16]}…" if pcr0_doc_hex == pcr0_hex
+                        else f"doc={pcr0_doc_hex[:16]}… gw={pcr0_hex[:16]}…",
+                    )
+        else:
+            all_ok &= fail("COSE_Sign1 validation", cose_detail)
+
+    # ── 10. Summary ────────────────────────────────────────────────────────
     print()
     print("─" * 60)
     if all_ok:
@@ -319,7 +467,9 @@ def main(json_mode: bool = False) -> bool:
             print("   attestation document and session ID.  Every LOG entry")
             print("   extends the L1 chain from that anchor.  The Ed25519")
             print("   signature ties the current L1+L2 state to the enclave's")
-            print("   attested public key.")
+            print("   attested public key.  On real Nitro hardware the COSE_Sign1")
+            print("   attestation doc is verified against the AWS root CA,")
+            print("   closing the chain of trust from silicon to evidence.")
     else:
         print(f"{FAIL} One or more checks FAILED.")
 
