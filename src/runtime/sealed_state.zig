@@ -11,17 +11,19 @@
 ///   Simulation (no /dev/nsm): XOR with a fixed mock wrapping key.
 ///     Intent: exercises the full pipeline without real hardware.
 ///     Security: none — dev/test only.
-///   Production (real Nitro):  TODO — replace sealDek/unsealDek bodies with an
-///     AWS KMS GenerateDataKey + Decrypt call conditioned on a Nitro attestation
-///     document.  The KMS key policy restricts decryption to enclaves whose PCR0
-///     matches the known-good enclave image, so the DEK is unrecoverable by the
-///     host or any other binary.
+///   Production (real Nitro):  kms:Encrypt (seal) / kms:Decrypt (unseal) via a
+///     host-side vsock proxy (CID 2, port VAR_KMS_PROXY_PORT, default 8443).
+///     The CMK key policy restricts kms:Decrypt to enclaves whose PCR0 matches
+///     the known-good image.  Set VAR_KMS_KEY_ARN to the CMK ARN before launch.
+///     Future upgrade: Nitro "recipient" flow (ephemeral RSA + attestation doc)
+///     so the proxy never sees the plaintext DEK.
 ///
 /// Sealed blob wire format (binary, then hex-encoded for the line protocol):
-///   [sealed_dek  : 32 bytes]   wrapped AES-256 key
-///   [nonce       : 12 bytes]   AES-GCM nonce
-///   [tag         : 16 bytes]   AES-GCM authentication tag
-///   [ciphertext  : N bytes]    AES-256-GCM ciphertext of the serialized state
+///   [sealed_dek_len : 4 bytes]   u32 LE — byte length of the wrapped key
+///   [sealed_dek     : N bytes]   wrapped AES-256 key (32 bytes in sim; KMS ciphertext in prod)
+///   [nonce          : 12 bytes]  AES-GCM nonce
+///   [tag            : 16 bytes]  AES-GCM authentication tag
+///   [ciphertext     : M bytes]   AES-256-GCM ciphertext of the serialized state
 ///
 /// Serialized plaintext format:
 ///   [magic        : 4 ]  "VARS"
@@ -30,7 +32,7 @@
 ///   [stream_hash  : 32]  current L1 hash chain tip (spec §2.1)
 ///   [prev_hash    : 32]  L1 hash at last evidence emission
 ///   [sequence     : 8 ]  u64 LE — next sequence number on resume
-///   [ed25519_seed : 32]  first 32 bytes of the secret key; keypair is re-derived
+///   [secret_key   : 64]  full Ed25519 secret key bytes (seed || public key)
 ///   [vault_count  : 4 ]  u32 LE
 ///   per vault entry:
 ///     [key_len    : 2 ]  u16 LE
@@ -48,6 +50,7 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const SecureVault = @import("vault.zig").SecureVault;
 const SecureLogger = @import("shell.zig").SecureLogger;
+const VsockHandler = @import("vsock.zig").VsockHandler;
 
 // ---------------------------------------------------------------------------
 // Wire-format constants
@@ -57,11 +60,17 @@ const MAGIC = [4]u8{ 'V', 'A', 'R', 'S' };
 const FORMAT_VERSION: u8 = 0x01;
 
 /// Minimum plaintext size: magic(4) + version(1) + session_id(16) +
-/// stream_hash(32) + prev_hash(32) + sequence(8) + seed(32) + vault_count(4) = 129
-const MIN_PLAINTEXT: usize = 129;
+/// stream_hash(32) + prev_hash(32) + sequence(8) + secret_key(64) + vault_count(4) = 161
+const MIN_PLAINTEXT: usize = 161;
 
-/// Minimum sealed blob size: sealed_dek(32) + nonce(12) + tag(16) = 60
-const MIN_BLOB: usize = 60;
+/// Minimum and maximum byte lengths for the wrapped DEK field.
+/// Simulation (XOR): exactly 32 bytes.
+/// Production (KMS): ciphertext varies by key type; cap at 1 KiB to prevent OOM.
+const MIN_SEALED_DEK_LEN: usize = 32;
+const MAX_SEALED_DEK_LEN: usize = 1024;
+
+/// Minimum sealed blob size: sealed_dek_len(4) + min_sealed_dek(32) + nonce(12) + tag(16) = 64
+const MIN_BLOB: usize = 4 + MIN_SEALED_DEK_LEN + 12 + 16;
 
 // ---------------------------------------------------------------------------
 // Captured runtime state
@@ -76,9 +85,9 @@ pub const CapturedState = struct {
     stream_hash: [32]u8,
     prev_stream_hash: [32]u8,
     sequence: u64,
-    /// First 32 bytes of the Ed25519 secret key (the seed).
-    /// The keypair is deterministically re-derived from this on restore.
-    ed25519_seed: [32]u8,
+    /// Full 64-byte Ed25519 secret key (seed || public key).
+    /// The keypair is reconstructed directly from these bytes on restore.
+    secret_key_bytes: [64]u8,
     vault_entries: []Entry,
 
     pub const Entry = struct {
@@ -94,7 +103,7 @@ pub const CapturedState = struct {
             self.allocator.free(e.value);
         }
         self.allocator.free(self.vault_entries);
-        std.crypto.utils.secureZero(u8, &self.ed25519_seed);
+        std.crypto.utils.secureZero(u8, &self.secret_key_bytes);
     }
 };
 
@@ -131,14 +140,10 @@ pub fn capture(
         defer logger.mutex.unlock();
         break :blk logger.sequence;
     };
-    const ed25519_seed = blk: {
+    const secret_key_bytes = blk: {
         logger.mutex.lock();
         defer logger.mutex.unlock();
-        // The first 32 bytes of the 64-byte secret key are the RFC 8032 seed.
-        const sk_bytes = logger.keypair.secret_key.toBytes();
-        var seed: [32]u8 = undefined;
-        @memcpy(&seed, sk_bytes[0..32]);
-        break :blk seed;
+        break :blk logger.keypair.secret_key.toBytes();
     };
 
     // Snapshot vault entries.
@@ -167,7 +172,7 @@ pub fn capture(
         .stream_hash = stream_hash,
         .prev_stream_hash = prev_stream_hash,
         .sequence = sequence,
-        .ed25519_seed = ed25519_seed,
+        .secret_key_bytes = secret_key_bytes,
         .vault_entries = entries,
     };
 }
@@ -208,8 +213,12 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
     logger.prev_stream_hash = state.prev_stream_hash;
     logger.sequence = state.sequence;
 
-    // Re-derive the Ed25519 keypair from the stored seed.
-    logger.keypair = try Ed25519.KeyPair.generate(state.ed25519_seed);
+    // Reconstruct the Ed25519 keypair directly from the stored secret key bytes
+    // (seed || public_key).  Direct struct construction avoids any dependence on
+    // a seeded-generate API whose exact name varies across Zig versions.
+    const sk = Ed25519.SecretKey{ .bytes = state.secret_key_bytes };
+    const pk = Ed25519.PublicKey{ .bytes = state.secret_key_bytes[32..64].* };
+    logger.keypair = Ed25519.KeyPair{ .secret_key = sk, .public_key = pk };
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +241,7 @@ fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     @memcpy(buf[pos..][0..32], &state.stream_hash);                  pos += 32;
     @memcpy(buf[pos..][0..32], &state.prev_stream_hash);             pos += 32;
     std.mem.writeInt(u64, buf[pos..][0..8], state.sequence, .little); pos += 8;
-    @memcpy(buf[pos..][0..32], &state.ed25519_seed);                 pos += 32;
+    @memcpy(buf[pos..][0..64], &state.secret_key_bytes);             pos += 64;
 
     std.mem.writeInt(u32, buf[pos..][0..4], @intCast(state.vault_entries.len), .little);
     pos += 4;
@@ -273,9 +282,9 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
     const sequence = std.mem.readInt(u64, buf[pos..][0..8], .little);
     pos += 8;
 
-    var ed25519_seed: [32]u8 = undefined;
-    @memcpy(&ed25519_seed, buf[pos..][0..32]);
-    pos += 32;
+    var secret_key_bytes: [64]u8 = undefined;
+    @memcpy(&secret_key_bytes, buf[pos..][0..64]);
+    pos += 64;
 
     const vault_count = std.mem.readInt(u32, buf[pos..][0..4], .little);
     pos += 4;
@@ -318,7 +327,7 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         .stream_hash = stream_hash,
         .prev_stream_hash = prev_stream_hash,
         .sequence = sequence,
-        .ed25519_seed = ed25519_seed,
+        .secret_key_bytes = secret_key_bytes,
         .vault_entries = entries,
     };
 }
@@ -336,38 +345,203 @@ const MOCK_WRAP_KEY = [32]u8{
     'l', 'y', '-', 'n', 'o', 't', '-', 'p',
 };
 
+/// Default vsock port where the host-side KMS forwarding proxy listens.
+/// Override with the VAR_KMS_PROXY_PORT environment variable.
+const KMS_PROXY_PORT_DEFAULT: u16 = 8443;
+
 fn hasNsmDevice() bool {
     const f = std.fs.openFileAbsolute("/dev/nsm", .{ .mode = .read_write }) catch return false;
     f.close();
     return true;
 }
 
-/// Wraps (seals) a 32-byte AES-256 DEK.
-/// Caller owns the returned 32-byte slice.
-fn sealDek(allocator: std.mem.Allocator, dek: [32]u8) ![]u8 {
-    const out = try allocator.alloc(u8, 32);
-    if (hasNsmDevice()) {
-        // TODO(production): call AWS KMS GenerateDataKey conditioned on a fresh
-        // Nitro attestation document so only enclaves with PCR0 = this image can
-        // unwrap.  Replace the memcpy below with the KMS response ciphertext.
-        @memcpy(out, &dek);
-    } else {
-        // Simulation: one-time-pad style XOR with the mock wrapping key.
-        for (dek, 0..) |b, i| out[i] = b ^ MOCK_WRAP_KEY[i];
+// ---------------------------------------------------------------------------
+// KMS helpers (production path)
+//
+// The enclave has no direct internet access.  The host-side VAR proxy bridges
+// vsock → HTTPS to kms.<region>.amazonaws.com and signs requests with the EC2
+// instance role credentials (IAM role attached to the parent instance).
+//
+// Seal flow:   enclave  →  proxy  →  kms:Encrypt  →  KMS ciphertext returned
+// Unseal flow: enclave  →  proxy  →  kms:Decrypt  →  plaintext DEK returned
+//
+// Key policy on the CMK restricts kms:Decrypt to callers presenting a valid
+// Nitro attestation document whose PCR0 matches the known-good enclave image:
+//
+//   "Condition": {
+//     "StringEqualsIgnoreCase": {
+//       "kms:RecipientAttestation:PCR0": "<sha384_hex_of_enclave_image>"
+//     }
+//   }
+//
+// Future: upgrade unsealDek to the Nitro "recipient" flow — generate an
+// ephemeral RSA-2048 key pair inside the enclave, embed the public key in the
+// NSM attestation doc, pass it as the Recipient field in kms:Decrypt so the
+// response ciphertext is RSA-wrapped and the proxy never sees the plaintext DEK.
+// ---------------------------------------------------------------------------
+
+/// Extracts a JSON string value for `key` from a flat JSON object.
+/// Returns a heap-allocated copy; caller must free.  Returns null on any error.
+fn jsonExtractString(allocator: std.mem.Allocator, json: []const u8, key: []const u8) !?[]u8 {
+    var search_buf: [128]u8 = undefined;
+    const pattern = std.fmt.bufPrint(&search_buf, "\"{s}\"", .{key}) catch return null;
+    const key_pos = std.mem.indexOf(u8, json, pattern) orelse return null;
+    var rest = json[key_pos + pattern.len ..];
+    rest = std.mem.trimLeft(u8, rest, " \t\r\n");
+    if (rest.len == 0 or rest[0] != ':') return null;
+    rest = std.mem.trimLeft(u8, rest[1..], " \t\r\n");
+    if (rest.len == 0 or rest[0] != '"') return null;
+    rest = rest[1..]; // skip opening quote
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    return try allocator.dupe(u8, rest[0..end]);
+}
+
+/// Posts a JSON body to the KMS proxy and returns the raw response body.
+/// Caller owns the returned slice.
+fn kmsHttpPost(
+    allocator: std.mem.Allocator,
+    proxy_port: u16,
+    action: []const u8,
+    body: []const u8,
+) ![]u8 {
+    var conn = try VsockHandler.connect(allocator, VsockHandler.VMADDR_CID_HOST, proxy_port);
+    defer conn.close();
+
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "POST / HTTP/1.0\r\n" ++
+            "Content-Type: application/x-amz-json-1.1\r\n" ++
+            "X-Amz-Target: {s}\r\n" ++
+            "Content-Length: {d}\r\n" ++
+            "\r\n" ++
+            "{s}",
+        .{ action, body.len, body },
+    );
+    defer allocator.free(request);
+
+    _ = try conn.send(request);
+
+    // Read the full response (proxy closes the connection after sending).
+    var resp_buf = try allocator.alloc(u8, 32768);
+    defer allocator.free(resp_buf);
+    var total: usize = 0;
+    while (total < resp_buf.len) {
+        const n = conn.receive(resp_buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
     }
+
+    // Check HTTP status (must be 2xx).
+    if (total < 12) return error.KmsEmptyResponse;
+    if (!std.mem.startsWith(u8, resp_buf[0..total], "HTTP/1.") or resp_buf[9] != '2')
+        return error.KmsRequestFailed;
+
+    // Locate and return the response body (after the blank header line).
+    const sep = std.mem.indexOf(u8, resp_buf[0..total], "\r\n\r\n") orelse
+        return error.KmsInvalidResponse;
+    return try allocator.dupe(u8, resp_buf[sep + 4 .. total]);
+}
+
+/// Calls kms:Encrypt and returns the KMS ciphertext blob.
+/// Caller owns the returned slice.
+fn kmsEncrypt(
+    allocator: std.mem.Allocator,
+    key_arn: []const u8,
+    proxy_port: u16,
+    plaintext: []const u8,
+) ![]u8 {
+    const enc = std.base64.standard.Encoder;
+    const b64_pt_len = enc.calcSize(plaintext.len);
+    const b64_pt_buf = try allocator.alloc(u8, b64_pt_len);
+    defer allocator.free(b64_pt_buf);
+    const b64_pt = enc.encode(b64_pt_buf, plaintext);
+
+    const req_body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"KeyId\":\"{s}\",\"Plaintext\":\"{s}\"}}",
+        .{ key_arn, b64_pt },
+    );
+    defer allocator.free(req_body);
+
+    const resp_body = try kmsHttpPost(allocator, proxy_port, "TrentService.Encrypt", req_body);
+    defer allocator.free(resp_body);
+
+    const b64_ct = (try jsonExtractString(allocator, resp_body, "CiphertextBlob")) orelse
+        return error.KmsNoCiphertextBlob;
+    defer allocator.free(b64_ct);
+
+    const dec = std.base64.standard.Decoder;
+    const ct_len = try dec.calcSizeForSlice(b64_ct);
+    const ct = try allocator.alloc(u8, ct_len);
+    try dec.decode(ct, b64_ct);
+    return ct;
+}
+
+/// Calls kms:Decrypt and returns the 32-byte plaintext DEK.
+fn kmsDecrypt(
+    allocator: std.mem.Allocator,
+    proxy_port: u16,
+    ciphertext_blob: []const u8,
+) ![32]u8 {
+    const enc = std.base64.standard.Encoder;
+    const b64_ct_len = enc.calcSize(ciphertext_blob.len);
+    const b64_ct_buf = try allocator.alloc(u8, b64_ct_len);
+    defer allocator.free(b64_ct_buf);
+    const b64_ct = enc.encode(b64_ct_buf, ciphertext_blob);
+
+    const req_body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"CiphertextBlob\":\"{s}\"}}",
+        .{b64_ct},
+    );
+    defer allocator.free(req_body);
+
+    const resp_body = try kmsHttpPost(allocator, proxy_port, "TrentService.Decrypt", req_body);
+    defer allocator.free(resp_body);
+
+    const b64_pt = (try jsonExtractString(allocator, resp_body, "Plaintext")) orelse
+        return error.KmsNoPlaintext;
+    defer allocator.free(b64_pt);
+
+    const dec = std.base64.standard.Decoder;
+    const pt_len = try dec.calcSizeForSlice(b64_pt);
+    if (pt_len != 32) return error.KmsUnexpectedPlaintextLength;
+    var dek: [32]u8 = undefined;
+    try dec.decode(&dek, b64_pt);
+    return dek;
+}
+
+/// Returns the KMS proxy port from the environment, or the default.
+fn kmsProxyPort() u16 {
+    const s = std.posix.getenv("VAR_KMS_PROXY_PORT") orelse return KMS_PROXY_PORT_DEFAULT;
+    return std.fmt.parseInt(u16, s, 10) catch KMS_PROXY_PORT_DEFAULT;
+}
+
+/// Wraps (seals) a 32-byte AES-256 DEK.
+/// On real Nitro hardware: calls kms:Encrypt via the host proxy.
+/// In simulation: XOR with the mock wrapping key (dev/test only, no security).
+/// Caller owns the returned slice.
+fn sealDek(allocator: std.mem.Allocator, dek: [32]u8) ![]u8 {
+    if (hasNsmDevice()) {
+        const key_arn = std.posix.getenv("VAR_KMS_KEY_ARN") orelse return error.KmsKeyArnNotSet;
+        return kmsEncrypt(allocator, key_arn, kmsProxyPort(), &dek);
+    }
+    // Simulation: one-time-pad style XOR with the mock wrapping key.
+    const out = try allocator.alloc(u8, 32);
+    for (dek, 0..) |b, i| out[i] = b ^ MOCK_WRAP_KEY[i];
     return out;
 }
 
 /// Unwraps a sealed DEK produced by sealDek().
-fn unsealDek(sealed: []const u8) ![32]u8 {
+/// On real Nitro hardware: calls kms:Decrypt via the host proxy.
+/// In simulation: XOR with the mock wrapping key.
+fn unsealDek(allocator: std.mem.Allocator, sealed: []const u8) ![32]u8 {
+    if (hasNsmDevice()) {
+        return kmsDecrypt(allocator, kmsProxyPort(), sealed);
+    }
     if (sealed.len != 32) return error.InvalidSealedDekLength;
     var dek: [32]u8 = undefined;
-    if (hasNsmDevice()) {
-        // TODO(production): call AWS KMS Decrypt with the current attestation doc.
-        @memcpy(&dek, sealed);
-    } else {
-        for (sealed, 0..) |b, i| dek[i] = b ^ MOCK_WRAP_KEY[i];
-    }
+    for (sealed, 0..) |b, i| dek[i] = b ^ MOCK_WRAP_KEY[i];
     return dek;
 }
 
@@ -398,12 +572,13 @@ pub fn seal(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     const sealed_dek = try sealDek(allocator, dek);
     defer allocator.free(sealed_dek);
 
-    // Layout: sealed_dek(32) || nonce(12) || tag(16) || ciphertext(N)
-    const blob = try allocator.alloc(u8, 32 + 12 + 16 + ciphertext.len);
+    // Layout: sealed_dek_len(4) || sealed_dek(N) || nonce(12) || tag(16) || ciphertext(M)
+    const blob = try allocator.alloc(u8, 4 + sealed_dek.len + 12 + 16 + ciphertext.len);
     var pos: usize = 0;
-    @memcpy(blob[pos..][0..32], sealed_dek);                 pos += 32;
-    @memcpy(blob[pos..][0..12], &nonce);                     pos += 12;
-    @memcpy(blob[pos..][0..16], &tag);                       pos += 16;
+    std.mem.writeInt(u32, blob[pos..][0..4], @intCast(sealed_dek.len), .little); pos += 4;
+    @memcpy(blob[pos..][0..sealed_dek.len], sealed_dek);                          pos += sealed_dek.len;
+    @memcpy(blob[pos..][0..12], &nonce);                                           pos += 12;
+    @memcpy(blob[pos..][0..16], &tag);                                             pos += 16;
     @memcpy(blob[pos..][0..ciphertext.len], ciphertext);
 
     return blob;
@@ -415,12 +590,16 @@ pub fn unseal(allocator: std.mem.Allocator, blob: []const u8) !CapturedState {
     if (blob.len < MIN_BLOB) return error.BlobTooShort;
 
     var pos: usize = 0;
-    const sealed_dek = blob[pos..][0..32]; pos += 32;
-    const nonce      = blob[pos..][0..12]; pos += 12;
-    const tag        = blob[pos..][0..16]; pos += 16;
+    const sealed_dek_len = std.mem.readInt(u32, blob[pos..][0..4], .little); pos += 4;
+    if (sealed_dek_len < MIN_SEALED_DEK_LEN) return error.SealedDekTooShort;
+    if (sealed_dek_len > MAX_SEALED_DEK_LEN) return error.SealedDekTooLarge;
+    if (pos + sealed_dek_len + 12 + 16 > blob.len) return error.BlobTooShort;
+    const sealed_dek = blob[pos..][0..sealed_dek_len]; pos += sealed_dek_len;
+    const nonce      = blob[pos..][0..12];              pos += 12;
+    const tag        = blob[pos..][0..16];              pos += 16;
     const ciphertext = blob[pos..];
 
-    const dek = try unsealDek(sealed_dek);
+    const dek = try unsealDek(allocator, sealed_dek);
     defer std.crypto.utils.secureZero(u8, @constCast(&dek));
 
     const plaintext = try allocator.alloc(u8, ciphertext.len);
