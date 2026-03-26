@@ -98,11 +98,12 @@ pub const VerifiableTerminal = struct {
 
                 // DEBUG: Trace non-determinism in CI
                 if (builtin.is_test) {
-                    std.debug.print("[VAR DEBUG] digestState: meta={X} cursor=({},{})\n", 
-                        .{ std.fmt.fmtSliceHexLower(&meta), active_screen.cursor.x, active_screen.cursor.y });
+                    std.debug.print("[VAR DEBUG] digestState: cursor=({},{})\n", 
+                        .{ active_screen.cursor.x, active_screen.cursor.y });
                 }
 
                 // 2. Hash Cells in Row-Major Order
+
 
                 var y: u16 = 0;
                 while (y < height) : (y += 1) {
