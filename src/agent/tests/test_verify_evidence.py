@@ -62,7 +62,7 @@ def session():
     # Attestation doc (any bytes; in sim mode the NSM returns 0xAA-filled)
     doc_bytes = b"\xaa" * 96
     doc_hex   = doc_bytes.hex()
-    pcr0_hex  = "aa" * 32      # 64-char hex of 0xAA-filled PCR0 (triggers sim-mode skip)
+    pcr0_hex  = "aa" * 48      # 96-char hex of 0xAA-filled PCR0 (triggers sim-mode skip)
 
     # Bootstrap nonce: SHA-256(doc ‖ session_id)
     nonce_bytes = hashlib.sha256(doc_bytes + session_id).digest()
