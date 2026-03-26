@@ -25,9 +25,15 @@ pub const VerifiableTerminal = struct {
                 });
                 
                 // Ensure deterministic default colors for the state digest.
-                // In headless CI, these otherwise remain null/unset.
+                // In headless CI, these otherwise remain null/unset or uninitialised.
                 terminal.colors.foreground.set(.{ .r = 0, .g = 0, .b = 0 });
                 terminal.colors.background.set(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF });
+                terminal.colors.cursor.set(.{ .r = 0xAA, .g = 0xAA, .b = 0xAA });
+                
+                // Explicitly zero the palette to ensure no uninitialised memory leaks into the hash.
+                for (&terminal.colors.palette.current) |*c| {
+                    c.* = .{ .r = 0, .g = 0, .b = 0 };
+                }
 
                 return VerifiableTerminal{
                     .terminal = terminal,
