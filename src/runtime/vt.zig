@@ -119,7 +119,7 @@ pub const VerifiableTerminal = struct {
 
                         // B. Colors and Attributes
                         const page = &pin.node.data;
-                        const style = page.styles.get(page.memory, cell.style_id);
+                        const style = if (cell.style_id > 0) page.styles.get(page.memory, cell.style_id) else vt.Style{};
                         
                         // Resolve final colors against the terminal-wide palette.
                         const fg = style.fg(.{
