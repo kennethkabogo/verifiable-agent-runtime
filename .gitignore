@@ -1,7 +1,12 @@
 zig-out/
 zig-cache/
+.zig-cache/
 var_enclave
 __pycache__/
 *.pyc
 *.pyo
 .env
+.DS_Store
+build_log*.txt
+build_exe_linux*.txt
+final_build_log.txt
