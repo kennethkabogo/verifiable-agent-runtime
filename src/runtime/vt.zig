@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const vt = @import("ghostty-vt");
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -95,7 +96,14 @@ pub const VerifiableTerminal = struct {
                 std.mem.writeInt(u16, meta[7..9], height, .little);
                 hasher.update(&meta);
 
+                // DEBUG: Trace non-determinism in CI
+                if (builtin.is_test) {
+                    std.debug.print("[VAR DEBUG] digestState: meta={X} cursor=({},{})\n", 
+                        .{ std.fmt.fmtSliceHexLower(&meta), active_screen.cursor.x, active_screen.cursor.y });
+                }
+
                 // 2. Hash Cells in Row-Major Order
+
                 var y: u16 = 0;
                 while (y < height) : (y += 1) {
                     var x: u16 = 0;
@@ -147,9 +155,8 @@ pub const VerifiableTerminal = struct {
                         hasher.update(&[_]u8{ fg.r, fg.g, fg.b });
                         hasher.update(&[_]u8{ bg.r, bg.g, bg.b });
 
-                        hasher.update(&[_]u8{ bg.r, bg.g, bg.b });
-
                         // C. Map SGR attributes to v1.1 8-bit bitmask.
+
                         var attr_mask: u8 = 0;
                         if (style.flags.bold) attr_mask |= 1 << 0;
                         if (style.flags.italic) attr_mask |= 1 << 1;
