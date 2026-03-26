@@ -122,13 +122,18 @@ pub const VerifiableTerminal = struct {
                         const style = if (cell.style_id > 0) page.styles.get(page.memory, cell.style_id).* else vt.Style{};
                         
                         // Resolve final colors against the terminal-wide palette.
+                        // Use safe orelse defaults: an uninitialised terminal (e.g. headless
+                        // CI) never sets fg/bg, so .get() returns null — avoid the panic.
+                        const default_fg = vt.Color{ .r = 0, .g = 0, .b = 0 };
+                        const default_bg = vt.Color{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
                         const fg = style.fg(.{
-                            .default = s.terminal.colors.foreground.get().?,
+                            .default = s.terminal.colors.foreground.get() orelse default_fg,
                             .palette = &s.terminal.colors.palette.current,
                         });
                         
                         // bg() is an optional color, fallback to terminal background.
-                        const bg = style.bg(cell, &s.terminal.colors.palette.current) orelse s.terminal.colors.background.get().?;
+                        const bg = style.bg(cell, &s.terminal.colors.palette.current) orelse (s.terminal.colors.background.get() orelse default_bg);
+
 
                         hasher.update(&[_]u8{ fg.r, fg.g, fg.b });
                         hasher.update(&[_]u8{ bg.r, bg.g, bg.b });
