@@ -438,7 +438,7 @@ def main(json_mode: bool = False) -> bool:
                     bool(doc_hex),
                     f"{len(doc_hex)//2} bytes" if doc_hex else "missing")
 
-    is_sim = pcr0_hex == "aa" * 32
+    is_sim = pcr0_hex == "aa" * 48
     if is_sim:
         warn("PCR0 is 0xAA…AA — simulation mode, not real Nitro hardware")
         warn("COSE_Sign1 validation skipped (doc is a mock, not a real NSM attestation)")
