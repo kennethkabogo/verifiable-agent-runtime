@@ -55,7 +55,7 @@ pub const ProtocolHandler = struct {
 
         // Generate a fresh ephemeral Ed25519 keypair.  The public key is bound
         // into the attestation quote so the NSM (or mock) can certify it.
-        const keypair = try Ed25519.KeyPair.generate();
+        const keypair = Ed25519.KeyPair.generate();
         const pk = keypair.public_key.toBytes();
         const quote = try AttestationQuote.generate(allocator, pk);
 
@@ -186,7 +186,7 @@ pub const ProtocolHandler = struct {
                 return error.EsecretDecryptFailed;
             const plaintext = plaintext_buf[0..ct.len];
 
-            std.crypto.utils.secureZero(u8, &aes_key);
+            std.crypto.secureZero(u8, &aes_key);
             try self.vault.store(key, plaintext);
         } else if (std.mem.eql(u8, verb, "SECRET")) {
             // ── Cleartext path (simulation / CI) ─────────────────────────
@@ -226,7 +226,7 @@ fn buildEsecretPacket(
     const prk = HkdfSha256.extract("", &shared);
     var aes_key: [32]u8 = undefined;
     HkdfSha256.expand(&aes_key, HKDF_INFO, prk);
-    defer std.crypto.utils.secureZero(u8, &aes_key);
+    defer std.crypto.secureZero(u8, &aes_key);
 
     var nonce: [12]u8 = undefined;
     std.crypto.random.bytes(&nonce);

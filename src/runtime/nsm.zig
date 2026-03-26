@@ -92,7 +92,7 @@ fn requestReal(
         NSM_IOCTL_REQUEST,
         @intFromPtr(&raw),
     );
-    if (std.os.linux.getErrno(rc) != .SUCCESS) return error.NsmIoctlFailed;
+    if (std.posix.errno(rc) != .SUCCESS) return error.NsmIoctlFailed;
 
     // The driver updates response.len with the actual bytes written.
     // Validate before using as a slice bound: a buggy or adversarial driver

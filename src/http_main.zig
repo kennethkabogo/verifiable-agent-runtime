@@ -19,7 +19,7 @@ const http = @import("runtime/http.zig");
 
 /// Signal handler: requests a clean shutdown so the serve loop exits on the
 /// next accept() interruption, allowing `defer vault.deinit()` to wipe secrets.
-fn handleShutdown(sig: c_int) callconv(.C) void {
+fn handleShutdown(sig: c_int) callconv(.c) void {
     _ = sig;
     http.requestShutdown();
 }
@@ -32,11 +32,11 @@ pub fn main() !void {
     // Install before any secrets are loaded so the vault is always wiped on exit.
     const sa = std.posix.Sigaction{
         .handler = .{ .handler = handleShutdown },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.TERM, &sa, null) catch {};
-    std.posix.sigaction(std.posix.SIG.INT, &sa, null) catch {};
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
 
     std.log.info("[VAR-gateway] Initializing Verifiable Agent Runtime (HTTP mode)...", .{});
 

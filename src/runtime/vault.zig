@@ -24,8 +24,8 @@ pub const SecureVault = struct {
             // Wipe before freeing so secrets don't linger in the allocator's
             // free list.  secureZero uses volatile writes that the compiler
             // cannot legally eliminate.
-            std.crypto.utils.secureZero(u8, @constCast(entry.key_ptr.*));
-            std.crypto.utils.secureZero(u8, @constCast(entry.value_ptr.*));
+            std.crypto.secureZero(u8, @constCast(entry.key_ptr.*));
+            std.crypto.secureZero(u8, @constCast(entry.value_ptr.*));
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.*);
         }
@@ -56,8 +56,8 @@ pub const SecureVault = struct {
         defer self.mutex.unlock();
         
         if (self.secrets.fetchRemove(key)) |entry| {
-            std.crypto.utils.secureZero(u8, @constCast(entry.key));
-            std.crypto.utils.secureZero(u8, @constCast(entry.value));
+            std.crypto.secureZero(u8, @constCast(entry.key));
+            std.crypto.secureZero(u8, @constCast(entry.value));
             self.allocator.free(entry.key);
             self.allocator.free(entry.value);
         }

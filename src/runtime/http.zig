@@ -186,14 +186,14 @@ fn handleConnection(server: *GatewayServer, conn: net.Server.Connection) void {
     const header_end: usize = blk: {
         while (total < buf.len) {
             const n = conn.stream.read(buf[total..]) catch {
-                writeError(conn.stream, 400, "Bad Request") catch {};
+                _ = writeError(conn.stream, 400, "Bad Request") catch {};
                 return;
             };
             if (n == 0) break;
             total += n;
             if (mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |pos| break :blk pos;
         }
-        writeError(conn.stream, 400, "Bad Request") catch {};
+        _ = writeError(conn.stream, 400, "Bad Request") catch {};
         return;
     };
 
@@ -221,20 +221,20 @@ fn handleConnection(server: *GatewayServer, conn: net.Server.Connection) void {
     // Guard against integer overflow and buffer exhaustion before reading any
     // body bytes.  body_start <= total is guaranteed by Phase 1 (we found the
     // sentinel, so total >= header_end + 4 = body_start).
-    const body_start = header_end + 4;
-    if (content_length > buf.len - body_start) {
-        writeError(conn.stream, 413, "Request Too Large") catch {};
+    const body_start_idx = header_end + 4;
+    if (content_length > buf.len - body_start_idx) {
+        _ = writeError(conn.stream, 413, "Request Too Large") catch {};
         return;
     }
-    const needed = body_start + content_length;
+    const needed = body_start_idx + content_length;
     while (total < needed) {
         const n = conn.stream.read(buf[total..needed]) catch {
-            writeError(conn.stream, 400, "Bad Request") catch {};
+            _ = writeError(conn.stream, 400, "Bad Request") catch {};
             return;
         };
         if (n == 0) {
             // Client closed the connection before sending the full body.
-            writeError(conn.stream, 400, "Bad Request") catch {};
+            _ = writeError(conn.stream, 400, "Bad Request") catch {};
             return;
         }
         total += n;
@@ -407,10 +407,14 @@ fn writeResponse(stream: net.Stream, status: u16, body: []const u8) !void {
         500 => "Internal Server Error",
         else => "Unknown",
     };
-    try stream.writer().print(
-        "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-        .{ status, status_text, body.len, body },
+    
+    var h_buf: [512]u8 = undefined;
+    const headers = try std.fmt.bufPrint(&h_buf,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+        .{ status, status_text, body.len },
     );
+    try stream.writeAll(headers);
+    try stream.writeAll(body);
 }
 
 fn writeError(stream: net.Stream, status: u16, msg: []const u8) !void {

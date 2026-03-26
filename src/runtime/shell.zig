@@ -101,6 +101,7 @@ pub const SecureLogger = struct {
     ) !Ed25519.Signature {
         // SHA-256("") — used as SHA-256(Payload) in snapshot mode.
         const empty_payload_hash = comptime blk: {
+            @setEvalBranchQuota(10000);
             var h: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash("", &h, .{});
             break :blk h;

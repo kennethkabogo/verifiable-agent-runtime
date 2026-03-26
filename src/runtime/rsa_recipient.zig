@@ -38,7 +38,7 @@ pub const RsaKeyPair = struct {
     _pkey_int: usize,
 
     pub fn deinit(self: *RsaKeyPair, allocator: std.mem.Allocator) void {
-        std.crypto.utils.secureZero(u8, self.pub_key_der);
+        std.crypto.secureZero(u8, self.pub_key_der);
         allocator.free(self.pub_key_der);
         if (self._pkey_int != 0) {
             const pkey: *c.EVP_PKEY = @ptrFromInt(self._pkey_int);
