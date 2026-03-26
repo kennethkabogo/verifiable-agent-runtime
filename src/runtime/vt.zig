@@ -23,6 +23,12 @@ pub const VerifiableTerminal = struct {
                     .rows = h,
                     .max_scrollback = 0,
                 });
+                
+                // Ensure deterministic default colors for the state digest.
+                // In headless CI, these otherwise remain null/unset.
+                terminal.colors.foreground.set(.{ .r = 0, .g = 0, .b = 0 });
+                terminal.colors.background.set(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF });
+
                 return VerifiableTerminal{
                     .terminal = terminal,
                     .allocator = a,
@@ -122,21 +128,19 @@ pub const VerifiableTerminal = struct {
                         const style = if (cell.style_id > 0) page.styles.get(page.memory, cell.style_id).* else vt.Style{};
                         
                         // Resolve final colors against the terminal-wide palette.
-                        // Use safe orelse defaults: an uninitialised terminal (e.g. headless
-                        // CI) never sets fg/bg, so .get() returns null — avoid the panic.
-                        const default_fg = vt.color.RGB{ .r = 0, .g = 0, .b = 0 };
-                        const default_bg = vt.color.RGB{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
+                        // We strictly use the terminal's own default fg/bg, which are
+                        // explicitly initialized during VerifiableTerminal.init.
                         const fg = style.fg(.{
-                            .default = s.terminal.colors.foreground.get() orelse default_fg,
+                            .default = s.terminal.colors.foreground.get().?,
                             .palette = &s.terminal.colors.palette.current,
                         });
                         
                         // bg() is an optional color, fallback to terminal background.
-                        const bg = style.bg(cell, &s.terminal.colors.palette.current) orelse (s.terminal.colors.background.get() orelse default_bg);
-
-
+                        const bg = style.bg(cell, &s.terminal.colors.palette.current) orelse s.terminal.colors.background.get().?;
 
                         hasher.update(&[_]u8{ fg.r, fg.g, fg.b });
+                        hasher.update(&[_]u8{ bg.r, bg.g, bg.b });
+
                         hasher.update(&[_]u8{ bg.r, bg.g, bg.b });
 
                         // C. Map SGR attributes to v1.1 8-bit bitmask.
