@@ -23,6 +23,7 @@ On AWS Nitro: set VSOCK_CID to the enclave's CID (typically 16).
 In simulation (dev/Mac): the runtime listens on TCP 127.0.0.1:5005.
 """
 
+import base64
 import json
 import os
 import socket
@@ -30,6 +31,19 @@ import sys
 import urllib.error
 import urllib.request
 from typing import Optional
+
+# ── Secret encryption ────────────────────────────────────────────────────────
+# Used when the enclave advertises enc_pub in the bundle header.
+# Falls back gracefully to cleartext if the `cryptography` package is absent
+# (e.g., bare CI environment without extra deps), but logs a warning.
+try:
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    _CRYPTO_AVAILABLE = True
+except ImportError:
+    _CRYPTO_AVAILABLE = False
 
 # ── Transport config ────────────────────────────────────────────────────────
 VSOCK_CID  = int(os.environ.get("VSOCK_CID", "16"))   # enclave CID on Nitro
@@ -119,6 +133,72 @@ def mock_response(prompt: str) -> str:
     )
 
 
+# ── Secret provisioning ──────────────────────────────────────────────────────
+
+def encrypt_secret(plaintext: str, enc_pub_hex: str) -> str:
+    """
+    Encrypt *plaintext* for the enclave identified by *enc_pub_hex*.
+
+    Wire format (base64-encoded):
+        ephemeral_x25519_pub[32] | nonce[12] | AES-256-GCM(plaintext) | tag[16]
+
+    Key derivation:
+        shared  = X25519(ephemeral_priv, enclave_pub)
+        aes_key = HKDF-SHA256(ikm=shared, salt=b"", info=b"VAR-secret-v1", length=32)
+
+    Raises RuntimeError if the `cryptography` package is not installed.
+    """
+    if not _CRYPTO_AVAILABLE:
+        raise RuntimeError(
+            "cryptography package required for secret encryption; "
+            "run: pip install cryptography"
+        )
+
+    enc_pub_bytes = bytes.fromhex(enc_pub_hex)
+    if len(enc_pub_bytes) != 32:
+        raise ValueError(f"enc_pub must be 32 bytes, got {len(enc_pub_bytes)}")
+
+    # Ephemeral X25519 keypair (fresh per secret).
+    ephemeral_priv = X25519PrivateKey.generate()
+    ephemeral_pub  = ephemeral_priv.public_key().public_bytes_raw()
+
+    # ECDH shared secret.
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
+    enclave_pub_key = X25519PublicKey.from_public_bytes(enc_pub_bytes)
+    shared = ephemeral_priv.exchange(enclave_pub_key)
+
+    # HKDF-SHA256 → 32-byte AES key.
+    aes_key = HKDF(
+        algorithm=_hashes.SHA256(),
+        length=32,
+        salt=b"",
+        info=b"VAR-secret-v1",
+    ).derive(shared)
+
+    # AES-256-GCM encrypt (12-byte nonce, 16-byte tag appended by AESGCM).
+    nonce = os.urandom(12)
+    ct_and_tag = AESGCM(aes_key).encrypt(nonce, plaintext.encode(), b"")
+
+    payload = base64.b64encode(ephemeral_pub + nonce + ct_and_tag).decode()
+    return payload
+
+
+def provision_secret(sock: socket.socket, name: str, value: str,
+                     enc_pub_hex: Optional[str]) -> None:
+    """Send a secret to the enclave, encrypting if enc_pub is available."""
+    if enc_pub_hex and _CRYPTO_AVAILABLE:
+        payload = encrypt_secret(value, enc_pub_hex)
+        sendline(sock, f"ESECRET:{name}:{payload}")
+    else:
+        if enc_pub_hex and not _CRYPTO_AVAILABLE:
+            print(
+                "[agent] WARNING: enc_pub present but cryptography package missing — "
+                "falling back to cleartext SECRET",
+                file=sys.stderr,
+            )
+        sendline(sock, f"SECRET:{name}:{value}")
+
+
 # ── Bundle Header parser ─────────────────────────────────────────────────────
 
 def parse_header(header: str) -> dict:
@@ -151,11 +231,16 @@ def main() -> None:
     header = readline(sock)
     fields = parse_header(header)
 
+    enc_pub_hex: Optional[str] = fields.get("enc_pub")
+    encrypted_mode = bool(enc_pub_hex) and _CRYPTO_AVAILABLE
+
     print(f"\n[agent] Bundle Header received:")
     print(f"  Magic           : {fields.get('magic', '?')}")
     print(f"  Version         : {fields.get('version', '?')}")
     print(f"  Session ID      : {fields.get('session', '?')}")
     print(f"  Bootstrap Nonce : {fields.get('nonce', '?')}")
+    print(f"  Enc Public Key  : {enc_pub_hex[:16]}…" if enc_pub_hex else "  Enc Public Key  : (none — cleartext mode)")
+    print(f"  Secret mode     : {'ECDH+AES-256-GCM' if encrypted_mode else 'cleartext (simulation)'}")
 
     if fields.get("magic") != "VARB":
         print("[agent] ERROR: unexpected magic bytes — aborting.", file=sys.stderr)
@@ -170,12 +255,14 @@ def main() -> None:
         return
 
     # 4. Provision the vault with the API key.
-    #    In a real enclave the host seals the key with the enclave's public key;
-    #    only the enclave's NSM-attested private key can decrypt it.
-    #    In simulation we send it over the local loopback socket directly.
+    #    When the enclave advertises enc_pub in the bundle header the secret is
+    #    encrypted with X25519 ECDH + HKDF-SHA256 + AES-256-GCM so that only the
+    #    attested enclave can decrypt it — the vsock transport never carries the
+    #    plaintext.  In simulation (no enc_pub or no cryptography package) the key
+    #    is sent in cleartext over the local loopback socket.
     key_to_send = api_key or "sk-ant-mock-key-for-demo-purposes-only"
-    sendline(sock, f"SECRET:ANTHROPIC_API_KEY:{key_to_send}")
-    print(f"\n[agent] Provisioned ANTHROPIC_API_KEY ({'real key' if use_real_api else 'mock key'})")
+    provision_secret(sock, "ANTHROPIC_API_KEY", key_to_send, enc_pub_hex)
+    print(f"\n[agent] Provisioned ANTHROPIC_API_KEY ({'real key' if use_real_api else 'mock key'}, {'encrypted' if encrypted_mode else 'cleartext'})")
 
     # 5. Execute the agent task.
     task = (
