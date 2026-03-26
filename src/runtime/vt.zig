@@ -10,7 +10,10 @@ const with_ghostty = build_options.with_ghostty;
 /// and our verifiable execution runtime. It handles raw PTY input and
 /// provides deterministic state digests for Remote Attestation.
 pub const VerifiableTerminal = struct {
-    terminal: if (with_ghostty) vt.Terminal else void,
+    // Heap-allocated so that `stream` (which stores a *Terminal internally) keeps
+    // a stable pointer even after the VerifiableTerminal struct is returned by value
+    // from init() and copied to the caller's stack frame.
+    terminal: if (with_ghostty) *vt.Terminal else void,
     allocator: std.mem.Allocator,
     // ReadonlyStream is Ghostty's optimized stream for non-interactive state tracking.
     stream: if (with_ghostty) vt.ReadonlyStream else void,
@@ -18,20 +21,23 @@ pub const VerifiableTerminal = struct {
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !VerifiableTerminal {
         const Impl = struct {
             fn real(a: std.mem.Allocator, w: u16, h: u16) !VerifiableTerminal {
-                var terminal = try vt.Terminal.init(a, .{
+                // Allocate on the heap so the address is stable across moves/copies.
+                const t = try a.create(vt.Terminal);
+                errdefer a.destroy(t);
+                t.* = try vt.Terminal.init(a, .{
                     .cols = w,
                     .rows = h,
                     .max_scrollback = 0,
                 });
+                errdefer t.deinit(a);
                 return VerifiableTerminal{
-                    .terminal = terminal,
+                    .terminal = t,
                     .allocator = a,
-                    .stream = terminal.vtStream(),
+                    .stream = t.vtStream(),
                 };
             }
             fn mock(a: std.mem.Allocator, w: u16, h: u16) !VerifiableTerminal {
                 _ = w; _ = h;
-                std.debug.print("[VAR] Initializing Mock Terminal (80x24)\n", .{});
                 return VerifiableTerminal{
                     .terminal = {},
                     .allocator = a,
@@ -48,6 +54,7 @@ pub const VerifiableTerminal = struct {
             fn real(s: *VerifiableTerminal) void {
                 s.stream.deinit();
                 s.terminal.deinit(s.allocator);
+                s.allocator.destroy(s.terminal);
             }
             fn mock(s: *VerifiableTerminal) void { _ = s; }
         };
