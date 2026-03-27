@@ -117,24 +117,20 @@ class TestEncryptSecret:
 class TestProvisionSecret:
     """provision_secret() integration: builds the correct packet."""
 
-    def test_uses_esecret_when_enc_pub_present(self, monkeypatch):
-        sent = []
+    def test_uses_esecret_when_enc_pub_present(self):
+        from unittest.mock import MagicMock
+        fake_sock = MagicMock()
         _, pub_hex = _make_keypair()
 
-        import socket as _socket
-        fake_sock = _socket.socket.__new__(_socket.socket)
-        monkeypatch.setattr(fake_sock, "sendall", lambda data: sent.append(data))
-
         provision_secret(fake_sock, "MY_KEY", "my-value", pub_hex)
-        assert len(sent) == 1
-        assert sent[0].startswith(b"ESECRET:MY_KEY:")
+        
+        # Verify sendall was called with the ESECRET format.
+        call_args = fake_sock.sendall.call_args[0][0]
+        assert call_args.startswith(b"ESECRET:MY_KEY:")
 
-    def test_falls_back_to_cleartext_when_no_enc_pub(self, monkeypatch):
-        sent = []
-
-        import socket as _socket
-        fake_sock = _socket.socket.__new__(_socket.socket)
-        monkeypatch.setattr(fake_sock, "sendall", lambda data: sent.append(data))
+    def test_falls_back_to_cleartext_when_no_enc_pub(self):
+        from unittest.mock import MagicMock
+        fake_sock = MagicMock()
 
         provision_secret(fake_sock, "MY_KEY", "my-value", None)
-        assert sent[0] == b"SECRET:MY_KEY:my-value\n"
+        fake_sock.sendall.assert_called_once_with(b"SECRET:MY_KEY:my-value\n")

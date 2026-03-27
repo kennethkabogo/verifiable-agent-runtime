@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const vt = @import("ghostty-vt");
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -30,6 +31,18 @@ pub const VerifiableTerminal = struct {
                     .max_scrollback = 0,
                 });
                 errdefer t.deinit(a);
+
+                // Ensure deterministic default colors for the state digest.
+                // In headless CI, these otherwise remain null/unset or uninitialised.
+                t.colors.foreground.set(.{ .r = 0, .g = 0, .b = 0 });
+                t.colors.background.set(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF });
+                t.colors.cursor.set(.{ .r = 0xAA, .g = 0xAA, .b = 0xAA });
+
+                // Explicitly zero the palette to ensure no uninitialised memory leaks into the hash.
+                for (&t.colors.palette.current) |*c| {
+                    c.* = .{ .r = 0, .g = 0, .b = 0 };
+                }
+
                 return VerifiableTerminal{
                     .terminal = t,
                     .allocator = a,
@@ -90,7 +103,15 @@ pub const VerifiableTerminal = struct {
                 std.mem.writeInt(u16, meta[7..9], height, .little);
                 hasher.update(&meta);
 
+                // DEBUG: Trace non-determinism in CI
+                if (builtin.is_test) {
+                    std.debug.print("[VAR DEBUG] digestState: cursor=({},{})\n", 
+                        .{ active_screen.cursor.x, active_screen.cursor.y });
+                }
+
                 // 2. Hash Cells in Row-Major Order
+
+
                 var y: u16 = 0;
                 while (y < height) : (y += 1) {
                     var x: u16 = 0;
@@ -126,9 +147,11 @@ pub const VerifiableTerminal = struct {
 
                         // B. Colors and Attributes
                         const page = &pin.node.data;
-                        const style = page.styles.get(page.memory, cell.style_id);
+                        const style = if (cell.style_id > 0) page.styles.get(page.memory, cell.style_id).* else vt.Style{};
                         
                         // Resolve final colors against the terminal-wide palette.
+                        // We strictly use the terminal's own default fg/bg, which are
+                        // explicitly initialized during VerifiableTerminal.init.
                         const fg = style.fg(.{
                             .default = s.terminal.colors.foreground.get().?,
                             .palette = &s.terminal.colors.palette.current,
@@ -141,6 +164,7 @@ pub const VerifiableTerminal = struct {
                         hasher.update(&[_]u8{ bg.r, bg.g, bg.b });
 
                         // C. Map SGR attributes to v1.1 8-bit bitmask.
+
                         var attr_mask: u8 = 0;
                         if (style.flags.bold) attr_mask |= 1 << 0;
                         if (style.flags.italic) attr_mask |= 1 << 1;
