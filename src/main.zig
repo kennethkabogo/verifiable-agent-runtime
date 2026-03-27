@@ -4,6 +4,7 @@ const SecureLogger = @import("runtime/shell.zig").SecureLogger;
 const ProtocolHandler = @import("runtime/protocol.zig").ProtocolHandler;
 const VsockServer = @import("runtime/vsock.zig").VsockServer;
 const sealed_state = @import("runtime/sealed_state.zig");
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// Line-based agent protocol (all messages newline-terminated):
 ///
@@ -11,6 +12,8 @@ const sealed_state = @import("runtime/sealed_state.zig");
 ///   Enclave → Agent   READY
 ///   Agent   → Enclave SECRET:<key>:<value>
 ///   Agent   → Enclave LOG:<message>
+///   Agent   → Enclave EXEC:<cmd> [arg1] [arg2]…
+///   Enclave → Agent   EXEC_RESULT:exit=<N>:stdout_b64=<b64>:stderr_b64=<b64>:stdout_hash=<hex>:stderr_hash=<hex>
 ///   Agent   → Enclave GET_EVIDENCE
 ///   Enclave → Agent   EVIDENCE:stream=<hex>:state=<hex>:sig=<...>
 ///   Agent   → Enclave HIBERNATE
@@ -92,6 +95,50 @@ pub fn main() !void {
             const msg = line[4..];
             try logger.logOutput(msg);
             std.debug.print("[VAR] Logged ({d} bytes): {s}\n", .{ msg.len, msg });
+        } else if (std.mem.startsWith(u8, line, "EXEC:")) {
+            // Split "EXEC:cmd arg1 arg2" by whitespace into argv.
+            const cmd_line = line[5..];
+            var argv_list = std.ArrayList([]const u8).init(allocator);
+            defer argv_list.deinit();
+            var it = std.mem.splitScalar(u8, cmd_line, ' ');
+            while (it.next()) |arg| {
+                if (arg.len > 0) try argv_list.append(arg);
+            }
+            if (argv_list.items.len == 0) {
+                _ = try conn.send("EXEC_ERROR:empty_command\n");
+                continue;
+            }
+
+            const result = logger.runAndLog(argv_list.items) catch |err| {
+                std.debug.print("[VAR] EXEC failed: {any}\n", .{err});
+                _ = try conn.send("EXEC_ERROR:spawn_failed\n");
+                continue;
+            };
+            defer result.deinit(allocator);
+
+            const Encoder = std.base64.standard.Encoder;
+            const b64_out = try allocator.alloc(u8, Encoder.calcSize(result.stdout.len));
+            defer allocator.free(b64_out);
+            _ = Encoder.encode(b64_out, result.stdout);
+
+            const b64_err = try allocator.alloc(u8, Encoder.calcSize(result.stderr.len));
+            defer allocator.free(b64_err);
+            _ = Encoder.encode(b64_err, result.stderr);
+
+            var stdout_hash: [32]u8 = undefined;
+            Sha256.hash(result.stdout, &stdout_hash, .{});
+            var stderr_hash: [32]u8 = undefined;
+            Sha256.hash(result.stderr, &stderr_hash, .{});
+
+            const response = try std.fmt.allocPrint(
+                allocator,
+                "EXEC_RESULT:exit={d}:stdout_b64={s}:stderr_b64={s}:stdout_hash={x}:stderr_hash={x}\n",
+                .{ result.exit_code, b64_out, b64_err, stdout_hash, stderr_hash },
+            );
+            defer allocator.free(response);
+            _ = try conn.send(response);
+            std.debug.print("[VAR] EXEC done (exit={d}): {s}\n", .{ result.exit_code, cmd_line });
+
         } else if (std.mem.eql(u8, line, "GET_EVIDENCE")) {
             const evidence = try logger.getEvidenceBundle();
             defer allocator.free(evidence);

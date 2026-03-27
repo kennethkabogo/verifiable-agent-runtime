@@ -1,6 +1,31 @@
 const std = @import("std");
 const VerifiableTerminal = @import("vt.zig").VerifiableTerminal;
+const exec = @import("exec.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
+const Sha256 = std.crypto.hash.sha2.Sha256;
+
+/// Structured record of the most recent subprocess execution.
+/// Stored in SecureLogger and emitted in the evidence bundle so verifiers
+/// can bind a specific command invocation to the L1 hash chain without
+/// needing to replay the raw PTY stream.
+pub const ExecRecord = struct {
+    /// Human-readable joined command line (e.g. "ls -la /tmp").  Owned by
+    /// the SecureLogger allocator; freed when replaced or on deinit.
+    cmd: []u8,
+    /// SHA-256 of the raw stdout bytes.  The same bytes were folded into the
+    /// L1 chain via logOutput, so a verifier can confirm the chain commitment.
+    stdout_hash: [32]u8,
+    /// SHA-256 of the raw stderr bytes (not in the L1 chain — stderr is
+    /// recorded for auditability but does not affect the stream hash).
+    stderr_hash: [32]u8,
+    exit_code: u8,
+    /// Value of SecureLogger.sequence at the time runAndLog was called.
+    seq: u64,
+
+    pub fn deinit(self: ExecRecord, allocator: std.mem.Allocator) void {
+        allocator.free(self.cmd);
+    }
+};
 
 /// SecureLogger handles the PTY master logic and provides a verifiable hash chain
 /// of both the terminal stream and the reconstructed terminal state.
@@ -25,6 +50,10 @@ pub const SecureLogger = struct {
     /// Session identifier included in every signature so a verifier can bind the
     /// signature to a specific session without trusting the gateway.
     session_id: [16]u8,
+    /// Most recent structured execution record, or null if no command has been
+    /// run yet this session.  Replaced (and previous entry freed) on each
+    /// runAndLog call.  Included in the evidence bundle JSON for verifiers.
+    last_exec: ?ExecRecord = null,
 
     /// init anchors the hash chain to the session.  The caller passes the
     /// pre-computed bootstrap_nonce (SHA-256(attestation_doc || session_id))
@@ -50,6 +79,7 @@ pub const SecureLogger = struct {
 
     pub fn deinit(self: *SecureLogger) void {
         self.vt.deinit();
+        if (self.last_exec) |rec| rec.deinit(self.allocator);
     }
 
     fn hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -74,6 +104,52 @@ pub const SecureLogger = struct {
         hasher.final(&self.stream_hash);
 
         self.vt.processInput(data);
+    }
+
+    /// Runs a subprocess, folds its stdout into the L1 chain and VT parser,
+    /// and records structured execution metadata in `last_exec` for inclusion
+    /// in the next evidence bundle.
+    ///
+    /// stdout bytes are committed to the L1 chain identically to logOutput,
+    /// so a verifier can confirm that `last_exec.stdout_hash` is consistent
+    /// with the delta between two consecutive L1 hashes.
+    ///
+    /// stderr is captured and hashed but NOT folded into the L1 chain — it is
+    /// diagnostic output that does not affect the verifiable stream.
+    ///
+    /// Returns the raw ExecResult; caller must call `deinit` on it.
+    pub fn runAndLog(self: *SecureLogger, argv: []const []const u8) !exec.ExecResult {
+        // Run the subprocess outside the mutex — it may take a while.
+        const result = try exec.run(self.allocator, argv);
+
+        // Fold stdout into the L1 chain and VT state (uses the mutex internally).
+        if (result.stdout.len > 0) {
+            try self.logOutput(result.stdout);
+        }
+
+        // Content hashes for the evidence record.
+        var stdout_hash: [32]u8 = undefined;
+        Sha256.hash(result.stdout, &stdout_hash, .{});
+        var stderr_hash: [32]u8 = undefined;
+        Sha256.hash(result.stderr, &stderr_hash, .{});
+
+        // Build a human-readable command string (argv joined by spaces).
+        const cmd_str = try std.mem.join(self.allocator, " ", argv);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Free the previous exec record before replacing it.
+        if (self.last_exec) |old| old.deinit(self.allocator);
+        self.last_exec = ExecRecord{
+            .cmd = cmd_str,
+            .stdout_hash = stdout_hash,
+            .stderr_hash = stderr_hash,
+            .exit_code = result.exit_code,
+            .seq = self.sequence,
+        };
+
+        return result;
     }
 
     /// Signs an evidence snapshot following spec §3.1.
@@ -203,9 +279,30 @@ pub const SecureLogger = struct {
         const sig_h = try hex(allocator, &sig_bytes);
         defer allocator.free(sig_h);
 
+        // Build last_exec JSON fragment (null when no command has run yet).
+        const exec_json = if (self.last_exec) |rec| blk: {
+            const sh = try hex(allocator, &rec.stdout_hash);
+            defer allocator.free(sh);
+            const eh = try hex(allocator, &rec.stderr_hash);
+            defer allocator.free(eh);
+            // Escape the cmd string: replace `"` and `\` for safe JSON embedding.
+            var escaped = std.ArrayList(u8).init(allocator);
+            defer escaped.deinit();
+            for (rec.cmd) |ch| {
+                if (ch == '"' or ch == '\\') try escaped.append('\\');
+                try escaped.append(ch);
+            }
+            break :blk try std.fmt.allocPrint(
+                allocator,
+                "{{\"cmd\":\"{s}\",\"stdout_hash\":\"{s}\",\"stderr_hash\":\"{s}\",\"exit_code\":{d},\"seq\":{d}}}",
+                .{ escaped.items, sh, eh, rec.exit_code, rec.seq },
+            );
+        } else try allocator.dupe(u8, "null");
+        defer allocator.free(exec_json);
+
         const result = try std.fmt.allocPrint(allocator,
-            \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d}}}
-        , .{ prev_h, stream_h, state_h, sig_h, next_seq });
+            \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d},"last_exec":{s}}}
+        , .{ prev_h, stream_h, state_h, sig_h, next_seq, exec_json });
 
         // Commit state only after the bundle is fully built.
         self.sequence = next_seq;

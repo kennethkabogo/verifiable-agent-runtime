@@ -9,7 +9,8 @@
 ///
 ///   POST /vault/secret   {"key":"…","value":"…"}           → 200 {"status":"ok"}
 ///   POST /log            {"msg":"…"}  (+X-Skill-Id header)  → 200 {"status":"ok"}
-///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…"}
+///   POST /exec           {"cmd":["arg0","arg1",…]}          → 200 {"exit_code":0,"stdout_b64":"…","stderr_b64":"…","stdout_hash":"…","stderr_hash":"…"}
+///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","last_exec":{…}}
 ///   GET  /attestation                                        → 200 {"pcr0":"…","public_key":"…","doc":"…"}
 ///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01"}
 ///   GET  /health                                             → 200 {"status":"healthy"}
@@ -261,6 +262,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleVaultSecret(server, stream, req);
     if (post and mem.eql(u8, req.path, "/log"))
         return handleLog(server, stream, req);
+    if (post and mem.eql(u8, req.path, "/exec"))
+        return handleExec(server, stream, req);
     if (get and mem.eql(u8, req.path, "/evidence"))
         return handleEvidence(server, stream, req);
     if (get and mem.eql(u8, req.path, "/attestation"))
@@ -307,6 +310,74 @@ fn handleLog(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !vo
     }
 
     try writeResponse(stream, 200, "{\"status\":\"ok\"}");
+}
+
+fn handleExec(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    // Parse {"cmd": ["arg0", "arg1", ...]} from the request body.
+    var parsed = std.json.parseFromSlice(
+        std.json.Value,
+        server.allocator,
+        req.body,
+        .{},
+    ) catch return writeError(stream, 400, "invalid JSON");
+    defer parsed.deinit();
+
+    const cmd_val = switch (parsed.value) {
+        .object => |obj| obj.get("cmd") orelse return writeError(stream, 400, "missing \"cmd\" field"),
+        else => return writeError(stream, 400, "request body must be a JSON object"),
+    };
+    const cmd_arr = switch (cmd_val) {
+        .array => |arr| arr,
+        else => return writeError(stream, 400, "\"cmd\" must be a JSON array"),
+    };
+    if (cmd_arr.items.len == 0)
+        return writeError(stream, 400, "\"cmd\" must not be empty");
+
+    // Build a [][]const u8 argv from the parsed array.
+    var argv = try server.allocator.alloc([]const u8, cmd_arr.items.len);
+    defer server.allocator.free(argv);
+    for (cmd_arr.items, 0..) |item, i| {
+        argv[i] = switch (item) {
+            .string => |s| s,
+            else => return writeError(stream, 400, "\"cmd\" items must be strings"),
+        };
+    }
+
+    // Run the command, fold stdout into the L1 chain, and record exec metadata.
+    const result = server.logger.runAndLog(argv) catch |err| {
+        std.log.err("[VAR-gateway] exec failed: {}", .{err});
+        return writeError(stream, 500, "exec failed");
+    };
+    defer result.deinit(server.allocator);
+
+    // Base64-encode stdout and stderr for safe JSON embedding.
+    const Encoder = std.base64.standard.Encoder;
+    const stdout_b64 = try server.allocator.alloc(u8, Encoder.calcSize(result.stdout.len));
+    defer server.allocator.free(stdout_b64);
+    _ = Encoder.encode(stdout_b64, result.stdout);
+
+    const stderr_b64 = try server.allocator.alloc(u8, Encoder.calcSize(result.stderr.len));
+    defer server.allocator.free(stderr_b64);
+    _ = Encoder.encode(stderr_b64, result.stderr);
+
+    // Compute content hashes for the response (consistent with last_exec in /evidence).
+    var stdout_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(result.stdout, &stdout_hash, .{});
+    var stderr_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(result.stderr, &stderr_hash, .{});
+
+    const sh = try fmtHex(server.allocator, &stdout_hash);
+    defer server.allocator.free(sh);
+    const eh = try fmtHex(server.allocator, &stderr_hash);
+    defer server.allocator.free(eh);
+
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"exit_code\":{d},\"stdout_b64\":\"{s}\",\"stderr_b64\":\"{s}\",\"stdout_hash\":\"{s}\",\"stderr_hash\":\"{s}\"}}",
+        .{ result.exit_code, stdout_b64, stderr_b64, sh, eh },
+    );
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
 }
 
 fn handleEvidence(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {

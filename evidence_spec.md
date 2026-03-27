@@ -1,4 +1,4 @@
-# Specification: VAR Evidence Bundle (v1.2)
+# Specification: VAR Evidence Bundle (v1.3)
 
 This document is the formal technical contract between the **VAR Enclave**
 and the **Auditor Client**.  It defines the cryptographic wire formats,
@@ -6,6 +6,8 @@ hashing logic, signature scope, and verification requirements for the
 Verifiable Agent Runtime.
 
 **Changelog**
+- v1.3 — Add §2.3 Structured Execution (EXEC command, `last_exec` evidence
+         field, stdout/stderr hash commitment to L1 chain).
 - v1.2 — Add SessionID to §3.1 signature scope (matches implementation).
          Add §3.2 Snapshot Mode.  Add §5 Sealed State.  Add §6 KMS
          Recipient Flow.  Expand §4 with attestation validation steps.
@@ -106,6 +108,59 @@ bytes is hashed in-order as the `cell_digest` input.
 | 5 | Invisible |
 | 6 | Strikethrough |
 | 7 | Underline |
+
+### 2.3 Structured Execution (EXEC)
+
+When an agent invokes the `EXEC` command (vsock) or `POST /exec` (HTTP), the
+enclave runs the requested subprocess and records a structured execution result
+alongside the normal L1/L2 hashing.
+
+#### 2.3.1 stdout Commitment
+
+stdout bytes are folded into the L1 chain exactly as `logOutput` would:
+
+```
+H_stream[n] = SHA-256(H_stream[n-1] ‖ stdout_bytes)
+```
+
+A verifier can therefore confirm that a specific stdout was produced by
+computing `SHA-256(stdout_bytes)` and checking it is consistent with the
+observed L1 chain delta between two consecutive evidence packets.
+
+#### 2.3.2 stderr Handling
+
+stderr bytes are captured and hashed (`SHA-256(stderr_bytes)`) but are
+**not** committed to the L1 chain.  stderr is diagnostic output that does not
+form part of the verifiable execution record.
+
+#### 2.3.3 `last_exec` Evidence Field
+
+The next evidence bundle emitted after an `EXEC` call carries a `last_exec`
+object:
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| **cmd** | `string` | Space-joined command line, e.g. `"ls -la /tmp"` |
+| **stdout_hash** | `hex[64]` | `SHA-256(stdout_bytes)` |
+| **stderr_hash** | `hex[64]` | `SHA-256(stderr_bytes)` |
+| **exit_code** | `u8` | Process exit code (signal → 128 + signum) |
+| **seq** | `u64` | Value of `sequence` counter at execution time |
+
+`last_exec` is `null` in evidence bundles emitted before any `EXEC` call in
+the session.  Only the **most recent** execution is recorded; auditors wishing
+to capture every invocation must request an evidence bundle after each `EXEC`.
+
+#### 2.3.4 Verification
+
+To verify a structured execution result:
+
+1. Identify the two consecutive evidence packets bracketing the `EXEC`
+   (i.e., the packet before and after the execution).
+2. Confirm `Packet[after].L1Hash == SHA-256(Packet[before].L1Hash ‖ stdout_bytes)`.
+3. Confirm `SHA-256(stdout_bytes) == last_exec.stdout_hash`.
+4. The `exit_code` and `stderr_hash` are informational and are not covered
+   by the Ed25519 signature; they are auditable but not cryptographically
+   enforced in v1.3.
 
 ---
 
