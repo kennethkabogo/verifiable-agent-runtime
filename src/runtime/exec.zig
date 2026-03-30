@@ -53,7 +53,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !ExecResult {
 
     const term = try child.wait();
     const exit_code: u8 = switch (term) {
-        .Exited => |code| code,
+        .Exited => |code| @truncate(code),
         .Signal => |sig| @truncate(128 + sig),
         else => 255,
     };
