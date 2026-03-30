@@ -16,6 +16,8 @@ Line-oriented protocol (all messages newline-terminated):
   Enclave → Agent   READY
   Agent   → Enclave SECRET:<key>:<value>
   Agent   → Enclave LOG:<message>
+  Agent   → Enclave EXEC:<cmd> [arg1] [arg2]…
+  Enclave → Agent   EXEC_RESULT:exit=<N>:stdout_b64=<b64>:stderr_b64=<b64>:stdout_hash=<hex>:stderr_hash=<hex>
   Agent   → Enclave GET_EVIDENCE
   Enclave → Agent   EVIDENCE:stream=<hex>:state=<hex>:sig=<...>
 
@@ -183,6 +185,32 @@ def encrypt_secret(plaintext: str, enc_pub_hex: str) -> str:
     return payload
 
 
+def exec_command(sock: socket.socket, cmd: list[str]) -> dict:
+    """
+    Send EXEC:<cmd> to the enclave and return the parsed result dict with keys:
+      exit_code (int), stdout (bytes), stderr (bytes),
+      stdout_hash (str hex), stderr_hash (str hex).
+    """
+    sendline(sock, "EXEC:" + " ".join(cmd))
+    line = readline(sock)
+    if line.startswith("EXEC_ERROR:"):
+        raise RuntimeError(f"enclave exec error: {line[11:]}")
+    if not line.startswith("EXEC_RESULT:"):
+        raise RuntimeError(f"unexpected exec response: {line!r}")
+    fields: dict = {}
+    for part in line[len("EXEC_RESULT:"):].split(":"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            fields[k] = v
+    return {
+        "exit_code": int(fields.get("exit", "255")),
+        "stdout": base64.b64decode(fields.get("stdout_b64", "")),
+        "stderr": base64.b64decode(fields.get("stderr_b64", "")),
+        "stdout_hash": fields.get("stdout_hash", ""),
+        "stderr_hash": fields.get("stderr_hash", ""),
+    }
+
+
 def provision_secret(sock: socket.socket, name: str, value: str,
                      enc_pub_hex: Optional[str]) -> None:
     """Send a secret to the enclave, encrypting if enc_pub is available."""
@@ -282,7 +310,22 @@ def main() -> None:
     print(f"\n[agent] Response:\n  {response}")
     sendline(sock, f"LOG:RESPONSE: {response}")
 
-    # 6. Request the signed evidence bundle.
+    # 6. Run a verifiable subprocess inside the enclave (EXEC demo).
+    print("\n[agent] Running verifiable command inside enclave: uname -a")
+    try:
+        exec_result = exec_command(sock, ["uname", "-a"])
+        stdout_text = exec_result["stdout"].decode(errors="replace").strip()
+        print(f"\n[agent] EXEC result:")
+        print(f"  exit_code  : {exec_result['exit_code']}")
+        print(f"  stdout     : {stdout_text}")
+        print(f"  stdout_hash: {exec_result['stdout_hash']}")
+        print(f"  stderr_hash: {exec_result['stderr_hash']}")
+        print("  (stdout bytes are now committed to the L1 hash chain)")
+        sendline(sock, f"LOG:EXEC_RESULT: exit={exec_result['exit_code']} stdout={stdout_text}")
+    except RuntimeError as exc:
+        print(f"[agent] EXEC failed: {exc}", file=sys.stderr)
+
+    # 7. Request the signed evidence bundle.
     sendline(sock, "GET_EVIDENCE")
     evidence = readline(sock)
 
@@ -296,14 +339,15 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("  Evidence Bundle")
     print("=" * 60)
+    print(f"  Sequence         : {ev_fields.get('seq', '?')}")
     print(f"  Prev Hash  (L1-1): {ev_fields.get('prev_stream', '?')}")
     print(f"  Stream Hash (L1) : {ev_fields.get('stream', '?')}")
     print(f"  State Hash  (L2) : {ev_fields.get('state', '?')}")
     print(f"  Signature        : {ev_fields.get('sig', '?')}")
     print()
     print("  The stream hash is anchored to this session's bootstrap nonce.")
-    print("  An auditor can replay the raw log bytes through a VT parser and")
-    print("  independently verify the L2 state hash without trusting this agent.")
+    print("  EXEC stdout bytes are committed into the L1 chain so an auditor")
+    print("  can verify last_exec.stdout_hash matches the L1 delta.")
     print("=" * 60)
 
     sock.close()
