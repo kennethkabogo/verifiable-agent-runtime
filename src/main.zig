@@ -98,11 +98,11 @@ pub fn main() !void {
         } else if (std.mem.startsWith(u8, line, "EXEC:")) {
             // Split "EXEC:cmd arg1 arg2" by whitespace into argv.
             const cmd_line = line[5..];
-            var argv_list = std.ArrayList([]const u8).init(allocator);
-            defer argv_list.deinit();
+            var argv_list = std.ArrayListUnmanaged([]const u8){};
+            defer argv_list.deinit(allocator);
             var it = std.mem.splitScalar(u8, cmd_line, ' ');
             while (it.next()) |arg| {
-                if (arg.len > 0) try argv_list.append(arg);
+                if (arg.len > 0) try argv_list.append(allocator, arg);
             }
             if (argv_list.items.len == 0) {
                 _ = try conn.send("EXEC_ERROR:empty_command\n");

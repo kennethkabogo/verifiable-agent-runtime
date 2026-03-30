@@ -286,11 +286,11 @@ pub const SecureLogger = struct {
             const eh = try hex(allocator, &rec.stderr_hash);
             defer allocator.free(eh);
             // Escape the cmd string: replace `"` and `\` for safe JSON embedding.
-            var escaped = std.ArrayList(u8).init(allocator);
-            defer escaped.deinit();
+            var escaped = std.ArrayListUnmanaged(u8){};
+            defer escaped.deinit(allocator);
             for (rec.cmd) |ch| {
-                if (ch == '"' or ch == '\\') try escaped.append('\\');
-                try escaped.append(ch);
+                if (ch == '"' or ch == '\\') try escaped.append(allocator, '\\');
+                try escaped.append(allocator, ch);
             }
             break :blk try std.fmt.allocPrint(
                 allocator,

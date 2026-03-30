@@ -39,13 +39,15 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !ExecResult {
 
     const truncated_msg = "<output truncated>";
 
-    const stdout = child.stdout.?.reader().readAllAlloc(allocator, MAX_OUTPUT_BYTES) catch |err| blk: {
+    var stdout_io_buf: [4096]u8 = undefined;
+    const stdout = child.stdout.?.reader(&stdout_io_buf).readAllAlloc(allocator, MAX_OUTPUT_BYTES) catch |err| blk: {
         if (err == error.StreamTooLong) break :blk try allocator.dupe(u8, truncated_msg);
         return err;
     };
     errdefer allocator.free(stdout);
 
-    const stderr = child.stderr.?.reader().readAllAlloc(allocator, MAX_OUTPUT_BYTES) catch |err| blk: {
+    var stderr_io_buf: [4096]u8 = undefined;
+    const stderr = child.stderr.?.reader(&stderr_io_buf).readAllAlloc(allocator, MAX_OUTPUT_BYTES) catch |err| blk: {
         if (err == error.StreamTooLong) break :blk try allocator.dupe(u8, truncated_msg);
         return err;
     };
