@@ -48,9 +48,10 @@ except ImportError:
     _CRYPTO_AVAILABLE = False
 
 # ── Transport config ────────────────────────────────────────────────────────
-VSOCK_CID  = int(os.environ.get("VSOCK_CID", "16"))   # enclave CID on Nitro
-TCP_HOST   = os.environ.get("VAR_HOST", "127.0.0.1")
-PORT       = int(os.environ.get("VAR_PORT", "5005"))
+VSOCK_CID   = int(os.environ.get("VSOCK_CID", "16"))   # enclave CID on Nitro
+TCP_HOST    = os.environ.get("VAR_HOST", "127.0.0.1")
+PORT        = int(os.environ.get("VAR_PORT", "5005"))
+GATEWAY_URL = os.environ.get("VAR_GATEWAY_URL", "http://127.0.0.1:8765")
 
 # ── Anthropic API ────────────────────────────────────────────────────────────
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -187,7 +188,7 @@ def encrypt_secret(plaintext: str, enc_pub_hex: str) -> str:
 
 def exec_command(sock: socket.socket, cmd: list[str]) -> dict:
     """
-    Send EXEC:<cmd> to the enclave and return the parsed result dict with keys:
+    Send EXEC:<cmd> over the vsock line protocol and return a result dict:
       exit_code (int), stdout (bytes), stderr (bytes),
       stdout_hash (str hex), stderr_hash (str hex).
     """
@@ -209,6 +210,52 @@ def exec_command(sock: socket.socket, cmd: list[str]) -> dict:
         "stdout_hash": fields.get("stdout_hash", ""),
         "stderr_hash": fields.get("stderr_hash", ""),
     }
+
+
+def exec_command_http(gateway_url: str, cmd: list[str]) -> dict:
+    """
+    Run a command via the HTTP gateway's POST /exec endpoint.
+
+    This is the "Verifiable Sidecar" path: any language or framework
+    co-located with the enclave can call the gateway over loopback without
+    speaking the vsock line protocol.
+
+    Returns the same dict shape as exec_command():
+      exit_code (int), stdout (bytes), stderr (bytes),
+      stdout_hash (str hex), stderr_hash (str hex).
+    """
+    payload = json.dumps({"cmd": cmd}).encode()
+    req = urllib.request.Request(
+        f"{gateway_url}/exec",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"gateway /exec HTTP {e.code}: {e.read().decode()[:200]}")
+    except Exception as e:
+        raise RuntimeError(f"gateway /exec error: {e}")
+
+    return {
+        "exit_code": int(body.get("exit_code", 255)),
+        "stdout": base64.b64decode(body.get("stdout_b64", "")),
+        "stderr": base64.b64decode(body.get("stderr_b64", "")),
+        "stdout_hash": body.get("stdout_hash", ""),
+        "stderr_hash": body.get("stderr_hash", ""),
+    }
+
+
+def get_evidence_http(gateway_url: str) -> dict:
+    """Fetch the signed evidence bundle from the HTTP gateway (GET /evidence)."""
+    req = urllib.request.Request(f"{gateway_url}/evidence", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        raise RuntimeError(f"gateway /evidence error: {e}")
 
 
 def provision_secret(sock: socket.socket, name: str, value: str,
@@ -245,11 +292,33 @@ def parse_header(header: str) -> dict:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="VAR Demo Agent")
+    parser.add_argument(
+        "--use-http",
+        action="store_true",
+        help=(
+            "Use the HTTP gateway (POST /exec, GET /evidence) instead of the "
+            "vsock line protocol for subprocess execution and evidence retrieval. "
+            "Demonstrates the language-agnostic Verifiable Sidecar interface."
+        ),
+    )
+    parser.add_argument(
+        "--gateway-url",
+        default=GATEWAY_URL,
+        help=f"HTTP gateway base URL (default: {GATEWAY_URL})",
+    )
+    args = parser.parse_args()
+
     api_key: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")
     use_real_api = api_key is not None
 
     print("\n" + "=" * 60)
     print("  VAR Demo Agent — Verifiable Agent Runtime")
+    if args.use_http:
+        print(f"  Mode: HTTP Sidecar  ({args.gateway_url})")
+    else:
+        print("  Mode: vsock line protocol")
     print("=" * 60)
 
     # 1. Connect to the VAR runtime.
@@ -310,44 +379,65 @@ def main() -> None:
     print(f"\n[agent] Response:\n  {response}")
     sendline(sock, f"LOG:RESPONSE: {response}")
 
-    # 6. Run a verifiable subprocess inside the enclave (EXEC demo).
-    print("\n[agent] Running verifiable command inside enclave: uname -a")
-    try:
-        exec_result = exec_command(sock, ["uname", "-a"])
-        stdout_text = exec_result["stdout"].decode(errors="replace").strip()
-        print(f"\n[agent] EXEC result:")
-        print(f"  exit_code  : {exec_result['exit_code']}")
-        print(f"  stdout     : {stdout_text}")
-        print(f"  stdout_hash: {exec_result['stdout_hash']}")
-        print(f"  stderr_hash: {exec_result['stderr_hash']}")
-        print("  (stdout bytes are now committed to the L1 hash chain)")
-        sendline(sock, f"LOG:EXEC_RESULT: exit={exec_result['exit_code']} stdout={stdout_text}")
-    except RuntimeError as exc:
-        print(f"[agent] EXEC failed: {exc}", file=sys.stderr)
+    # 6. Run verifiable subprocesses inside the enclave.
+    #    Two commands so we can demonstrate the full audit log (not just last-one-wins).
+    demo_commands = [["uname", "-a"], ["date", "-u"]]
 
-    # 7. Request the signed evidence bundle.
-    sendline(sock, "GET_EVIDENCE")
-    evidence = readline(sock)
+    for cmd in demo_commands:
+        print(f"\n[agent] EXEC: {' '.join(cmd)}")
+        try:
+            if args.use_http:
+                exec_result = exec_command_http(args.gateway_url, cmd)
+            else:
+                exec_result = exec_command(sock, cmd)
+            stdout_text = exec_result["stdout"].decode(errors="replace").strip()
+            print(f"  exit_code  : {exec_result['exit_code']}")
+            print(f"  stdout     : {stdout_text}")
+            print(f"  stdout_hash: {exec_result['stdout_hash']}")
+            sendline(sock, f"LOG:EXEC: {' '.join(cmd)} → {stdout_text}")
+        except RuntimeError as exc:
+            print(f"  [FAILED] {exc}", file=sys.stderr)
 
-    # Parse the evidence fields for display.
-    ev_fields = {}
-    for part in evidence.split(":"):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            ev_fields[k] = v
+    # 7. Fetch and display the signed evidence bundle (full execution audit log).
+    print("\n[agent] Fetching evidence bundle...")
+    if args.use_http:
+        try:
+            ev = get_evidence_http(args.gateway_url)
+        except RuntimeError as exc:
+            print(f"[agent] Evidence fetch failed: {exc}", file=sys.stderr)
+            ev = {}
+    else:
+        sendline(sock, "GET_EVIDENCE")
+        raw = readline(sock)
+        ev = {}
+        for part in raw.split(":"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                ev[k] = v
+
+    executions: list = ev.get("executions", [])
 
     print("\n" + "=" * 60)
     print("  Evidence Bundle")
     print("=" * 60)
-    print(f"  Sequence         : {ev_fields.get('seq', '?')}")
-    print(f"  Prev Hash  (L1-1): {ev_fields.get('prev_stream', '?')}")
-    print(f"  Stream Hash (L1) : {ev_fields.get('stream', '?')}")
-    print(f"  State Hash  (L2) : {ev_fields.get('state', '?')}")
-    print(f"  Signature        : {ev_fields.get('sig', '?')}")
+    print(f"  Sequence         : {ev.get('sequence', ev.get('seq', '?'))}")
+    print(f"  Prev Hash  (L1-1): {ev.get('prev_stream', '?')}")
+    print(f"  Stream Hash (L1) : {ev.get('stream', '?')}")
+    print(f"  State Hash  (L2) : {ev.get('state', '?')}")
+    print(f"  Signature        : {ev.get('sig', '?')}")
+    print(f"\n  Execution Audit Log ({len(executions)} command(s)):")
+    if executions:
+        for i, rec in enumerate(executions):
+            print(f"    [{i}] cmd={rec.get('cmd','?')}  "
+                  f"exit={rec.get('exit_code','?')}  "
+                  f"seq={rec.get('seq','?')}  "
+                  f"stdout_hash={rec.get('stdout_hash','?')[:16]}…")
+    else:
+        print("    (no executions recorded or vsock mode — see stream hash)")
     print()
-    print("  The stream hash is anchored to this session's bootstrap nonce.")
-    print("  EXEC stdout bytes are committed into the L1 chain so an auditor")
-    print("  can verify last_exec.stdout_hash matches the L1 delta.")
+    print("  Every command's stdout is committed into the L1 chain in order.")
+    print("  An auditor verifying the chain will see ALL commands, not just")
+    print("  the last one — hiding a malicious command is not possible.")
     print("=" * 60)
 
     sock.close()

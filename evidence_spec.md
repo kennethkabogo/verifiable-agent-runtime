@@ -1,4 +1,4 @@
-# Specification: VAR Evidence Bundle (v1.3)
+# Specification: VAR Evidence Bundle (v1.4)
 
 This document is the formal technical contract between the **VAR Enclave**
 and the **Auditor Client**.  It defines the cryptographic wire formats,
@@ -6,6 +6,12 @@ hashing logic, signature scope, and verification requirements for the
 Verifiable Agent Runtime.
 
 **Changelog**
+- v1.4 — §2.3.3: replace `last_exec` (singular) with `executions` (ordered
+         array).  Every command run during the session is appended to the log;
+         nothing is ever discarded.  Fixes the "cover-up" attack where a
+         malicious command followed by a benign one would erase the evidence.
+         HTTP Sidecar path (`POST /exec` + `GET /evidence`) now documented as
+         the language-agnostic interface for co-located skills.
 - v1.3 — Add §2.3 Structured Execution (EXEC command, `last_exec` evidence
          field, stdout/stderr hash commitment to L1 chain).
 - v1.2 — Add SessionID to §3.1 signature scope (matches implementation).
@@ -133,10 +139,31 @@ stderr bytes are captured and hashed (`SHA-256(stderr_bytes)`) but are
 **not** committed to the L1 chain.  stderr is diagnostic output that does not
 form part of the verifiable execution record.
 
-#### 2.3.3 `last_exec` Evidence Field
+#### 2.3.3 `executions` Evidence Field
 
-The next evidence bundle emitted after an `EXEC` call carries a `last_exec`
-object:
+Every evidence bundle carries an **ordered array** of all subprocess
+executions that occurred during the session up to that point:
+
+```json
+{
+  "executions": [
+    {
+      "cmd":         "uname -a",
+      "stdout_hash": "<hex64>",
+      "stderr_hash": "<hex64>",
+      "exit_code":   0,
+      "seq":         1
+    },
+    {
+      "cmd":         "date -u",
+      "stdout_hash": "<hex64>",
+      "stderr_hash": "<hex64>",
+      "exit_code":   0,
+      "seq":         1
+    }
+  ]
+}
+```
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
@@ -146,21 +173,28 @@ object:
 | **exit_code** | `u8` | Process exit code (signal → 128 + signum) |
 | **seq** | `u64` | Value of `sequence` counter at execution time |
 
-`last_exec` is `null` in evidence bundles emitted before any `EXEC` call in
-the session.  Only the **most recent** execution is recorded; auditors wishing
-to capture every invocation must request an evidence bundle after each `EXEC`.
+`executions` is `[]` (empty array) before any `EXEC` call in the session.
+Entries are **append-only**: commands are never removed or reordered.
+
+> **Security note — "cover-up" attack prevention**
+>
+> The v1.3 `last_exec` field could be exploited by an agent that ran a
+> malicious command and then immediately followed it with a benign one
+> (e.g. `whoami`), erasing the evidence.  The `executions` array closes
+> this gap: the enclave accumulates all invocations for the session lifetime.
 
 #### 2.3.4 Verification
 
-To verify a structured execution result:
+To verify the full execution history in v1.4:
 
-1. Identify the two consecutive evidence packets bracketing the `EXEC`
-   (i.e., the packet before and after the execution).
-2. Confirm `Packet[after].L1Hash == SHA-256(Packet[before].L1Hash ‖ stdout_bytes)`.
-3. Confirm `SHA-256(stdout_bytes) == last_exec.stdout_hash`.
+1. Obtain the signed evidence bundle for the session.
+2. For each entry `E[i]` in `executions` (in order), confirm that the L1
+   chain advanced correctly:
+   `L1[after_i] == SHA-256(L1[before_i] ‖ E[i].stdout_bytes)`.
+3. Confirm `SHA-256(E[i].stdout_bytes) == E[i].stdout_hash` for each entry.
 4. The `exit_code` and `stderr_hash` are informational and are not covered
    by the Ed25519 signature; they are auditable but not cryptographically
-   enforced in v1.3.
+   enforced in v1.4.
 
 ---
 

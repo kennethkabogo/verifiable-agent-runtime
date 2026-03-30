@@ -50,10 +50,11 @@ pub const SecureLogger = struct {
     /// Session identifier included in every signature so a verifier can bind the
     /// signature to a specific session without trusting the gateway.
     session_id: [16]u8,
-    /// Most recent structured execution record, or null if no command has been
-    /// run yet this session.  Replaced (and previous entry freed) on each
-    /// runAndLog call.  Included in the evidence bundle JSON for verifiers.
-    last_exec: ?ExecRecord = null,
+    /// Ordered log of every subprocess execution this session.
+    /// Each runAndLog call appends one entry; nothing is ever removed.
+    /// Verifiers iterate the full list to confirm that no command was hidden
+    /// by a later benign one (the "cover-up" attack against last_exec-only designs).
+    executions: std.ArrayListUnmanaged(ExecRecord) = .{},
 
     /// init anchors the hash chain to the session.  The caller passes the
     /// pre-computed bootstrap_nonce (SHA-256(attestation_doc || session_id))
@@ -79,7 +80,8 @@ pub const SecureLogger = struct {
 
     pub fn deinit(self: *SecureLogger) void {
         self.vt.deinit();
-        if (self.last_exec) |rec| rec.deinit(self.allocator);
+        for (self.executions.items) |rec| rec.deinit(self.allocator);
+        self.executions.deinit(self.allocator);
     }
 
     fn hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -139,15 +141,13 @@ pub const SecureLogger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Free the previous exec record before replacing it.
-        if (self.last_exec) |old| old.deinit(self.allocator);
-        self.last_exec = ExecRecord{
+        try self.executions.append(self.allocator, ExecRecord{
             .cmd = cmd_str,
             .stdout_hash = stdout_hash,
             .stderr_hash = stderr_hash,
             .exit_code = result.exit_code,
             .seq = self.sequence,
-        };
+        });
 
         return result;
     }
@@ -279,30 +279,37 @@ pub const SecureLogger = struct {
         const sig_h = try hex(allocator, &sig_bytes);
         defer allocator.free(sig_h);
 
-        // Build last_exec JSON fragment (null when no command has run yet).
-        const exec_json = if (self.last_exec) |rec| blk: {
+        // Build the executions JSON array.
+        // Each entry: {"cmd":"...","stdout_hash":"...","stderr_hash":"...","exit_code":N,"seq":N}
+        var execs_buf = std.ArrayListUnmanaged(u8){};
+        defer execs_buf.deinit(allocator);
+        try execs_buf.append(allocator, '[');
+        for (self.executions.items, 0..) |rec, i| {
+            if (i > 0) try execs_buf.append(allocator, ',');
             const sh = try hex(allocator, &rec.stdout_hash);
             defer allocator.free(sh);
             const eh = try hex(allocator, &rec.stderr_hash);
             defer allocator.free(eh);
-            // Escape the cmd string: replace `"` and `\` for safe JSON embedding.
+            // JSON-escape the cmd string (only `"` and `\` need escaping here).
             var escaped = std.ArrayListUnmanaged(u8){};
             defer escaped.deinit(allocator);
             for (rec.cmd) |ch| {
                 if (ch == '"' or ch == '\\') try escaped.append(allocator, '\\');
                 try escaped.append(allocator, ch);
             }
-            break :blk try std.fmt.allocPrint(
+            const entry = try std.fmt.allocPrint(
                 allocator,
                 "{{\"cmd\":\"{s}\",\"stdout_hash\":\"{s}\",\"stderr_hash\":\"{s}\",\"exit_code\":{d},\"seq\":{d}}}",
                 .{ escaped.items, sh, eh, rec.exit_code, rec.seq },
             );
-        } else try allocator.dupe(u8, "null");
-        defer allocator.free(exec_json);
+            defer allocator.free(entry);
+            try execs_buf.appendSlice(allocator, entry);
+        }
+        try execs_buf.append(allocator, ']');
 
         const result = try std.fmt.allocPrint(allocator,
-            \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d},"last_exec":{s}}}
-        , .{ prev_h, stream_h, state_h, sig_h, next_seq, exec_json });
+            \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d},"executions":{s}}}
+        , .{ prev_h, stream_h, state_h, sig_h, next_seq, execs_buf.items });
 
         // Commit state only after the bundle is fully built.
         self.sequence = next_seq;
@@ -311,3 +318,60 @@ pub const SecureLogger = struct {
         return result;
     }
 };
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+test "executions: empty before any EXEC" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), logger.executions.items.len);
+}
+
+test "executions: appends in order across multiple EXEC calls" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    // First command.
+    const r1 = try logger.runAndLog(&.{ "/bin/echo", "first" });
+    r1.deinit(allocator);
+
+    // Second command.
+    const r2 = try logger.runAndLog(&.{ "/bin/echo", "second" });
+    r2.deinit(allocator);
+
+    // Third command.
+    const r3 = try logger.runAndLog(&.{ "/bin/sh", "-c", "exit 7" });
+    r3.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), logger.executions.items.len);
+    try std.testing.expectEqualStrings("/bin/echo first", logger.executions.items[0].cmd);
+    try std.testing.expectEqualStrings("/bin/echo second", logger.executions.items[1].cmd);
+    try std.testing.expectEqualStrings("/bin/sh -c exit 7", logger.executions.items[2].cmd);
+    try std.testing.expectEqual(@as(u8, 7), logger.executions.items[2].exit_code);
+}
+
+test "executions: JSON bundle contains all records" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const r1 = try logger.runAndLog(&.{ "/bin/echo", "hello" });
+    r1.deinit(allocator);
+    const r2 = try logger.runAndLog(&.{ "/bin/echo", "world" });
+    r2.deinit(allocator);
+
+    const json = try logger.getEvidenceBundleJson(allocator);
+    defer allocator.free(json);
+
+    // Both commands must appear in the JSON.
+    try std.testing.expect(std.mem.indexOf(u8, json, "/bin/echo hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "/bin/echo world") != null);
+    // The array field must be present.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"executions\":[") != null);
+}
