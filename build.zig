@@ -114,6 +114,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     gateway_exe.root_module.addOptions("build_options", options);
+    // http_main.zig → sealed_state.zig → rsa_recipient.zig uses libcrypto.
+    gateway_exe.linkSystemLibrary("crypto");
+    gateway_exe.linkLibC();
     if (with_ghostty) {
         const ghostty_dep = b.dependency("ghostty", .{
             .target = target,
@@ -187,7 +190,7 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     // Test executable for the HTTP gateway (http_main.zig → http.zig tests).
-    // Separate from exe_tests because the gateway does not use libcrypto/libC.
+    // http_main.zig → sealed_state.zig → rsa_recipient.zig requires libcrypto.
     const gateway_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/http_main.zig"),
@@ -195,6 +198,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    gateway_tests.linkSystemLibrary("crypto");
+    gateway_tests.linkLibC();
     if (ghostty_vt) |vt_mod| {
         gateway_tests.root_module.addImport("ghostty-vt", vt_mod);
     }
