@@ -100,7 +100,7 @@ install-proxy:
 # 9. Run all tests (Zig unit tests + Python pytest suites)
 test:
 	zig build test
-	pytest src/host/tests/ src/agent/tests/ -v
+	pytest src/host/tests/ src/agent/tests/ tests/ -v
 
 # 10. Remove build artefacts
 clean:
