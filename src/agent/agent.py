@@ -20,6 +20,10 @@ Line-oriented protocol (all messages newline-terminated):
   Enclave → Agent   EXEC_RESULT:exit=<N>:stdout_b64=<b64>:stderr_b64=<b64>:stdout_hash=<hex>:stderr_hash=<hex>
   Agent   → Enclave GET_EVIDENCE
   Enclave → Agent   EVIDENCE:stream=<hex>:state=<hex>:sig=<...>
+  Agent   → Enclave HIBERNATE
+  Enclave → Agent   SEALED_STATE:<hex_blob>   (enclave exits cleanly)
+  Agent   → Enclave RESUME:<hex_blob>         (sent as the FIRST message to resume)
+  Enclave → Agent   RESUMED:session=<hex>:seq=<n>
 
 On AWS Nitro: set VSOCK_CID to the enclave's CID (typically 16).
 In simulation (dev/Mac): the runtime listens on TCP 127.0.0.1:5005.
@@ -291,6 +295,60 @@ def parse_header(header: str) -> dict:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def hibernate(sock: socket.socket, state_file: str) -> None:
+    """Send HIBERNATE, receive SEALED_STATE blob, save to file, close."""
+    sendline(sock, "HIBERNATE")
+    line = readline(sock)
+    if not line.startswith("SEALED_STATE:"):
+        print(f"[agent] ERROR: expected SEALED_STATE, got {line!r}", file=sys.stderr)
+        return
+    hex_blob = line[len("SEALED_STATE:"):]
+    with open(state_file, "w") as f:
+        f.write(hex_blob)
+    print(f"[agent] Session hibernated. State saved to {state_file!r} ({len(hex_blob)//2} bytes).")
+
+
+def resume_connect(state_file: str) -> tuple[socket.socket, dict]:
+    """
+    Connect to a fresh enclave and resume a hibernated session.
+
+    Protocol: send RESUME:<hex_blob> as the VERY FIRST message, then wait
+    for BUNDLE_HEADER, READY, RESUMED in that order.
+    """
+    with open(state_file) as f:
+        hex_blob = f.read().strip()
+
+    sock = connect()
+    sendline(sock, f"RESUME:{hex_blob}")
+
+    header = readline(sock)
+    fields = parse_header(header)
+    if fields.get("magic") != "VARB":
+        print("[agent] ERROR: unexpected magic on resume — aborting.", file=sys.stderr)
+        sock.close()
+        raise RuntimeError("bad bundle header on resume")
+
+    ready = readline(sock)
+    if ready != "READY":
+        print(f"[agent] ERROR: expected READY, got {ready!r}", file=sys.stderr)
+        sock.close()
+        raise RuntimeError("bad READY on resume")
+
+    resumed = readline(sock)
+    if not resumed.startswith("RESUMED:"):
+        print(f"[agent] ERROR: expected RESUMED, got {resumed!r}", file=sys.stderr)
+        sock.close()
+        raise RuntimeError("bad RESUMED on resume")
+
+    parts = {}
+    for p in resumed.split(":"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            parts[k] = v
+    print(f"[agent] Session resumed: id={parts.get('session','?')} seq={parts.get('seq','?')}")
+    return sock, fields
+
+
 def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="VAR Demo Agent")
@@ -308,6 +366,16 @@ def main() -> None:
         default=GATEWAY_URL,
         help=f"HTTP gateway base URL (default: {GATEWAY_URL})",
     )
+    parser.add_argument(
+        "--hibernate",
+        metavar="FILE",
+        help="After provisioning, hibernate the session and save state to FILE.",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="FILE",
+        help="Resume a previously hibernated session from FILE instead of starting fresh.",
+    )
     args = parser.parse_args()
 
     api_key: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")
@@ -321,12 +389,14 @@ def main() -> None:
         print("  Mode: vsock line protocol")
     print("=" * 60)
 
-    # 1. Connect to the VAR runtime.
-    sock = connect()
-
-    # 2. Receive and display Bundle Header.
-    header = readline(sock)
-    fields = parse_header(header)
+    # 1. Connect to the VAR runtime (fresh or resumed).
+    if args.resume:
+        sock, fields = resume_connect(args.resume)
+    else:
+        sock = connect()
+        # 2. Receive and display Bundle Header.
+        header = readline(sock)
+        fields = parse_header(header)
 
     enc_pub_hex: Optional[str] = fields.get("enc_pub")
     encrypted_mode = bool(enc_pub_hex) and _CRYPTO_AVAILABLE
@@ -344,12 +414,13 @@ def main() -> None:
         sock.close()
         return
 
-    # 3. Wait for READY signal.
-    ready = readline(sock)
-    if ready != "READY":
-        print(f"[agent] ERROR: expected READY, got {ready!r}", file=sys.stderr)
-        sock.close()
-        return
+    # 3. Wait for READY signal (only on fresh sessions; resume already consumed it).
+    if not args.resume:
+        ready = readline(sock)
+        if ready != "READY":
+            print(f"[agent] ERROR: expected READY, got {ready!r}", file=sys.stderr)
+            sock.close()
+            return
 
     # 4. Provision the vault with the API key.
     #    When the enclave advertises enc_pub in the bundle header the secret is
@@ -378,6 +449,12 @@ def main() -> None:
 
     print(f"\n[agent] Response:\n  {response}")
     sendline(sock, f"LOG:RESPONSE: {response}")
+
+    # 5b. Hibernate if requested (before any EXECs).
+    if args.hibernate:
+        hibernate(sock, args.hibernate)
+        sock.close()
+        return
 
     # 6. Run verifiable subprocesses inside the enclave.
     #    Two commands so we can demonstrate the full audit log (not just last-one-wins).

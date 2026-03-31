@@ -50,6 +50,10 @@ pub const SecureLogger = struct {
     /// Session identifier included in every signature so a verifier can bind the
     /// signature to a specific session without trusting the gateway.
     session_id: [16]u8,
+    /// Bootstrap nonce that anchors the L1 chain to the session attestation.
+    /// Stored here so that sealed_state.capture() can persist it alongside the
+    /// rest of the logger state and restore it on resume.
+    bootstrap_nonce: [32]u8,
     /// Ordered log of every subprocess execution this session.
     /// Each runAndLog call appends one entry; nothing is ever removed.
     /// Verifiers iterate the full list to confirm that no command was hidden
@@ -71,6 +75,7 @@ pub const SecureLogger = struct {
             .allocator = allocator,
             .stream_hash = bootstrap_nonce,
             .prev_stream_hash = bootstrap_nonce,
+            .bootstrap_nonce = bootstrap_nonce,
             .vt = try VerifiableTerminal.init(allocator, 80, 24),
             .sequence = 0,
             .keypair = keypair,

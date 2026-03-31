@@ -6,6 +6,11 @@ hashing logic, signature scope, and verification requirements for the
 Verifiable Agent Runtime.
 
 **Changelog**
+- v1.5 — §5: update sealed state format to v0x02 (remove Ed25519 secret key,
+         add `bootstrap_nonce` + `executions` array).  §5.3 documents the
+         hibernate/resume protocol and the keypair-per-segment security model.
+         §6 updated: keypair is NOT preserved across hibernate/resume; each
+         session segment uses a fresh keypair bound to a new attestation quote.
 - v1.4 — §2.3.3: replace `last_exec` (singular) with `executions` (ordered
          array).  Every command run during the session is appended to the log;
          nothing is ever discarded.  Fixes the "cover-up" attack where a
@@ -336,8 +341,34 @@ the next boot.
 [ciphertext     : M bytes]   AES-256-GCM encryption of the serialised state
 ```
 
-The serialised state includes: SessionID, L1 stream hash, previous stream hash,
-sequence number, Ed25519 secret key, and vault entries.
+The serialised state (plaintext format v0x02) contains:
+
+| Field | Size | Description |
+| :--- | ---: | :--- |
+| Magic | 4 | `"VARS"` |
+| Version | 1 | `0x02` |
+| SessionID | 16 | UUID v4 |
+| StreamHash | 32 | Current L1 hash chain tip |
+| PrevStreamHash | 32 | L1 hash at last evidence emission |
+| Sequence | 8 | u64 LE — next sequence number on resume |
+| BootstrapNonce | 32 | `SHA-256(AttestationDoc ‖ SessionID)` |
+| VaultCount | 4 | u32 LE |
+| ExecCount | 4 | u32 LE |
+| vault entries | variable | key/value pairs |
+| exec entries | variable | ordered execution records |
+
+The Ed25519 signing keypair is **not** persisted.  See §5.3.
+
+Each exec entry:
+
+| Field | Size | Description |
+| :--- | ---: | :--- |
+| CmdLen | 2 | u16 LE |
+| Cmd | CmdLen | space-joined command line |
+| StdoutHash | 32 | SHA-256 of stdout |
+| StderrHash | 32 | SHA-256 of stderr |
+| ExitCode | 1 | process exit code |
+| Seq | 8 | u64 LE — sequence at execution time |
 
 ### 5.2 DEK Wrapping — KMS Recipient Flow
 
@@ -358,6 +389,30 @@ the host-side proxy never receives the plaintext DEK:
 The KMS CMK key policy MUST include a `kms:RecipientAttestation:PCR0`
 condition restricting decryption to enclaves with the correct image hash.
 
+### 5.3 Hibernate / Resume Protocol
+
+```
+Agent → Enclave   (first message)  RESUME:<hex_blob>
+Enclave → Agent   BUNDLE_HEADER:…:session=<orig_session_id>:nonce=<orig_bootstrap_nonce>:…
+Enclave → Agent   READY
+Enclave → Agent   RESUMED:session=<orig_session_id>:seq=<last_seq>
+Agent → Enclave   SECRET:…   (re-provision if needed)
+…
+```
+
+**Keypair-per-segment model**: each resumed session segment generates a **fresh**
+Ed25519 keypair, bound into a new attestation quote.  The BUNDLE_HEADER carries
+the original `session_id` and `bootstrap_nonce` so an auditor can stitch
+segments together by SessionID, but each segment's signatures use the public
+key from that segment's attestation.
+
+An auditor verifying a resumed session MUST:
+1. Accept that the public key changes across segments for the same SessionID.
+2. Verify each segment's signatures against the public key in that segment's
+   attestation quote.
+3. Confirm `Packet[1].PrevL1Hash` of the resumed segment equals the last L1
+   hash of the hibernated segment (chain continuity across the boundary).
+
 ---
 
 ## 6. KMS Recipient Flow — Security Properties
@@ -367,4 +422,4 @@ condition restricting decryption to enclaves with the correct image hash.
 | **Host isolation** | The host-side vsock proxy never receives the plaintext DEK; it forwards RSA-wrapped ciphertext it cannot decrypt. |
 | **Ephemeral key** | The RSA keypair is generated fresh per unseal and discarded immediately after; no long-lived RSA material exists. |
 | **Attestation binding** | KMS verifies the NSM signature before wrapping, ensuring only an enclave with the correct PCR0 can receive the DEK. |
-| **Session binding** | The Ed25519 keypair restored from the sealed state allows the resumed session to continue signing evidence with the same public key that was attested at session start. |
+| **Keypair per segment** | The Ed25519 signing keypair is NOT preserved across hibernate/resume.  Each session segment generates a fresh keypair bound into a new attestation quote.  This avoids the key-persistence attack surface while preserving hash-chain continuity via `bootstrap_nonce` and `session_id`. |

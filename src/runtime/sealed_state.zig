@@ -27,20 +27,33 @@
 ///   [tag            : 16 bytes]  AES-GCM authentication tag
 ///   [ciphertext     : M bytes]   AES-256-GCM ciphertext of the serialized state
 ///
-/// Serialized plaintext format:
-///   [magic        : 4 ]  "VARS"
-///   [version      : 1 ]  0x01
-///   [session_id   : 16]  UUID v4
-///   [stream_hash  : 32]  current L1 hash chain tip (spec §2.1)
-///   [prev_hash    : 32]  L1 hash at last evidence emission
-///   [sequence     : 8 ]  u64 LE — next sequence number on resume
-///   [secret_key   : 64]  full Ed25519 secret key bytes (seed || public key)
-///   [vault_count  : 4 ]  u32 LE
+/// Serialized plaintext format (version 0x02):
+///   [magic           : 4 ]  "VARS"
+///   [version         : 1 ]  0x02
+///   [session_id      : 16]  UUID v4
+///   [stream_hash     : 32]  current L1 hash chain tip (spec §2.1)
+///   [prev_hash       : 32]  L1 hash at last evidence emission
+///   [sequence        : 8 ]  u64 LE — next sequence number on resume
+///   [bootstrap_nonce : 32]  SHA-256(AttestationDoc || SessionID) — chain anchor
+///   [vault_count     : 4 ]  u32 LE
+///   [exec_count      : 4 ]  u32 LE
 ///   per vault entry:
 ///     [key_len    : 2 ]  u16 LE
 ///     [key        : key_len]
 ///     [val_len    : 2 ]  u16 LE
 ///     [val        : val_len]
+///   per exec entry:
+///     [cmd_len    : 2 ]  u16 LE
+///     [cmd        : cmd_len]
+///     [stdout_hash: 32]
+///     [stderr_hash: 32]
+///     [exit_code  : 1 ]
+///     [seq        : 8 ]  u64 LE
+///
+/// The Ed25519 signing keypair is NOT persisted.  Each resumed session segment
+/// generates a fresh keypair whose public key is bound into the new attestation
+/// quote.  Verifiers must accept different public keys for different session
+/// segments of the same SessionID.
 ///
 /// Note on terminal state (L2): the VerifiableTerminal grid is NOT persisted.
 /// On resume the grid starts empty.  The L1 stream_hash already encodes the
@@ -51,7 +64,9 @@ const std = @import("std");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const SecureVault = @import("vault.zig").SecureVault;
-const SecureLogger = @import("shell.zig").SecureLogger;
+const shell = @import("shell.zig");
+const SecureLogger = shell.SecureLogger;
+const ExecRecord = shell.ExecRecord;
 const VsockHandler = @import("vsock.zig").VsockHandler;
 
 // ---------------------------------------------------------------------------
@@ -59,11 +74,12 @@ const VsockHandler = @import("vsock.zig").VsockHandler;
 // ---------------------------------------------------------------------------
 
 const MAGIC = [4]u8{ 'V', 'A', 'R', 'S' };
-const FORMAT_VERSION: u8 = 0x01;
+const FORMAT_VERSION: u8 = 0x02;
 
 /// Minimum plaintext size: magic(4) + version(1) + session_id(16) +
-/// stream_hash(32) + prev_hash(32) + sequence(8) + secret_key(64) + vault_count(4) = 161
-const MIN_PLAINTEXT: usize = 161;
+/// stream_hash(32) + prev_hash(32) + sequence(8) + bootstrap_nonce(32) +
+/// vault_count(4) + exec_count(4) = 133
+const MIN_PLAINTEXT: usize = 133;
 
 /// Minimum and maximum byte lengths for the wrapped DEK field.
 /// Simulation (XOR): exactly 32 bytes.
@@ -87,14 +103,26 @@ pub const CapturedState = struct {
     stream_hash: [32]u8,
     prev_stream_hash: [32]u8,
     sequence: u64,
-    /// Full 64-byte Ed25519 secret key (seed || public key).
-    /// The keypair is reconstructed directly from these bytes on restore.
-    secret_key_bytes: [64]u8,
-    vault_entries: []Entry,
+    /// Bootstrap nonce anchoring the L1 chain to the original session attestation.
+    /// Preserved so the resumed session's BUNDLE_HEADER carries the same nonce,
+    /// allowing an auditor to verify chain continuity across the hibernate boundary.
+    bootstrap_nonce: [32]u8,
+    vault_entries: []VaultEntry,
+    exec_entries: []ExecEntry,
 
-    pub const Entry = struct {
+    pub const VaultEntry = struct {
         key: []const u8,
         value: []const u8,
+    };
+
+    /// Flat snapshot of an execution record for serialization.
+    /// Mirrors ExecRecord but owned by the CapturedState allocator.
+    pub const ExecEntry = struct {
+        cmd: []u8,
+        stdout_hash: [32]u8,
+        stderr_hash: [32]u8,
+        exit_code: u8,
+        seq: u64,
     };
 
     pub fn deinit(self: *CapturedState) void {
@@ -105,7 +133,10 @@ pub const CapturedState = struct {
             self.allocator.free(e.value);
         }
         self.allocator.free(self.vault_entries);
-        std.crypto.secureZero(u8, &self.secret_key_bytes);
+        for (self.exec_entries) |e| {
+            self.allocator.free(e.cmd);
+        }
+        self.allocator.free(self.exec_entries);
     }
 };
 
@@ -121,7 +152,7 @@ pub fn capture(
     vault: *SecureVault,
     logger: *SecureLogger,
 ) !CapturedState {
-    // Snapshot logger fields first (cheap, no allocation).
+    // Snapshot scalar logger fields (cheap, no allocation).
     const session_id = blk: {
         logger.mutex.lock();
         defer logger.mutex.unlock();
@@ -142,19 +173,47 @@ pub fn capture(
         defer logger.mutex.unlock();
         break :blk logger.sequence;
     };
-    const secret_key_bytes = blk: {
+    const bootstrap_nonce = blk: {
         logger.mutex.lock();
         defer logger.mutex.unlock();
-        break :blk logger.keypair.secret_key.toBytes();
+        break :blk logger.bootstrap_nonce;
     };
 
+    // Snapshot exec entries (requires allocation for cmd strings).
+    const exec_entries = blk: {
+        logger.mutex.lock();
+        defer logger.mutex.unlock();
+        const n = logger.executions.items.len;
+        const buf = try allocator.alloc(CapturedState.ExecEntry, n);
+        var init_count: usize = 0;
+        errdefer {
+            for (buf[0..init_count]) |e| allocator.free(e.cmd);
+            allocator.free(buf);
+        }
+        for (logger.executions.items, 0..) |rec, i| {
+            buf[i] = .{
+                .cmd = try allocator.dupe(u8, rec.cmd),
+                .stdout_hash = rec.stdout_hash,
+                .stderr_hash = rec.stderr_hash,
+                .exit_code = rec.exit_code,
+                .seq = rec.seq,
+            };
+            init_count = i + 1;
+        }
+        break :blk buf;
+    };
+    errdefer {
+        for (exec_entries) |e| allocator.free(e.cmd);
+        allocator.free(exec_entries);
+    }
+
     // Snapshot vault entries.
-    const entries = blk: {
+    const vault_entries = blk: {
         vault.mutex.lock();
         defer vault.mutex.unlock();
 
         const n = vault.secrets.count();
-        const buf = try allocator.alloc(CapturedState.Entry, n);
+        const buf = try allocator.alloc(CapturedState.VaultEntry, n);
         errdefer allocator.free(buf);
 
         var it = vault.secrets.iterator();
@@ -174,8 +233,9 @@ pub fn capture(
         .stream_hash = stream_hash,
         .prev_stream_hash = prev_stream_hash,
         .sequence = sequence,
-        .secret_key_bytes = secret_key_bytes,
-        .vault_entries = entries,
+        .bootstrap_nonce = bootstrap_nonce,
+        .vault_entries = vault_entries,
+        .exec_entries = exec_entries,
     };
 }
 
@@ -204,7 +264,9 @@ pub fn restoreVault(state: *const CapturedState, vault: *SecureVault) !void {
     }
 }
 
-/// Restore logger hash-chain and signing keypair from a previously captured state.
+/// Restore logger hash-chain state from a previously captured state.
+/// The signing keypair is NOT restored — each resumed session segment generates
+/// a fresh keypair bound to a new attestation quote (see module doc comment).
 /// The VerifiableTerminal grid is reset to empty — see module doc comment.
 pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
     logger.mutex.lock();
@@ -214,13 +276,25 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
     logger.stream_hash = state.stream_hash;
     logger.prev_stream_hash = state.prev_stream_hash;
     logger.sequence = state.sequence;
+    logger.bootstrap_nonce = state.bootstrap_nonce;
 
-    // Reconstruct the Ed25519 keypair directly from the stored secret key bytes
-    // (seed || public_key).  Direct struct construction avoids any dependence on
-    // a seeded-generate API whose exact name varies across Zig versions.
-    const sk = Ed25519.SecretKey{ .bytes = state.secret_key_bytes };
-    const pk = Ed25519.PublicKey{ .bytes = state.secret_key_bytes[32..64].* };
-    logger.keypair = Ed25519.KeyPair{ .secret_key = sk, .public_key = pk };
+    // Restore the ordered execution audit log.
+    // The logger was freshly created at startup, so executions will be empty;
+    // we clear it anyway for safety.
+    for (logger.executions.items) |rec| rec.deinit(logger.allocator);
+    logger.executions.clearRetainingCapacity();
+
+    for (state.exec_entries) |e| {
+        const cmd = try logger.allocator.dupe(u8, e.cmd);
+        errdefer logger.allocator.free(cmd);
+        try logger.executions.append(logger.allocator, ExecRecord{
+            .cmd = cmd,
+            .stdout_hash = e.stdout_hash,
+            .stderr_hash = e.stderr_hash,
+            .exit_code = e.exit_code,
+            .seq = e.seq,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,26 +307,40 @@ fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     for (state.vault_entries) |e| {
         size += 2 + e.key.len + 2 + e.value.len;
     }
+    for (state.exec_entries) |e| {
+        size += 2 + e.cmd.len + 32 + 32 + 1 + 8;
+    }
 
     const buf = try allocator.alloc(u8, size);
     var pos: usize = 0;
 
-    @memcpy(buf[pos..][0..4], &MAGIC);                               pos += 4;
-    buf[pos] = FORMAT_VERSION;                                        pos += 1;
-    @memcpy(buf[pos..][0..16], &state.session_id);                   pos += 16;
-    @memcpy(buf[pos..][0..32], &state.stream_hash);                  pos += 32;
-    @memcpy(buf[pos..][0..32], &state.prev_stream_hash);             pos += 32;
-    std.mem.writeInt(u64, buf[pos..][0..8], state.sequence, .little); pos += 8;
-    @memcpy(buf[pos..][0..64], &state.secret_key_bytes);             pos += 64;
+    @memcpy(buf[pos..][0..4], &MAGIC);                                pos += 4;
+    buf[pos] = FORMAT_VERSION;                                         pos += 1;
+    @memcpy(buf[pos..][0..16], &state.session_id);                    pos += 16;
+    @memcpy(buf[pos..][0..32], &state.stream_hash);                   pos += 32;
+    @memcpy(buf[pos..][0..32], &state.prev_stream_hash);              pos += 32;
+    std.mem.writeInt(u64, buf[pos..][0..8], state.sequence, .little);  pos += 8;
+    @memcpy(buf[pos..][0..32], &state.bootstrap_nonce);               pos += 32;
 
     std.mem.writeInt(u32, buf[pos..][0..4], @intCast(state.vault_entries.len), .little);
+    pos += 4;
+    std.mem.writeInt(u32, buf[pos..][0..4], @intCast(state.exec_entries.len), .little);
     pos += 4;
 
     for (state.vault_entries) |e| {
         std.mem.writeInt(u16, buf[pos..][0..2], @intCast(e.key.len), .little);   pos += 2;
-        @memcpy(buf[pos..][0..e.key.len], e.key);                                pos += e.key.len;
+        @memcpy(buf[pos..][0..e.key.len], e.key);                                 pos += e.key.len;
         std.mem.writeInt(u16, buf[pos..][0..2], @intCast(e.value.len), .little); pos += 2;
-        @memcpy(buf[pos..][0..e.value.len], e.value);                            pos += e.value.len;
+        @memcpy(buf[pos..][0..e.value.len], e.value);                             pos += e.value.len;
+    }
+
+    for (state.exec_entries) |e| {
+        std.mem.writeInt(u16, buf[pos..][0..2], @intCast(e.cmd.len), .little);   pos += 2;
+        @memcpy(buf[pos..][0..e.cmd.len], e.cmd);                                 pos += e.cmd.len;
+        @memcpy(buf[pos..][0..32], &e.stdout_hash);                               pos += 32;
+        @memcpy(buf[pos..][0..32], &e.stderr_hash);                               pos += 32;
+        buf[pos] = e.exit_code;                                                    pos += 1;
+        std.mem.writeInt(u64, buf[pos..][0..8], e.seq, .little);                  pos += 8;
     }
 
     std.debug.assert(pos == size);
@@ -284,24 +372,27 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
     const sequence = std.mem.readInt(u64, buf[pos..][0..8], .little);
     pos += 8;
 
-    var secret_key_bytes: [64]u8 = undefined;
-    @memcpy(&secret_key_bytes, buf[pos..][0..64]);
-    pos += 64;
+    var bootstrap_nonce: [32]u8 = undefined;
+    @memcpy(&bootstrap_nonce, buf[pos..][0..32]);
+    pos += 32;
 
     const vault_count = std.mem.readInt(u32, buf[pos..][0..4], .little);
     pos += 4;
+    const exec_count = std.mem.readInt(u32, buf[pos..][0..4], .little);
+    pos += 4;
 
-    // Cap vault_count to prevent OOM from a corrupt blob.
+    // Cap counts to prevent OOM from a corrupt blob.
     if (vault_count > 4096) return error.VaultCountTooLarge;
+    if (exec_count > 65536) return error.ExecCountTooLarge;
 
-    const entries = try allocator.alloc(CapturedState.Entry, vault_count);
-    var entries_init: usize = 0;
+    const vault_entries = try allocator.alloc(CapturedState.VaultEntry, vault_count);
+    var vault_init: usize = 0;
     errdefer {
-        for (entries[0..entries_init]) |e| {
+        for (vault_entries[0..vault_init]) |e| {
             allocator.free(e.key);
             allocator.free(e.value);
         }
-        allocator.free(entries);
+        allocator.free(vault_entries);
     }
 
     for (0..vault_count) |i| {
@@ -319,8 +410,41 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         const value = try allocator.dupe(u8, buf[pos..][0..val_len]);
         pos += val_len;
 
-        entries[i] = .{ .key = key, .value = value };
-        entries_init = i + 1;
+        vault_entries[i] = .{ .key = key, .value = value };
+        vault_init = i + 1;
+    }
+
+    const exec_entries = try allocator.alloc(CapturedState.ExecEntry, exec_count);
+    var exec_init: usize = 0;
+    errdefer {
+        for (exec_entries[0..exec_init]) |e| allocator.free(e.cmd);
+        allocator.free(exec_entries);
+    }
+
+    for (0..exec_count) |i| {
+        if (pos + 2 > buf.len) return error.TruncatedState;
+        const cmd_len = std.mem.readInt(u16, buf[pos..][0..2], .little);
+        pos += 2;
+        if (pos + cmd_len > buf.len) return error.TruncatedState;
+        const cmd = try allocator.dupe(u8, buf[pos..][0..cmd_len]);
+        pos += cmd_len;
+
+        if (pos + 32 + 32 + 1 + 8 > buf.len) { allocator.free(cmd); return error.TruncatedState; }
+        var stdout_hash: [32]u8 = undefined;
+        @memcpy(&stdout_hash, buf[pos..][0..32]); pos += 32;
+        var stderr_hash: [32]u8 = undefined;
+        @memcpy(&stderr_hash, buf[pos..][0..32]); pos += 32;
+        const exit_code = buf[pos]; pos += 1;
+        const seq = std.mem.readInt(u64, buf[pos..][0..8], .little); pos += 8;
+
+        exec_entries[i] = .{
+            .cmd = cmd,
+            .stdout_hash = stdout_hash,
+            .stderr_hash = stderr_hash,
+            .exit_code = exit_code,
+            .seq = seq,
+        };
+        exec_init = i + 1;
     }
 
     return CapturedState{
@@ -329,8 +453,9 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         .stream_hash = stream_hash,
         .prev_stream_hash = prev_stream_hash,
         .sequence = sequence,
-        .secret_key_bytes = secret_key_bytes,
-        .vault_entries = entries,
+        .bootstrap_nonce = bootstrap_nonce,
+        .vault_entries = vault_entries,
+        .exec_entries = exec_entries,
     };
 }
 
@@ -684,4 +809,132 @@ pub fn unseal(allocator: std.mem.Allocator, blob: []const u8) !CapturedState {
         return error.DecryptionFailed;
 
     return deserialize(allocator, plaintext);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "seal/unseal round-trip: empty vault and exec entries" {
+    const allocator = std.testing.allocator;
+
+    var nonce: [32]u8 = undefined;
+    std.crypto.random.bytes(&nonce);
+    var sid: [16]u8 = undefined;
+    std.crypto.random.bytes(&sid);
+    var stream: [32]u8 = undefined;
+    std.crypto.random.bytes(&stream);
+
+    const state = CapturedState{
+        .allocator = allocator,
+        .session_id = sid,
+        .stream_hash = stream,
+        .prev_stream_hash = nonce,
+        .sequence = 42,
+        .bootstrap_nonce = nonce,
+        .vault_entries = &.{},
+        .exec_entries = &.{},
+    };
+
+    const blob = try seal(allocator, &state);
+    defer allocator.free(blob);
+
+    var restored = try unseal(allocator, blob);
+    defer restored.deinit();
+
+    try std.testing.expectEqual(state.sequence, restored.sequence);
+    try std.testing.expectEqual(state.session_id, restored.session_id);
+    try std.testing.expectEqual(state.bootstrap_nonce, restored.bootstrap_nonce);
+    try std.testing.expectEqual(state.stream_hash, restored.stream_hash);
+    try std.testing.expectEqual(state.prev_stream_hash, restored.prev_stream_hash);
+    try std.testing.expectEqual(@as(usize, 0), restored.vault_entries.len);
+    try std.testing.expectEqual(@as(usize, 0), restored.exec_entries.len);
+}
+
+test "seal/unseal round-trip: exec entries are preserved" {
+    const allocator = std.testing.allocator;
+
+    var nonce: [32]u8 = undefined;
+    std.crypto.random.bytes(&nonce);
+    var sid: [16]u8 = undefined;
+    std.crypto.random.bytes(&sid);
+
+    var stdout_hash: [32]u8 = undefined;
+    std.crypto.random.bytes(&stdout_hash);
+    var stderr_hash: [32]u8 = undefined;
+    std.crypto.random.bytes(&stderr_hash);
+
+    const exec_entries = [_]CapturedState.ExecEntry{
+        .{
+            .cmd = @constCast("uname -a"),
+            .stdout_hash = stdout_hash,
+            .stderr_hash = stderr_hash,
+            .exit_code = 0,
+            .seq = 1,
+        },
+        .{
+            .cmd = @constCast("date -u"),
+            .stdout_hash = [_]u8{0xAB} ** 32,
+            .stderr_hash = [_]u8{0xCD} ** 32,
+            .exit_code = 0,
+            .seq = 1,
+        },
+    };
+
+    const state = CapturedState{
+        .allocator = allocator,
+        .session_id = sid,
+        .stream_hash = nonce,
+        .prev_stream_hash = nonce,
+        .sequence = 7,
+        .bootstrap_nonce = nonce,
+        .vault_entries = &.{},
+        .exec_entries = @constCast(&exec_entries),
+    };
+
+    const blob = try seal(allocator, &state);
+    defer allocator.free(blob);
+
+    var restored = try unseal(allocator, blob);
+    defer restored.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), restored.exec_entries.len);
+    try std.testing.expectEqualStrings("uname -a", restored.exec_entries[0].cmd);
+    try std.testing.expectEqual(@as(u8, 0), restored.exec_entries[0].exit_code);
+    try std.testing.expectEqual(@as(u64, 1), restored.exec_entries[0].seq);
+    try std.testing.expectEqual(stdout_hash, restored.exec_entries[0].stdout_hash);
+    try std.testing.expectEqualStrings("date -u", restored.exec_entries[1].cmd);
+    try std.testing.expectEqual([_]u8{0xAB} ** 32, restored.exec_entries[1].stdout_hash);
+    try std.testing.expectEqual([_]u8{0xCD} ** 32, restored.exec_entries[1].stderr_hash);
+}
+
+test "seal/unseal round-trip: bootstrap_nonce is preserved" {
+    const allocator = std.testing.allocator;
+
+    var nonce: [32]u8 = undefined;
+    std.crypto.random.bytes(&nonce);
+    var sid: [16]u8 = undefined;
+    std.crypto.random.bytes(&sid);
+
+    const state = CapturedState{
+        .allocator = allocator,
+        .session_id = sid,
+        .stream_hash = [_]u8{0x11} ** 32,
+        .prev_stream_hash = [_]u8{0x22} ** 32,
+        .sequence = 99,
+        .bootstrap_nonce = nonce,
+        .vault_entries = &.{},
+        .exec_entries = &.{},
+    };
+
+    const blob = try seal(allocator, &state);
+    defer allocator.free(blob);
+
+    var restored = try unseal(allocator, blob);
+    defer restored.deinit();
+
+    try std.testing.expectEqual(nonce, restored.bootstrap_nonce);
+    try std.testing.expectEqual([_]u8{0x11} ** 32, restored.stream_hash);
+    try std.testing.expectEqual([_]u8{0x22} ** 32, restored.prev_stream_hash);
+    try std.testing.expectEqual(@as(u64, 99), restored.sequence);
 }
