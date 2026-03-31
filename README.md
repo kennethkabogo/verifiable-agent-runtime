@@ -236,6 +236,7 @@ setup.
 | `VAR_KMS_PROXY_PORT` | enclave + proxy | `8443` | vsock/TCP port for the KMS proxy |
 | `AWS_DEFAULT_REGION` | proxy | from credential chain | AWS region for KMS calls |
 | `VAR_GATEWAY` | verifier | `http://127.0.0.1:8765` | Gateway URL for `verify_evidence.py` |
+| `VAR_RESUME_STATE` | gateway | — | Hex-encoded sealed blob from a previous `POST /hibernate`; if set, the gateway resumes that session on startup instead of starting fresh |
 
 ### HTTP Gateway API
 
@@ -249,6 +250,7 @@ The `VAR-gateway` binary exposes a JSON REST API on `127.0.0.1:8765`.
 | `GET` | `/evidence` | — | `{"prev_stream","stream","state","sig","sequence"}` |
 | `POST` | `/vault/secret` | `{"key":"…","value":"…"}` | `{"status":"ok"}` |
 | `POST` | `/log` | `{"msg":"…"}` + `X-Skill-Id` header | `{"status":"ok"}` |
+| `POST` | `/hibernate` | — | `{"sealed_state":"<hex>"}` — seals session state and shuts down |
 
 Every `POST /log` call extends the L1 hash chain. Every `GET /evidence`
 returns a signed snapshot of the current chain state. See `evidence_spec.md`
@@ -258,11 +260,38 @@ for the full wire format.
 
 ```bash
 # Human-readable output
-python3 src/agent/verify_evidence.py
+python3 src/verifier/verify.py
 
-# Machine-readable JSON (for CI / automated auditing)
-python3 src/agent/verify_evidence.py --json
+# Verify directly from the running gateway (fetches /session + /evidence)
+python3 src/verifier/verify.py --header "$(curl -s http://127.0.0.1:8765/session | jq -r .bundle_header)" \
+    --json "$(curl -s http://127.0.0.1:8765/evidence)"
+
+# Via the CLI wrapper
+var-cli verify
 ```
+
+---
+
+### Resumable sessions
+
+VAR sessions survive an enclave reboot. Hibernate the current session, relaunch
+the gateway with the sealed state, and the evidence chain continues — a
+cryptographically continuous record across process boundaries.
+
+```bash
+# 1. Seal the current session and shut the gateway down.
+curl -s -X POST http://127.0.0.1:8765/hibernate | jq -r .sealed_state > state.hex
+
+# 2. Relaunch (simulating a reboot) — session identity and vault are restored.
+VAR_RESUME_STATE=$(cat state.hex) ./zig-out/bin/VAR-gateway
+
+# 3. Verify the two-segment chain in one command.
+var-cli demo
+```
+
+`var-cli demo` orchestrates the full lifecycle automatically:
+**Start → run commands → Hibernate → simulated reboot → Resume → run more commands → cryptographic chain verification.**
+It exits 0 if all checks pass, 1 otherwise — useful as a smoke test.
 
 ---
 
@@ -389,9 +418,11 @@ make stop
 ```
 src/
 ├── main.zig                    Enclave entry point (vsock line protocol)
-├── http_main.zig               HTTP gateway entry point
+├── http_main.zig               HTTP gateway entry point (VAR_RESUME_STATE resume support)
+├── var_cli.py                  Unified CLI: connect / verify / skill / proxy / demo
+├── var_demo.py                 End-to-end lifecycle demo (Start→Hibernate→Resume→Verify)
 ├── runtime/
-│   ├── http.zig                REST gateway (/vault/secret, /log, /evidence, /session, /health)
+│   ├── http.zig                REST gateway (/vault, /log, /evidence, /session, /hibernate)
 │   ├── shell.zig               Verifiable PTY — L1 hash chain + Ed25519 signing
 │   ├── vt.zig                  VT100/ANSI state machine and L2 terminal digest
 │   ├── vault.zig               Memory-only credential store (wiped on exit)
@@ -401,6 +432,8 @@ src/
 │   ├── nsm.zig                 Nitro Secure Module driver + simulation fallback
 │   ├── vsock.zig               AF_VSOCK host–enclave transport
 │   └── protocol.zig            Handshake, bundle header, secret delivery
+├── verifier/
+│   └── verify.py               Standalone cryptographic verifier (spec §4, multi-segment)
 ├── host/
 │   ├── proxy.py                KMS forwarding proxy (vsock → boto3 → KMS)
 │   ├── requirements.txt        Runtime deps (boto3)
@@ -408,13 +441,14 @@ src/
 │   ├── var-kms-proxy.service   Systemd unit for the proxy on the parent instance
 │   └── tests/
 │       └── test_proxy.py       Proxy tests (pytest + moto)
-└── agent/
-    ├── verify_evidence.py      Standalone evidence verifier (--json for CI)
-    ├── agent.py                Example vsock agent
-    ├── gateway_skill.py        Example HTTP gateway skill
-    └── tests/
-        └── test_verify_evidence.py  Verifier tests (30 cases, real Ed25519)
-evidence_spec.md                Formal specification of the evidence wire format (v1.2)
+├── agent/
+│   ├── agent.py                Example vsock agent (--hibernate / --resume flags)
+│   ├── gateway_skill.py        Example HTTP gateway skill
+│   └── tests/
+│       └── test_verify_evidence.py  Legacy verifier tests
+└── tests/
+    └── test_verifier.py        Verifier tests (29 cases, multi-segment, Ed25519)
+evidence_spec.md                Formal specification of the evidence wire format (v1.5)
 ```
 
 ---
