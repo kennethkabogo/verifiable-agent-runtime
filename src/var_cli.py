@@ -10,6 +10,7 @@ Commands
   verify    Verify an evidence bundle from the HTTP gateway
   skill     Run the demo gateway skill over HTTP
   proxy     Start the host-enclave stdin/stdout bridge
+  demo      Run the full Start→Hibernate→Resume→Verify lifecycle demo
 
 Examples
 --------
@@ -28,6 +29,11 @@ Examples
   # Host proxy
   var-cli proxy --port 5005
   var-cli proxy --vsock --cid 2 --port 5005
+
+  # End-to-end lifecycle demo (investor / stakeholder demo)
+  var-cli demo
+  var-cli demo --gateway-bin ./zig-out/bin/VAR-gateway
+  var-cli demo --gateway-url http://127.0.0.1:8765
 """
 
 from __future__ import annotations
@@ -92,6 +98,15 @@ def cmd_proxy(args: argparse.Namespace) -> None:
     mod = _load("var_proxy", "host/proxy.py")
     proxy = mod.HostEnclaveProxy(use_vsock=args.vsock, cid=args.cid, port=args.port)
     proxy.start()
+
+
+def cmd_demo(args: argparse.Namespace) -> None:
+    """Run the full Start→Hibernate→Resume→Verify lifecycle demo."""
+    demo_mod = _load("var_demo", "var_demo.py")
+    rc = demo_mod.main(
+        ["--gateway-bin", args.gateway_bin, "--gateway-url", args.gateway_url]
+    )
+    sys.exit(rc)
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +228,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Port to listen on (default: 5005)",
     )
     p.set_defaults(func=cmd_proxy)
+
+    # ── demo ──────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "demo",
+        help="Run the full Start→Hibernate→Resume→Verify lifecycle demo",
+        description=(
+            "Starts the VAR gateway, runs verifiable commands, hibernates the session, "
+            "simulates an enclave reboot, resumes the session, runs more commands, and "
+            "then cryptographically verifies the complete two-segment chain. "
+            "Exit code 0 = verification PASSED, 1 = FAILED or error."
+        ),
+    )
+    p.add_argument(
+        "--gateway-bin",
+        default=os.environ.get(
+            "VAR_GATEWAY_BIN",
+            str(Path(__file__).parent.parent / "zig-out" / "bin" / "VAR-gateway"),
+        ),
+        metavar="PATH",
+        help="Path to the VAR-gateway binary (default: zig-out/bin/VAR-gateway)",
+    )
+    p.add_argument(
+        "--gateway-url",
+        default=os.environ.get("VAR_GATEWAY_URL", "http://127.0.0.1:8765"),
+        metavar="URL",
+        help="Gateway base URL (default: http://127.0.0.1:8765)",
+    )
+    p.set_defaults(func=cmd_demo)
 
     return parser
 

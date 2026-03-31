@@ -10,9 +10,10 @@
 ///   POST /vault/secret   {"key":"…","value":"…"}           → 200 {"status":"ok"}
 ///   POST /log            {"msg":"…"}  (+X-Skill-Id header)  → 200 {"status":"ok"}
 ///   POST /exec           {"cmd":["arg0","arg1",…]}          → 200 {"exit_code":0,"stdout_b64":"…","stderr_b64":"…","stdout_hash":"…","stderr_hash":"…"}
-///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","last_exec":{…}}
+///   POST /hibernate                                          → 200 {"sealed_state":"<hex>"}  (gateway exits cleanly after response)
+///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","executions":[…]}
 ///   GET  /attestation                                        → 200 {"pcr0":"…","public_key":"…","doc":"…"}
-///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01"}
+///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
 ///   GET  /health                                             → 200 {"status":"healthy"}
 ///
 const std = @import("std");
@@ -23,6 +24,7 @@ const Allocator = mem.Allocator;
 const SecureVault = @import("vault.zig").SecureVault;
 const SecureLogger = @import("shell.zig").SecureLogger;
 const AttestationQuote = @import("attestation.zig").AttestationQuote;
+const sealed_state = @import("sealed_state.zig");
 
 // ── Shutdown flag (set by signal handler in http_main.zig) ─────────────────
 
@@ -63,6 +65,9 @@ pub const GatewayServer = struct {
     /// Bootstrap nonce = SHA-256(attestation_doc ‖ session_id).
     /// Exposed via GET /session so an external verifier can recompute and confirm it.
     bootstrap_nonce: [32]u8,
+    /// X25519 public key used for secret encryption.
+    /// Included in GET /session so the bundle_header field is complete.
+    enc_pub: [32]u8,
 
     pub fn init(
         allocator: Allocator,
@@ -72,6 +77,7 @@ pub const GatewayServer = struct {
         quote: *AttestationQuote,
         session_id: [16]u8,
         bootstrap_nonce: [32]u8,
+        enc_pub: [32]u8,
     ) GatewayServer {
         return .{
             .allocator = allocator,
@@ -81,6 +87,7 @@ pub const GatewayServer = struct {
             .quote = quote,
             .session_id = session_id,
             .bootstrap_nonce = bootstrap_nonce,
+            .enc_pub = enc_pub,
         };
     }
 
@@ -264,6 +271,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleLog(server, stream, req);
     if (post and mem.eql(u8, req.path, "/exec"))
         return handleExec(server, stream, req);
+    if (post and mem.eql(u8, req.path, "/hibernate"))
+        return handleHibernate(server, stream, req);
     if (get and mem.eql(u8, req.path, "/evidence"))
         return handleEvidence(server, stream, req);
     if (get and mem.eql(u8, req.path, "/attestation"))
@@ -387,6 +396,36 @@ fn handleEvidence(server: *GatewayServer, stream: net.Stream, req: ParsedRequest
     try writeResponse(stream, 200, body);
 }
 
+fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    _ = req;
+    // Capture and seal all runtime state into an encrypted blob.
+    var captured = try sealed_state.capture(server.allocator, server.vault, server.logger);
+    defer captured.deinit();
+
+    const blob = try sealed_state.seal(server.allocator, &captured);
+    defer server.allocator.free(blob);
+
+    const hex_blob = try fmtHex(server.allocator, blob);
+    defer server.allocator.free(hex_blob);
+
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"sealed_state\":\"{s}\"}}",
+        .{hex_blob},
+    );
+    defer server.allocator.free(body);
+
+    // Send the response before signalling shutdown — the current connection's
+    // handler runs in a detached thread, so the response is flushed before the
+    // main serve() loop exits.
+    try writeResponse(stream, 200, body);
+    std.log.info("[VAR-gateway] Hibernating ({d}-byte sealed blob). Sending SIGTERM.", .{blob.len});
+
+    // Set the shutdown flag and interrupt the blocking accept() in serve().
+    requestShutdown();
+    std.posix.kill(std.c.getpid(), std.posix.SIG.TERM) catch {};
+}
+
 fn handleAttestation(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
     _ = req;
     const pcr0_h = try fmtHex(server.allocator, &server.quote.pcr0);
@@ -407,15 +446,33 @@ fn handleAttestation(server: *GatewayServer, stream: net.Stream, req: ParsedRequ
 
 fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
     _ = req;
-    const sid_h = try fmtHex(server.allocator, &server.session_id);
+    const sid_h     = try fmtHex(server.allocator, &server.session_id);
     defer server.allocator.free(sid_h);
-    const nonce_h = try fmtHex(server.allocator, &server.bootstrap_nonce);
+    const nonce_h   = try fmtHex(server.allocator, &server.bootstrap_nonce);
     defer server.allocator.free(nonce_h);
+    const enc_pub_h = try fmtHex(server.allocator, &server.enc_pub);
+    defer server.allocator.free(enc_pub_h);
+    const pcr0_h    = try fmtHex(server.allocator, &server.quote.pcr0);
+    defer server.allocator.free(pcr0_h);
+    const pk_h      = try fmtHex(server.allocator, &server.quote.public_key);
+    defer server.allocator.free(pk_h);
+    const doc_h     = try fmtHex(server.allocator, server.quote.doc);
+    defer server.allocator.free(doc_h);
+
+    // Reconstruct the full BUNDLE_HEADER line — identical to what protocol.zig
+    // emits over vsock.  Returned here so clients (demo harness, verifier) can
+    // pass it directly to verify.py without reconstructing it themselves.
+    const bundle_header = try std.fmt.allocPrint(
+        server.allocator,
+        "BUNDLE_HEADER:magic=VARB:version=01:session={s}:nonce={s}:enc_pub={s}:QUOTE:pcr0={s}:pk={s}:doc={s}",
+        .{ sid_h, nonce_h, enc_pub_h, pcr0_h, pk_h, doc_h },
+    );
+    defer server.allocator.free(bundle_header);
 
     const body = try std.fmt.allocPrint(
         server.allocator,
-        "{{\"session_id\":\"{s}\",\"bootstrap_nonce\":\"{s}\",\"magic\":\"VARB\",\"version\":\"01\"}}",
-        .{ sid_h, nonce_h },
+        "{{\"session_id\":\"{s}\",\"bootstrap_nonce\":\"{s}\",\"magic\":\"VARB\",\"version\":\"01\",\"bundle_header\":\"{s}\"}}",
+        .{ sid_h, nonce_h, bundle_header },
     );
     defer server.allocator.free(body);
     try writeResponse(stream, 200, body);

@@ -16,6 +16,7 @@ const SecureVault = @import("runtime/vault.zig").SecureVault;
 const SecureLogger = @import("runtime/shell.zig").SecureLogger;
 const ProtocolHandler = @import("runtime/protocol.zig").ProtocolHandler;
 const http = @import("runtime/http.zig");
+const sealed_state = @import("runtime/sealed_state.zig");
 
 /// Signal handler: requests a clean shutdown so the serve loop exits on the
 /// next accept() interruption, allowing `defer vault.deinit()` to wipe secrets.
@@ -53,7 +54,38 @@ pub fn main() !void {
     var logger = try SecureLogger.init(allocator, protocol.bootstrap_nonce, protocol.session_id, protocol.keypair);
     defer logger.deinit();
 
-    // 3. Emit the session root-of-trust header so operators can record it.
+    // 3. If VAR_RESUME_STATE is set, unseal the hibernated state and restore the
+    //    vault + logger before advertising the session to clients.  The signing
+    //    keypair is NOT restored — the fresh keypair generated above is used for
+    //    this session segment (keypair-per-segment model, spec §5.3).
+    //    After restore we patch the protocol fields so the bundle header emitted
+    //    by GET /session carries the original session_id and bootstrap_nonce.
+    if (std.posix.getenv("VAR_RESUME_STATE")) |hex_state| {
+        if (hex_state.len > 0 and hex_state.len % 2 == 0) {
+            const blob = try allocator.alloc(u8, hex_state.len / 2);
+            defer allocator.free(blob);
+            _ = try std.fmt.hexToBytes(blob, hex_state);
+
+            var captured = sealed_state.unseal(allocator, blob) catch |err| {
+                std.log.err("[VAR-gateway] VAR_RESUME_STATE unseal failed: {}", .{err});
+                return error.ResumeFailed;
+            };
+            defer captured.deinit();
+
+            try sealed_state.restoreVault(&captured, &vault);
+            try sealed_state.restoreLogger(&captured, &logger);
+
+            // Patch protocol so the bundle header uses the original session identity.
+            protocol.session_id = captured.session_id;
+            protocol.bootstrap_nonce = captured.bootstrap_nonce;
+
+            std.log.info("[VAR-gateway] Resumed session {x} at seq {d}.", .{
+                &captured.session_id, captured.sequence,
+            });
+        }
+    }
+
+    // 4. Emit the session root-of-trust header so operators can record it.
     const header = try protocol.prepareHandshake();
     defer allocator.free(header);
     std.log.info("[VAR-gateway] Session root: {s}", .{header});
@@ -72,6 +104,7 @@ pub fn main() !void {
         &protocol.quote,
         protocol.session_id,
         protocol.bootstrap_nonce,
+        protocol.enc_public,
     );
     try gw.serve();
 }
