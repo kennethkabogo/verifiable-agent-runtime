@@ -62,6 +62,10 @@ pub fn hardenProcess() void {
         return;
     }
 
+    // FD audit FIRST: /proc/self/fd must be openable, which requires the
+    // filesystem to be accessible.  After installLandlock() all opens are
+    // denied, so we cannot perform the audit there.
+    auditFileDescriptors();
     scrubEnvironment();
 
     installLandlock() catch |err| switch (err) {
@@ -81,6 +85,57 @@ pub fn hardenProcess() void {
         "[sandbox] Hardened: env scrubbed | Landlock | caps=∅ | seccomp/BPF active",
         .{},
     );
+}
+
+// ---------------------------------------------------------------------------
+// Step 0 — File-descriptor audit
+// ---------------------------------------------------------------------------
+
+/// Walk /proc/self/fd and fatal() if any descriptor is open beyond the
+/// expected allowlist {stdin=0, stdout=1, stderr=2}.
+///
+/// This catches "ghost FDs": parent-process handles, accidentally un-closed
+/// setup resources (e.g. /dev/nsm), or anything else that shouldn't survive
+/// into the serving phase.  Must run before installLandlock() because after
+/// that we can no longer open the procfs directory.
+///
+/// On non-procfs systems (macOS, restricted containers) the open fails and
+/// we skip the audit with a warning rather than fataling — procfs absence
+/// is not itself a security problem.
+fn auditFileDescriptors() void {
+    var proc_fd_dir = std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true }) catch |err| {
+        std.log.warn("[sandbox] FD audit skipped (cannot open /proc/self/fd: {})", .{err});
+        return;
+    };
+    defer proc_fd_dir.close();
+
+    // Record the directory's own fd so we can skip it during iteration.
+    const dir_fd = proc_fd_dir.fd;
+
+    var it = proc_fd_dir.iterate();
+    while (true) {
+        const maybe_entry = it.next() catch |err| {
+            // Iteration error is non-fatal: we log and stop early rather than
+            // silently missing potential ghost FDs.
+            std.log.warn("[sandbox] FD audit: iteration error: {} — partial audit", .{err});
+            break;
+        };
+        const entry = maybe_entry orelse break; // null = end of directory
+
+        // Each entry name is the decimal fd number (e.g. "0", "1", "5").
+        const fd_num = std.fmt.parseInt(std.posix.fd_t, entry.name, 10) catch continue;
+
+        if (fd_num == dir_fd) continue;          // the /proc/self/fd dir itself
+        if (fd_num == 0 or fd_num == 1 or fd_num == 2) continue; // stdin/stdout/stderr
+
+        fatal(
+            "Ghost FD {d} open at sandbox entry — unexpected descriptor " ++
+                "(possible unclosed setup resource or credential leak). Aborting.",
+            .{fd_num},
+        );
+    }
+
+    std.log.debug("[sandbox] FD audit: clean (only stdin/stdout/stderr open)", .{});
 }
 
 // ---------------------------------------------------------------------------

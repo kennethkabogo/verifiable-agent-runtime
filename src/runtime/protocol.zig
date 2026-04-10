@@ -57,7 +57,9 @@ pub const ProtocolHandler = struct {
         // into the attestation quote so the NSM (or mock) can certify it.
         const keypair = Ed25519.KeyPair.generate();
         const pk = keypair.public_key.toBytes();
-        const quote = try AttestationQuote.generate(allocator, pk);
+        // Pass session_id as the NSM nonce so the hardware witnesses this
+        // specific session identity (silicon-enforced causal ordering).
+        const quote = try AttestationQuote.generate(allocator, pk, session_id);
 
         // Generate a fresh ephemeral X25519 keypair for secret encryption.
         // The host encrypts each secret with the enclave's public key so that

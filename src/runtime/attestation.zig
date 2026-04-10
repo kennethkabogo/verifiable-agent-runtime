@@ -9,9 +9,13 @@ pub const AttestationQuote = struct {
     public_key: [32]u8, // Enclave's ephemeral public key bound into the attestation
     doc: []u8,          // Raw attestation document bytes (caller-allocated, owned)
 
-    pub fn generate(allocator: std.mem.Allocator, public_key: [32]u8) !AttestationQuote {
-        // Pass the ephemeral public key so the NSM (or mock) can bind it into the doc.
-        const doc = try nsm.getAttestationDoc(allocator, null, &public_key);
+    pub fn generate(allocator: std.mem.Allocator, public_key: [32]u8, session_id: [16]u8) !AttestationQuote {
+        // Pass the ephemeral public key and session_id so the NSM (or mock) can
+        // bind both into the attestation document.  Placing session_id in the NSM
+        // nonce field makes the session identity hardware-witnessed: a verifier can
+        // confirm that the silicon itself "saw" this specific session_id, making it
+        // impossible to replay an old hardware quote with a new session_id.
+        const doc = try nsm.getAttestationDoc(allocator, &session_id, &public_key);
 
         // Attempt to extract PCR0 from the COSE_Sign1 attestation document.
         // On real Nitro hardware this yields the actual SHA-384 image measurement.
@@ -279,7 +283,9 @@ test "AttestationQuote.generate: pcr0 field is 48 bytes (fallback path)" {
     const allocator = std.testing.allocator;
     var pk: [32]u8 = undefined;
     @memset(&pk, 0x01);
-    const quote = try AttestationQuote.generate(allocator, pk);
+    var sid: [16]u8 = undefined;
+    @memset(&sid, 0x42);
+    const quote = try AttestationQuote.generate(allocator, pk, sid);
     defer quote.deinit(allocator);
 
     // The field must be 48 bytes regardless of path taken.

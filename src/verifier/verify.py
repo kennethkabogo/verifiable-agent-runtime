@@ -193,6 +193,72 @@ def build_signed_message(
 
 
 # ---------------------------------------------------------------------------
+# Minimal CBOR helpers (for attestation document inspection)
+# ---------------------------------------------------------------------------
+
+def _cbor_read_bstr(data: bytes, pos: int) -> tuple[bytes, int]:
+    """Read a CBOR byte string at data[pos].  Returns (value, new_pos)."""
+    if pos >= len(data):
+        raise ValueError("unexpected end of CBOR data")
+    hdr = data[pos]
+    if (hdr >> 5) != 2:
+        raise ValueError(f"expected bstr (major 2), got {hdr >> 5}")
+    info = hdr & 0x1f
+    pos += 1
+    if info < 24:
+        length = info
+    elif info == 24:
+        length = data[pos]; pos += 1
+    elif info == 25:
+        length = int.from_bytes(data[pos:pos + 2], "big"); pos += 2
+    elif info == 26:
+        length = int.from_bytes(data[pos:pos + 4], "big"); pos += 4
+    else:
+        raise ValueError(f"unsupported bstr additional info: {info}")
+    return data[pos:pos + length], pos + length
+
+
+def _extract_cose_payload(doc: bytes) -> Optional[bytes]:
+    """Return the CBOR payload bytes from a COSE_Sign1 document, or None."""
+    try:
+        pos = 0
+        if pos < len(doc) and doc[pos] == 0xD2:  # optional CBOR tag 18
+            pos += 1
+        if pos >= len(doc) or doc[pos] != 0x84:  # 4-item array
+            return None
+        pos += 1
+        # Skip protected header bstr
+        _, pos = _cbor_read_bstr(doc, pos)
+        # Skip unprotected header (empty map 0xa0)
+        if pos >= len(doc) or doc[pos] != 0xA0:
+            return None
+        pos += 1
+        # Read payload bstr
+        payload, _ = _cbor_read_bstr(doc, pos)
+        return payload
+    except Exception:
+        return None
+
+
+def _cbor_find_bstr_value(payload: bytes, key: str) -> Optional[bytes]:
+    """Find a text key in a flat CBOR map and return its bstr value, or None."""
+    key_enc = key.encode()
+    # CBOR text string header
+    if len(key_enc) < 24:
+        cbor_key = bytes([0x60 | len(key_enc)]) + key_enc
+    else:
+        cbor_key = bytes([0x78, len(key_enc)]) + key_enc
+    idx = payload.find(cbor_key)
+    if idx == -1:
+        return None
+    try:
+        value, _ = _cbor_read_bstr(payload, idx + len(cbor_key))
+        return value
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
 
@@ -209,6 +275,45 @@ def check_bootstrap_nonce(header: BundleHeader) -> CheckResult:
             f"  got      : {header.bootstrap_nonce.hex()}"
         )
     return CheckResult("§4.2 Bootstrap nonce", passed, detail)
+
+
+def check_nonce_binding(header: BundleHeader) -> CheckResult:
+    """§4.5: NSM nonce field in attest_doc must equal session_id.
+
+    This verifies hardware-causal ordering: the silicon itself witnessed the
+    specific session_id, making it impossible to replay an old attestation
+    document with a different session_id.
+
+    SKIPPED in simulation mode (mock attest_doc has no parseable COSE_Sign1
+    structure) or for builds predating this hardening.
+    """
+    payload = _extract_cose_payload(header.attest_doc)
+    if payload is None:
+        return CheckResult(
+            "§4.5 NSM nonce binding", True,
+            "SKIPPED — no parseable COSE_Sign1 structure (simulation / mock attest_doc)",
+            skipped=True,
+        )
+
+    nonce_bytes = _cbor_find_bstr_value(payload, "nonce")
+    if nonce_bytes is None:
+        return CheckResult(
+            "§4.5 NSM nonce binding", True,
+            "SKIPPED — 'nonce' field absent in attestation payload (pre-hardening build)",
+            skipped=True,
+        )
+
+    if nonce_bytes == header.session_id:
+        return CheckResult(
+            "§4.5 NSM nonce binding", True,
+            f"NSM nonce == session_id ({nonce_bytes.hex()[:16]}…) — silicon witnessed this session",
+        )
+    return CheckResult(
+        "§4.5 NSM nonce binding", False,
+        f"NSM nonce does not match session_id\n"
+        f"  nonce      : {nonce_bytes.hex()}\n"
+        f"  session_id : {header.session_id.hex()}",
+    )
 
 
 def check_chain_continuity(
@@ -355,6 +460,12 @@ def verify_segments(segments: list[Segment]) -> tuple[bool, list[CheckResult]]:
         # §4.2 — bootstrap nonce only needs checking once (segment 0).
         if i == 0:
             results.append(check_bootstrap_nonce(seg.header))
+
+        # §4.5 — NSM nonce binding: each segment's attest_doc must carry
+        # session_id in its nonce field (hardware-causal ordering).
+        nonce_r = check_nonce_binding(seg.header)
+        nonce_r.section += seg_label
+        results.append(nonce_r)
 
         # §4.3 — chain continuity.
         if i == 0:
