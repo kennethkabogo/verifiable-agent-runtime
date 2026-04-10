@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -110,6 +111,75 @@ def _wait_healthy(base_url: str, retries: int = 40, delay: float = 0.25) -> None
 
 
 # ---------------------------------------------------------------------------
+# Sealed-state disk persistence
+# ---------------------------------------------------------------------------
+
+class _StateFile:
+    """Persist the enclave's sealed blob to disk between HIBERNATE and RESUME.
+
+    The blob is already AES-256-GCM encrypted by the enclave (the DEK is
+    KMS-wrapped and PCR0-bound in production), so writing it to a host file
+    does not weaken confidentiality.  In production you would additionally
+    encrypt at the host level (e.g. with dm-crypt / LUKS); for the demo the
+    enclave-level encryption is the security primitive being demonstrated.
+
+    Usage::
+
+        with _StateFile(state_dir) as sf:
+            sf.write(sealed_hex)        # immediately after POST /hibernate
+            # ... simulated reboot ...
+            hex_back = sf.read_hex()    # immediately before starting resumed gateway
+        # file is securely wiped and deleted on __exit__
+
+    The ``path`` attribute is available for display throughout the lifetime.
+    """
+
+    def __init__(self, state_dir: Optional[str] = None) -> None:
+        base = Path(state_dir) if state_dir else Path(tempfile.gettempdir())
+        base.mkdir(parents=True, exist_ok=True)
+        fd, raw_path = tempfile.mkstemp(
+            prefix="var-sealed-", suffix=".bin", dir=base
+        )
+        os.close(fd)
+        self.path = Path(raw_path)
+        self._written = False
+
+    # ------------------------------------------------------------------
+
+    def write(self, sealed_hex: str) -> None:
+        """Decode *sealed_hex* and write raw bytes to disk."""
+        self.path.write_bytes(bytes.fromhex(sealed_hex))
+        self._written = True
+
+    def read_hex(self) -> str:
+        """Read raw bytes from disk and return as a lowercase hex string."""
+        return self.path.read_bytes().hex()
+
+    def size_bytes(self) -> int:
+        return self.path.stat().st_size if self._written else 0
+
+    # ------------------------------------------------------------------
+
+    def _secure_delete(self) -> None:
+        """Overwrite with zeros before unlinking so the blob leaves no trace."""
+        if not self.path.exists():
+            return
+        size = self.path.stat().st_size
+        with open(self.path, "r+b") as f:
+            f.write(b"\x00" * size)
+            f.flush()
+            os.fsync(f.fileno())
+        self.path.unlink()
+        self._written = False
+
+    def __enter__(self) -> "_StateFile":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._secure_delete()
+
+
+# ---------------------------------------------------------------------------
 # Gateway process manager
 # ---------------------------------------------------------------------------
 
@@ -165,9 +235,18 @@ def _collect_segment(base_url: str) -> tuple[verify.Segment, dict]:
 # Main demo flow
 # ---------------------------------------------------------------------------
 
-def run_demo(gateway_bin: str, base_url: str) -> bool:
-    """
-    Execute the full Start→Hibernate→Resume→Verify flow.
+def run_demo(
+    gateway_bin: str,
+    base_url: str,
+    state_dir: Optional[str] = None,
+) -> bool:
+    """Execute the full Start→Hibernate→Resume→Verify flow.
+
+    Sealed state is written to *state_dir* (default: OS temp dir) between
+    the HIBERNATE and RESUME steps, mirroring production behaviour where the
+    host persists the blob across enclave restarts.  The file is securely
+    wiped on exit regardless of outcome.
+
     Returns True if verification passes.
     """
     _banner("Verifiable Agent Runtime — End-to-End Demo")
@@ -213,25 +292,37 @@ def run_demo(gateway_bin: str, base_url: str) -> bool:
         proc0.terminate()
         return False
 
-    sealed_bytes = len(sealed_hex) // 2
-    _ok(f"Sealed state: {sealed_bytes} bytes")
     _wait_exit(proc0)
     _ok("Gateway exited cleanly.")
 
-    # ── Simulated reboot ─────────────────────────────────────────────────────
+    # Write sealed blob to disk — this is the Track A disk-persistence step.
+    # The blob is AES-256-GCM encrypted by the enclave; writing it here
+    # mirrors a production host service that stores it across reboots.
+    with _StateFile(state_dir) as sf:
+        sf.write(sealed_hex)
+        _ok(f"Sealed state → {sf.path}  ({sf.size_bytes()} bytes, AES-256-GCM)")
 
-    print(f"\n  {'─' * (_W - 2)}")
-    print(f"  {_YELLOW}Simulating enclave reboot…{_RESET}")
-    print(f"  {'─' * (_W - 2)}")
-    time.sleep(0.3)
+        # ── Simulated reboot ──────────────────────────────────────────────────
 
-    # ── Segment 1: resumed session ───────────────────────────────────────────
+        print(f"\n  {'─' * (_W - 2)}")
+        print(f"  {_YELLOW}Simulating enclave reboot…{_RESET}")
+        print(f"  {'─' * (_W - 2)}")
+        time.sleep(0.3)
 
-    _step("SEGMENT 1 — Resuming session (VAR_RESUME_STATE set)")
+        # ── Segment 1: resumed session ────────────────────────────────────────
+
+        _step("SEGMENT 1 — Resuming from disk")
+        _info(f"state file : {sf.path}")
+        resume_hex = sf.read_hex()
+
+    # State file securely wiped by _StateFile.__exit__ above.
+    _ok("State file securely wiped.")
+
+    _step("SEGMENT 1 — Starting resumed gateway")
     try:
         proc1 = _start_gateway(
             gateway_bin, base_url,
-            env={"VAR_RESUME_STATE": sealed_hex},
+            env={"VAR_RESUME_STATE": resume_hex},
         )
     except Exception as exc:
         _err(f"Failed to start resumed gateway: {exc}")
@@ -303,8 +394,18 @@ def main(args=None) -> int:
         metavar="URL",
         help="Gateway base URL (default: http://127.0.0.1:8765).",
     )
+    parser.add_argument(
+        "--state-dir",
+        default=os.environ.get("VAR_STATE_DIR"),
+        metavar="DIR",
+        help=(
+            "Directory for the sealed-state file written after HIBERNATE "
+            "and read back before RESUME (default: OS temp dir).  "
+            "The file is securely wiped at the end of the demo."
+        ),
+    )
     parsed = parser.parse_args(args)
-    ok = run_demo(parsed.gateway_bin, parsed.gateway_url)
+    ok = run_demo(parsed.gateway_bin, parsed.gateway_url, parsed.state_dir)
     return 0 if ok else 1
 
 
