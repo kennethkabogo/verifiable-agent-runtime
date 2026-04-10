@@ -191,6 +191,8 @@ pub fn build(b: *std.Build) void {
 
     // Test executable for the HTTP gateway (http_main.zig → http.zig tests).
     // http_main.zig → sealed_state.zig → rsa_recipient.zig requires libcrypto.
+    // build_options is required because http_main.zig → shell.zig → vt.zig
+    // imports @import("build_options") at the top level.
     const gateway_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/http_main.zig"),
@@ -198,6 +200,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    gateway_tests.root_module.addOptions("build_options", options);
     gateway_tests.linkSystemLibrary("crypto");
     gateway_tests.linkLibC();
     if (ghostty_vt) |vt_mod| {

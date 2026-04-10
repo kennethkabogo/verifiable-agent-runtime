@@ -103,9 +103,10 @@ def cmd_proxy(args: argparse.Namespace) -> None:
 def cmd_demo(args: argparse.Namespace) -> None:
     """Run the full Start→Hibernate→Resume→Verify lifecycle demo."""
     demo_mod = _load("var_demo", "var_demo.py")
-    rc = demo_mod.main(
-        ["--gateway-bin", args.gateway_bin, "--gateway-url", args.gateway_url]
-    )
+    cli_args = ["--gateway-bin", args.gateway_bin, "--gateway-url", args.gateway_url]
+    if args.state_dir:
+        cli_args += ["--state-dir", args.state_dir]
+    rc = demo_mod.main(cli_args)
     sys.exit(rc)
 
 
@@ -254,6 +255,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("VAR_GATEWAY_URL", "http://127.0.0.1:8765"),
         metavar="URL",
         help="Gateway base URL (default: http://127.0.0.1:8765)",
+    )
+    p.add_argument(
+        "--state-dir",
+        default=os.environ.get("VAR_STATE_DIR"),
+        metavar="DIR",
+        help=(
+            "Directory for the sealed-state file written after HIBERNATE and "
+            "read back before RESUME (default: OS temp dir).  "
+            "The file is securely wiped at end of demo."
+        ),
     )
     p.set_defaults(func=cmd_demo)
 
