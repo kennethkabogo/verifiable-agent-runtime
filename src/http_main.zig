@@ -15,8 +15,10 @@ const std = @import("std");
 const SecureVault = @import("runtime/vault.zig").SecureVault;
 const SecureLogger = @import("runtime/shell.zig").SecureLogger;
 const ProtocolHandler = @import("runtime/protocol.zig").ProtocolHandler;
+const AttestationQuote = @import("runtime/attestation.zig").AttestationQuote;
 const http = @import("runtime/http.zig");
 const sealed_state = @import("runtime/sealed_state.zig");
+const sandbox = @import("runtime/sandbox.zig");
 
 /// Signal handler: requests a clean shutdown so the serve loop exits on the
 /// next accept() interruption, allowing `defer vault.deinit()` to wipe secrets.
@@ -79,6 +81,19 @@ pub fn main() !void {
             protocol.session_id = captured.session_id;
             protocol.bootstrap_nonce = captured.bootstrap_nonce;
 
+            // Regenerate the attestation quote with the restored session_id as the
+            // NSM nonce field.  This ensures the resumed segment's attest_doc also
+            // witnesses the canonical session identity (not the ephemeral fresh
+            // session_id that was generated during init() above).
+            // The keypair stays fresh (per-segment model); bootstrap_nonce is
+            // NOT recomputed — it is preserved from the sealed state.
+            protocol.quote.deinit(allocator);
+            protocol.quote = try AttestationQuote.generate(
+                allocator,
+                protocol.keypair.public_key.toBytes(),
+                captured.session_id,
+            );
+
             std.log.info("[VAR-gateway] Resumed session {x} at seq {d}.", .{
                 &captured.session_id, captured.sequence,
             });
@@ -95,7 +110,12 @@ pub fn main() !void {
     const port_str = std.posix.getenv("VAR_PORT") orelse "8765";
     const port = std.fmt.parseInt(u16, port_str, 10) catch 8765;
 
-    // 6. Start HTTP gateway — blocks forever serving skills.
+    // 6. Harden the process: scrub env vars, install Landlock + caps-drop +
+    //    seccomp-BPF.  All environment reads are complete above; socket bind
+    //    happens inside serve() using only allowlisted syscalls.
+    sandbox.hardenProcess();
+
+    // 7. Start HTTP gateway — blocks forever serving skills.
     var gw = http.GatewayServer.init(
         allocator,
         .{ .host = host, .port = port },
