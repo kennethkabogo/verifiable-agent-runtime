@@ -12,7 +12,7 @@
 ///   POST /exec           {"cmd":["arg0","arg1",…]}          → 200 {"exit_code":0,"stdout_b64":"…","stderr_b64":"…","stdout_hash":"…","stderr_hash":"…"}
 ///   POST /hibernate                                          → 200 {"sealed_state":"<hex>"}  (gateway exits cleanly after response)
 ///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","executions":[…]}
-///   GET  /attestation                                        → 200 {"pcr0":"…","public_key":"…","doc":"…"}
+///   GET  /attestation                                        → 200 {"pcr0":"…","pcr1":"…","pcr2":"…","public_key":"…","doc":"…"}
 ///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
 ///   GET  /health                                             → 200 {"status":"healthy"}
 ///
@@ -430,6 +430,10 @@ fn handleAttestation(server: *GatewayServer, stream: net.Stream, req: ParsedRequ
     _ = req;
     const pcr0_h = try fmtHex(server.allocator, &server.quote.pcr0);
     defer server.allocator.free(pcr0_h);
+    const pcr1_h = try fmtHex(server.allocator, &server.quote.pcr1);
+    defer server.allocator.free(pcr1_h);
+    const pcr2_h = try fmtHex(server.allocator, &server.quote.pcr2);
+    defer server.allocator.free(pcr2_h);
     const pk_h = try fmtHex(server.allocator, &server.quote.public_key);
     defer server.allocator.free(pk_h);
     const doc_h = try fmtHex(server.allocator, server.quote.doc);
@@ -437,8 +441,8 @@ fn handleAttestation(server: *GatewayServer, stream: net.Stream, req: ParsedRequ
 
     const body = try std.fmt.allocPrint(
         server.allocator,
-        "{{\"pcr0\":\"{s}\",\"public_key\":\"{s}\",\"doc\":\"{s}\"}}",
-        .{ pcr0_h, pk_h, doc_h },
+        "{{\"pcr0\":\"{s}\",\"pcr1\":\"{s}\",\"pcr2\":\"{s}\",\"public_key\":\"{s}\",\"doc\":\"{s}\"}}",
+        .{ pcr0_h, pcr1_h, pcr2_h, pk_h, doc_h },
     );
     defer server.allocator.free(body);
     try writeResponse(stream, 200, body);
@@ -454,6 +458,10 @@ fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
     defer server.allocator.free(enc_pub_h);
     const pcr0_h    = try fmtHex(server.allocator, &server.quote.pcr0);
     defer server.allocator.free(pcr0_h);
+    const pcr1_h    = try fmtHex(server.allocator, &server.quote.pcr1);
+    defer server.allocator.free(pcr1_h);
+    const pcr2_h    = try fmtHex(server.allocator, &server.quote.pcr2);
+    defer server.allocator.free(pcr2_h);
     const pk_h      = try fmtHex(server.allocator, &server.quote.public_key);
     defer server.allocator.free(pk_h);
     const doc_h     = try fmtHex(server.allocator, server.quote.doc);
@@ -464,8 +472,8 @@ fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
     // pass it directly to verify.py without reconstructing it themselves.
     const bundle_header = try std.fmt.allocPrint(
         server.allocator,
-        "BUNDLE_HEADER:magic=VARB:version=01:session={s}:nonce={s}:enc_pub={s}:QUOTE:pcr0={s}:pk={s}:doc={s}",
-        .{ sid_h, nonce_h, enc_pub_h, pcr0_h, pk_h, doc_h },
+        "BUNDLE_HEADER:magic=VARB:version=01:session={s}:nonce={s}:enc_pub={s}:QUOTE:pcr0={s}:pcr1={s}:pcr2={s}:pk={s}:doc={s}",
+        .{ sid_h, nonce_h, enc_pub_h, pcr0_h, pcr1_h, pcr2_h, pk_h, doc_h },
     );
     defer server.allocator.free(bundle_header);
 

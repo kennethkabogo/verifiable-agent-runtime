@@ -52,7 +52,9 @@ class BundleHeader:
     session_id: bytes       # 16 bytes — UUID v4
     bootstrap_nonce: bytes  # 32 bytes — SHA-256(attest_doc || session_id)
     enc_pub: bytes          # 32 bytes — X25519 public key (not used in verify)
-    pcr0: bytes             # 48 bytes — SHA-384 enclave image measurement
+    pcr0: bytes             # 48 bytes — SHA-384 enclave image (EIF)
+    pcr1: bytes             # 48 bytes — SHA-384 Linux kernel + boot ROMfs
+    pcr2: bytes             # 48 bytes — SHA-384 application / user-data
     signing_pub: bytes      # 32 bytes — Ed25519 public key
     attest_doc: bytes       # raw attestation document bytes
 
@@ -115,8 +117,9 @@ def parse_header(line: str) -> BundleHeader:
     signing_pub     = _unhex(fields["pk"],              "signing_pub",     32)
     enc_pub         = _unhex(fields["enc_pub"],         "enc_pub",         32) if "enc_pub" in fields else b"\x00" * 32
     attest_doc      = _unhex(fields.get("doc", ""),     "attest_doc")
-    pcr0_hex        = fields.get("pcr0", "aa" * 48)
-    pcr0            = _unhex(pcr0_hex,                  "pcr0",            48)
+    pcr0            = _unhex(fields.get("pcr0", "aa" * 48), "pcr0", 48)
+    pcr1            = _unhex(fields.get("pcr1", "aa" * 48), "pcr1", 48)
+    pcr2            = _unhex(fields.get("pcr2", "aa" * 48), "pcr2", 48)
 
     return BundleHeader(
         raw=line,
@@ -126,6 +129,8 @@ def parse_header(line: str) -> BundleHeader:
         bootstrap_nonce=bootstrap_nonce,
         enc_pub=enc_pub,
         pcr0=pcr0,
+        pcr1=pcr1,
+        pcr2=pcr2,
         signing_pub=signing_pub,
         attest_doc=attest_doc,
     )
@@ -411,6 +416,61 @@ def check_exec_hashes(packets: list[EvidencePacket]) -> Optional[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# §5.4  Cross-segment PCR consistency
+# ---------------------------------------------------------------------------
+
+_SIM_PLACEHOLDER = bytes([0xAA] * 48)
+
+
+def check_pcr_consistency(segments: list[Segment]) -> Optional[CheckResult]:
+    """§5.4: PCR0/PCR1/PCR2 must be identical across all segments.
+
+    A divergence means the enclave image, kernel, or application binary changed
+    between hibernations — which would indicate tampering or an unplanned update.
+
+    Returns None if there is only one segment (nothing to compare) or all PCR
+    values are the simulation placeholder (0xAA×48), since that case carries no
+    real measurement.
+    """
+    if len(segments) < 2:
+        return None
+
+    # If every segment uses the simulation placeholder for PCR0, skip — there
+    # is no real hardware measurement to compare.
+    if all(seg.header.pcr0 == _SIM_PLACEHOLDER for seg in segments):
+        return CheckResult(
+            "§5.4 PCR consistency",
+            True,
+            "SKIPPED — all segments use simulation placeholder (0xAA×48)",
+            skipped=True,
+        )
+
+    ref = segments[0].header
+    mismatches = []
+    for i, seg in enumerate(segments[1:], start=1):
+        hdr = seg.header
+        for name, ref_val, got_val in [
+            ("PCR0", ref.pcr0, hdr.pcr0),
+            ("PCR1", ref.pcr1, hdr.pcr1),
+            ("PCR2", ref.pcr2, hdr.pcr2),
+        ]:
+            if ref_val != got_val:
+                mismatches.append(
+                    f"{name} differs in segment {i}\n"
+                    f"  segment 0 : {ref_val.hex()}\n"
+                    f"  segment {i} : {got_val.hex()}"
+                )
+
+    if mismatches:
+        return CheckResult("§5.4 PCR consistency", False, "\n".join(mismatches))
+    return CheckResult(
+        "§5.4 PCR consistency",
+        True,
+        f"PCR0/PCR1/PCR2 identical across all {len(segments)} segment(s)",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Multi-segment verification (§5.3)
 # ---------------------------------------------------------------------------
 
@@ -450,6 +510,11 @@ def verify_segments(segments: list[Segment]) -> tuple[bool, list[CheckResult]]:
             True,
             f"{len(segments)} segment(s) share session_id and bootstrap_nonce",
         ))
+
+    # §5.4 — PCR consistency across segments (only meaningful for multi-segment).
+    pcr_check = check_pcr_consistency(segments)
+    if pcr_check is not None:
+        results.append(pcr_check)
 
     # Per-segment checks, threading the chain tail across segment boundaries.
     last_stream: Optional[bytes] = None

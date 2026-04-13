@@ -8,8 +8,12 @@
     "     (e.g. arn:aws:iam::ACCOUNT_ID:role/key-admin).",
     "  3. Replace INSTANCE_ROLE_ARN with the EC2 instance role that runs the",
     "     KMS proxy (e.g. arn:aws:iam::ACCOUNT_ID:role/var-enclave-host).",
-    "  4. Replace PCR0_HEX with the PCR0 measurement printed by `make pcr0`.",
-    "     Re-apply this policy every time the enclave image is rebuilt."
+    "  4. Replace PCR0_HEX with the SHA-384 hex of the enclave image (EIF).",
+    "     Replace PCR1_HEX with the SHA-384 hex of the Linux kernel + boot ROMfs.",
+    "     Replace PCR2_HEX with the SHA-384 hex of the application / user-data.",
+    "     All three values are printed by `nitro-cli describe-enclaves` after",
+    "     the first successful enclave launch.  Re-apply this policy every time",
+    "     the enclave image is rebuilt."
   ],
   "Version": "2012-10-17",
   "Statement": [
@@ -60,7 +64,9 @@
       "Resource": "*",
       "Condition": {
         "StringEqualsIgnoreCase": {
-          "kms:RecipientAttestation:PCR0": "PCR0_HEX"
+          "kms:RecipientAttestation:PCR0": "PCR0_HEX",
+          "kms:RecipientAttestation:PCR1": "PCR1_HEX",
+          "kms:RecipientAttestation:PCR2": "PCR2_HEX"
         }
       }
     }
