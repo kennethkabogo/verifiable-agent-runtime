@@ -5,7 +5,9 @@ const nsm = @import("nsm.zig");
 /// On real Nitro hardware `doc` contains the CBOR-encoded COSE_Sign1 attestation
 /// document returned by the NSM.  In simulation it holds a deterministic mock.
 pub const AttestationQuote = struct {
-    pcr0: [48]u8,       // Platform Configuration Register 0 (SHA-384, 48 bytes)
+    pcr0: [48]u8,       // PCR0 — SHA-384 of the enclave image (EIF)
+    pcr1: [48]u8,       // PCR1 — SHA-384 of the Linux kernel and boot ROMfs
+    pcr2: [48]u8,       // PCR2 — SHA-384 of the application / user-data
     public_key: [32]u8, // Enclave's ephemeral public key bound into the attestation
     doc: []u8,          // Raw attestation document bytes (caller-allocated, owned)
 
@@ -17,18 +19,22 @@ pub const AttestationQuote = struct {
         // impossible to replay an old hardware quote with a new session_id.
         const doc = try nsm.getAttestationDoc(allocator, &session_id, &public_key);
 
-        // Attempt to extract PCR0 from the COSE_Sign1 attestation document.
-        // On real Nitro hardware this yields the actual SHA-384 image measurement.
-        // In simulation (mock NSM) the CBOR structure may not match, so we fall
-        // back to the 0xAA placeholder so tests and CI remain green.
-        const pcr0 = extractPcr0FromDoc(doc) catch blk: {
-            var p: [48]u8 = undefined;
-            @memset(&p, 0xAA);
-            break :blk p;
-        };
+        // Extract PCR0/PCR1/PCR2 from the COSE_Sign1 attestation document.
+        // On real Nitro hardware these are the SHA-384 measurements of the EIF,
+        // kernel, and application layers respectively.  In simulation the CBOR
+        // structure will not match so we fall back to the 0xAA placeholder so
+        // tests and CI remain green.
+        var fallback: [48]u8 = undefined;
+        @memset(&fallback, 0xAA);
+
+        const pcr0 = extractPcrFromDoc(doc, 0) catch fallback;
+        const pcr1 = extractPcrFromDoc(doc, 1) catch fallback;
+        const pcr2 = extractPcrFromDoc(doc, 2) catch fallback;
 
         return AttestationQuote{
             .pcr0 = pcr0,
+            .pcr1 = pcr1,
+            .pcr2 = pcr2,
             .public_key = public_key,
             .doc = doc,
         };
@@ -52,13 +58,19 @@ pub const AttestationQuote = struct {
     pub fn serialize(self: AttestationQuote, allocator: std.mem.Allocator) ![]u8 {
         const pcr0_h = try hex(allocator, &self.pcr0);
         defer allocator.free(pcr0_h);
+        const pcr1_h = try hex(allocator, &self.pcr1);
+        defer allocator.free(pcr1_h);
+        const pcr2_h = try hex(allocator, &self.pcr2);
+        defer allocator.free(pcr2_h);
         const pk_h = try hex(allocator, &self.public_key);
         defer allocator.free(pk_h);
         const doc_h = try hex(allocator, self.doc);
         defer allocator.free(doc_h);
 
-        return try std.fmt.allocPrint(allocator, "QUOTE:pcr0={s}:pk={s}:doc={s}", .{
+        return try std.fmt.allocPrint(allocator, "QUOTE:pcr0={s}:pcr1={s}:pcr2={s}:pk={s}:doc={s}", .{
             pcr0_h,
+            pcr1_h,
+            pcr2_h,
             pk_h,
             doc_h,
         });
@@ -107,14 +119,14 @@ fn readCborBstr(buf: []const u8, pos: *usize) ![]const u8 {
     return data;
 }
 
-/// Extracts PCR0 (48 bytes, SHA-384) from a raw Nitro COSE_Sign1 attestation doc.
+/// Extracts a PCR value (48 bytes, SHA-384) from a raw Nitro COSE_Sign1 attestation doc.
 ///
 /// COSE_Sign1 wire format:
 ///   [optional tag 0xd2] 0x84 [ protected_bstr, unprotected_map, payload_bstr, sig_bstr ]
 ///
 /// The payload is a CBOR map; we search it for the "pcrs" key and then
-/// extract the value at integer key 0 (PCR0).
-fn extractPcr0FromDoc(doc: []const u8) ![48]u8 {
+/// extract the value at integer key `pcr_index`.
+fn extractPcrFromDoc(doc: []const u8, pcr_index: u8) ![48]u8 {
     var pos: usize = 0;
 
     // Optional CBOR tag 18 (0xd2) wrapping COSE_Sign1.
@@ -134,18 +146,19 @@ fn extractPcr0FromDoc(doc: []const u8) ![48]u8 {
     // item[2]: payload bstr — this is the CBOR attestation document map.
     const payload = try readCborBstr(doc, &pos);
 
-    return extractPcr0FromPayload(payload);
+    return extractPcrFromPayload(payload, pcr_index);
 }
 
 /// Searches a CBOR-encoded attestation payload map for the "pcrs" entry and
-/// returns the 48-byte value stored at integer key 0 (PCR0).
+/// returns the 48-byte value stored at integer key `pcr_index`.
 ///
 /// Strategy: linear scan for the text-string "pcrs" (CBOR: 0x64 0x70 0x63 0x72 0x73),
-/// then search within the next 256 bytes for the pattern
-///   0x00           (CBOR uint 0 — the PCR index)
+/// then search within the next 1024 bytes for the pattern
+///   pcr_index      (CBOR uint, 1-byte direct encoding for indices 0–23)
 ///   0x58 0x30      (bstr, 1-byte length = 0x30 = 48)
-/// and read the following 48 bytes.
-fn extractPcr0FromPayload(payload: []const u8) ![48]u8 {
+/// and read the following 48 bytes.  The 1024-byte window covers all 16
+/// standard PCR entries (each ~51 bytes; 16 × 51 = 816 < 1024).
+fn extractPcrFromPayload(payload: []const u8, pcr_index: u8) ![48]u8 {
     // Locate the "pcrs" text-key in the CBOR map.
     // CBOR encoding: major type 3 (text), length 4 → 0x64, then "pcrs".
     const pcrs_needle = "\x64pcrs";
@@ -156,16 +169,16 @@ fn extractPcr0FromPayload(payload: []const u8) ![48]u8 {
     if (pos >= payload.len or (payload[pos] >> 5) != 5) return error.PcrsNotMap;
     pos += 1; // skip map header byte
 
-    // Within the next 256 bytes look for the PCR-0 entry:
-    //   key  = uint 0 → CBOR 0x00
+    // Within the next 1024 bytes look for the target PCR entry:
+    //   key  = uint pcr_index (0–23) → direct 1-byte CBOR encoding
     //   value = bstr(48) → CBOR 0x58 0x30 <48 bytes>
-    const search_end = @min(pos + 256, payload.len);
-    const key0_pat = "\x00\x58\x30";
-    const found = std.mem.indexOf(u8, payload[pos..search_end], key0_pat) orelse
-        return error.NoPcr0;
-    pos += found + key0_pat.len;
+    const search_end = @min(pos + 1024, payload.len);
+    const key_pat = [3]u8{ pcr_index, 0x58, 0x30 };
+    const found = std.mem.indexOf(u8, payload[pos..search_end], &key_pat) orelse
+        return error.NoPcr;
+    pos += found + key_pat.len;
 
-    if (pos + 48 > payload.len) return error.TruncatedPcr0;
+    if (pos + 48 > payload.len) return error.TruncatedPcr;
     return payload[pos..][0..48].*;
 }
 
@@ -181,22 +194,42 @@ fn extractPcr0FromPayload(payload: []const u8) ![48]u8 {
 ///     0xa0          empty map — unprotected header
 ///     0x5N ...      bstr(N) — payload (see buildPayload below)
 ///     0x41 0x00     bstr(1) — signature (1 dummy byte)
-fn buildTestDoc(allocator: std.mem.Allocator, pcr0_bytes: [48]u8) ![]u8 {
-    // Build the payload map: minimal CBOR map containing only the "pcrs" entry.
-    // Map with 1 entry: { "pcrs": { 0: bstr(48) } }
+///
+/// The payload contains: { "pcrs": { 0: pcr0_bytes, 1: pcr1_bytes, 2: pcr2_bytes } }
+fn buildTestDoc(
+    allocator: std.mem.Allocator,
+    pcr0_bytes: [48]u8,
+    pcr1_bytes: [48]u8,
+    pcr2_bytes: [48]u8,
+) ![]u8 {
+    // Build the payload map: { "pcrs": { 0: bstr(48), 1: bstr(48), 2: bstr(48) } }
     //
     // Outer map header: 0xa1 (1-item map)
-    // Key "pcrs": 0x64 0x70 0x63 0x72 0x73
-    // Value: inner map 0xa1 (1 entry), key uint 0 (0x00), value bstr(48): 0x58 0x30 <48>
+    // Key "pcrs": 0x64 "pcrs"
+    // Value: inner map 0xa3 (3 entries):
+    //   key uint 0 (0x00), value bstr(48): 0x58 0x30 <48>
+    //   key uint 1 (0x01), value bstr(48): 0x58 0x30 <48>
+    //   key uint 2 (0x02), value bstr(48): 0x58 0x30 <48>
     var payload = std.ArrayList(u8).init(allocator);
     defer payload.deinit();
     try payload.append(0xa1); // outer map, 1 entry
     try payload.appendSlice("\x64pcrs"); // text "pcrs"
-    try payload.append(0xa1); // inner map, 1 entry
+    try payload.append(0xa3); // inner map, 3 entries
+    // PCR0
     try payload.append(0x00); // uint key 0
     try payload.append(0x58); // bstr, 1-byte length follows
     try payload.append(0x30); // length = 48
     try payload.appendSlice(&pcr0_bytes);
+    // PCR1
+    try payload.append(0x01); // uint key 1
+    try payload.append(0x58); // bstr, 1-byte length follows
+    try payload.append(0x30); // length = 48
+    try payload.appendSlice(&pcr1_bytes);
+    // PCR2
+    try payload.append(0x02); // uint key 2
+    try payload.append(0x58); // bstr, 1-byte length follows
+    try payload.append(0x30); // length = 48
+    try payload.appendSlice(&pcr2_bytes);
 
     // Build the COSE_Sign1 document.
     var doc = std.ArrayList(u8).init(allocator);
@@ -227,40 +260,64 @@ fn buildTestDoc(allocator: std.mem.Allocator, pcr0_bytes: [48]u8) ![]u8 {
     return doc.toOwnedSlice();
 }
 
-test "extractPcr0FromDoc: real PCR0 bytes extracted correctly" {
+test "extractPcrFromDoc: PCR0 bytes extracted correctly" {
     const allocator = std.testing.allocator;
 
     var expected: [48]u8 = undefined;
     for (&expected, 0..) |*b, i| b.* = @intCast(i % 256);
+    var dummy: [48]u8 = undefined;
+    @memset(&dummy, 0x00);
 
-    const doc = try buildTestDoc(allocator, expected);
+    const doc = try buildTestDoc(allocator, expected, dummy, dummy);
     defer allocator.free(doc);
 
-    const got = try extractPcr0FromDoc(doc);
+    const got = try extractPcrFromDoc(doc, 0);
     try std.testing.expectEqualSlices(u8, &expected, &got);
 }
 
-test "extractPcr0FromDoc: no tag variant also parses" {
+test "extractPcrFromDoc: PCR1 and PCR2 extracted correctly" {
+    const allocator = std.testing.allocator;
+
+    var pcr0: [48]u8 = undefined;
+    @memset(&pcr0, 0xAA);
+    var pcr1: [48]u8 = undefined;
+    @memset(&pcr1, 0xBB);
+    var pcr2: [48]u8 = undefined;
+    @memset(&pcr2, 0xCC);
+
+    const doc = try buildTestDoc(allocator, pcr0, pcr1, pcr2);
+    defer allocator.free(doc);
+
+    const got1 = try extractPcrFromDoc(doc, 1);
+    try std.testing.expectEqualSlices(u8, &pcr1, &got1);
+
+    const got2 = try extractPcrFromDoc(doc, 2);
+    try std.testing.expectEqualSlices(u8, &pcr2, &got2);
+}
+
+test "extractPcrFromDoc: no tag variant also parses" {
     const allocator = std.testing.allocator;
 
     var expected: [48]u8 = undefined;
     @memset(&expected, 0xBB);
+    var dummy: [48]u8 = undefined;
+    @memset(&dummy, 0x00);
 
-    var full_doc = try buildTestDoc(allocator, expected);
+    var full_doc = try buildTestDoc(allocator, expected, dummy, dummy);
     defer allocator.free(full_doc);
     // Strip the 0xd2 tag prefix to test the no-tag path.
     const doc = full_doc[1..];
 
-    const got = try extractPcr0FromDoc(doc);
+    const got = try extractPcrFromDoc(doc, 0);
     try std.testing.expectEqualSlices(u8, &expected, &got);
 }
 
-test "extractPcr0FromDoc: malformed doc returns error" {
+test "extractPcrFromDoc: malformed doc returns error" {
     const junk = [_]u8{ 0x01, 0x02, 0x03 };
-    try std.testing.expectError(error.NotCoseSign1, extractPcr0FromDoc(&junk));
+    try std.testing.expectError(error.NotCoseSign1, extractPcrFromDoc(&junk, 0));
 }
 
-test "extractPcr0FromDoc: missing pcrs key returns error" {
+test "extractPcrFromDoc: missing pcrs key returns error" {
     const allocator = std.testing.allocator;
 
     // Build a doc whose payload is an empty CBOR map — no "pcrs" key.
@@ -273,13 +330,13 @@ test "extractPcr0FromDoc: missing pcrs key returns error" {
     try doc.append(0x41); try doc.append(0xa0); // bstr(1) containing 0xa0
     try doc.append(0x41); try doc.append(0x00); // signature
 
-    try std.testing.expectError(error.NoPcrsKey, extractPcr0FromDoc(doc.items));
+    try std.testing.expectError(error.NoPcrsKey, extractPcrFromDoc(doc.items, 0));
 }
 
-test "AttestationQuote.generate: pcr0 field is 48 bytes (fallback path)" {
+test "AttestationQuote.generate: all PCR fields are 48 bytes (fallback path)" {
     // In the test/simulation environment the NSM mock does not produce a
-    // real COSE_Sign1 document, so extractPcr0FromDoc will fail and we expect
-    // the 0xAA fallback to be written into pcr0.
+    // real COSE_Sign1 document, so extractPcrFromDoc will fail and we expect
+    // the 0xAA fallback to be written into all PCR fields.
     const allocator = std.testing.allocator;
     var pk: [32]u8 = undefined;
     @memset(&pk, 0x01);
@@ -288,6 +345,8 @@ test "AttestationQuote.generate: pcr0 field is 48 bytes (fallback path)" {
     const quote = try AttestationQuote.generate(allocator, pk, sid);
     defer quote.deinit(allocator);
 
-    // The field must be 48 bytes regardless of path taken.
+    // All fields must be 48 bytes regardless of path taken.
     try std.testing.expectEqual(@as(usize, 48), quote.pcr0.len);
+    try std.testing.expectEqual(@as(usize, 48), quote.pcr1.len);
+    try std.testing.expectEqual(@as(usize, 48), quote.pcr2.len);
 }
