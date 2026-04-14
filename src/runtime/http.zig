@@ -14,6 +14,7 @@
 ///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","executions":[…]}
 ///   GET  /attestation                                        → 200 {"pcr0":"…","pcr1":"…","pcr2":"…","public_key":"…","doc":"…"}
 ///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
+///   GET  /verify-and-attest                                  → 200 {"decision":{…},"evidence":{…},"attestation":{…}}
 ///   GET  /health                                             → 200 {"status":"healthy"}
 ///
 const std = @import("std");
@@ -279,6 +280,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleAttestation(server, stream, req);
     if (get and mem.eql(u8, req.path, "/session"))
         return handleSession(server, stream, req);
+    if (get and mem.eql(u8, req.path, "/verify-and-attest"))
+        return handleVerifyAndAttest(server, stream, req);
     if (get and mem.eql(u8, req.path, "/health"))
         return writeResponse(stream, 200, "{\"status\":\"healthy\"}");
 
@@ -304,20 +307,25 @@ fn handleLog(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !vo
         return writeError(stream, 400, "missing \"msg\" field");
     defer server.allocator.free(msg);
 
-    // Prefix with skill identifier when provided so the evidence chain records
-    // which modular skill emitted each entry.
-    if (!mem.eql(u8, req.skill_id, "unknown")) {
-        const tagged = try std.fmt.allocPrint(
-            server.allocator,
-            "[SKILL:{s}] {s}",
-            .{ req.skill_id, msg },
-        );
-        defer server.allocator.free(tagged);
-        try server.logger.logOutput(tagged);
-    } else {
-        try server.logger.logOutput(msg);
-    }
+    // Optional action_id links this log entry to an escrow event so the
+    // evidence chain can be matched to a specific payment or settlement.
+    const action_id = jsonGetString(req.body, "action_id", server.allocator);
+    defer if (action_id) |id| server.allocator.free(id);
 
+    const has_skill = !mem.eql(u8, req.skill_id, "unknown");
+
+    // Build the final log line, incorporating skill and/or action tags when present.
+    const line = if (has_skill and action_id != null)
+        try std.fmt.allocPrint(server.allocator, "[SKILL:{s}][ACTION:{s}] {s}", .{ req.skill_id, action_id.?, msg })
+    else if (has_skill)
+        try std.fmt.allocPrint(server.allocator, "[SKILL:{s}] {s}", .{ req.skill_id, msg })
+    else if (action_id != null)
+        try std.fmt.allocPrint(server.allocator, "[ACTION:{s}] {s}", .{ action_id.?, msg })
+    else
+        try server.allocator.dupe(u8, msg);
+    defer server.allocator.free(line);
+
+    try server.logger.logOutput(line);
     try writeResponse(stream, 200, "{\"status\":\"ok\"}");
 }
 
@@ -481,6 +489,48 @@ fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
         server.allocator,
         "{{\"session_id\":\"{s}\",\"bootstrap_nonce\":\"{s}\",\"magic\":\"VARB\",\"version\":\"01\",\"bundle_header\":\"{s}\"}}",
         .{ sid_h, nonce_h, bundle_header },
+    );
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
+}
+
+fn handleVerifyAndAttest(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    _ = req;
+
+    // Evidence bundle — calling this advances the sequence counter and commits
+    // the current L1 state, producing a fresh signed snapshot for the caller.
+    const evidence_json = try server.logger.getEvidenceBundleJson(server.allocator);
+    defer server.allocator.free(evidence_json);
+
+    // Attestation fields (same as /attestation).
+    const pcr0_h = try fmtHex(server.allocator, &server.quote.pcr0);
+    defer server.allocator.free(pcr0_h);
+    const pcr1_h = try fmtHex(server.allocator, &server.quote.pcr1);
+    defer server.allocator.free(pcr1_h);
+    const pcr2_h = try fmtHex(server.allocator, &server.quote.pcr2);
+    defer server.allocator.free(pcr2_h);
+    const pk_h = try fmtHex(server.allocator, &server.quote.public_key);
+    defer server.allocator.free(pk_h);
+    const doc_h = try fmtHex(server.allocator, server.quote.doc);
+    defer server.allocator.free(doc_h);
+
+    // Simulation mode: PCR0 = 0xAA * 48 (set by mock NSM when /dev/nsm absent).
+    const sim_mode = for (server.quote.pcr0) |byte| {
+        if (byte != 0xAA) break false;
+    } else true;
+
+    // Embed evidence and attestation as nested JSON objects (not quoted strings)
+    // so a caller can parse the entire response as a single JSON document.
+    // The caller MUST verify the Ed25519 signature in evidence.sig against
+    // attestation.public_key before treating this response as authoritative.
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"decision\":{{\"sim_mode\":{s},\"note\":\"Verify evidence.sig against attestation.public_key before releasing escrow.\"}},\"evidence\":{s},\"attestation\":{{\"pcr0\":\"{s}\",\"pcr1\":\"{s}\",\"pcr2\":\"{s}\",\"public_key\":\"{s}\",\"doc\":\"{s}\"}}}}",
+        .{
+            if (sim_mode) "true" else "false",
+            evidence_json,
+            pcr0_h, pcr1_h, pcr2_h, pk_h, doc_h,
+        },
     );
     defer server.allocator.free(body);
     try writeResponse(stream, 200, body);
