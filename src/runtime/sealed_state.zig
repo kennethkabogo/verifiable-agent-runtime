@@ -211,15 +211,32 @@ pub fn capture(
 
         const n = vault.secrets.count();
         const buf = try allocator.alloc(CapturedState.VaultEntry, n);
-        errdefer allocator.free(buf);
+        var init_count: usize = 0;
+        // On error, wipe and free every fully-initialized entry so secret
+        // material never lingers in the allocator's free list.  A plain
+        // `errdefer allocator.free(buf)` would only free the VaultEntry
+        // array itself, silently leaking the key and value strings inside
+        // each already-populated slot.
+        errdefer {
+            for (buf[0..init_count]) |e| {
+                std.crypto.secureZero(u8, @constCast(e.key));
+                std.crypto.secureZero(u8, @constCast(e.value));
+                allocator.free(e.key);
+                allocator.free(e.value);
+            }
+            allocator.free(buf);
+        }
 
         var it = vault.secrets.iterator();
-        var i: usize = 0;
-        while (it.next()) |kv| : (i += 1) {
+        while (it.next()) |kv| {
             const k = try allocator.dupe(u8, kv.key_ptr.*);
-            errdefer allocator.free(k);
+            errdefer {
+                std.crypto.secureZero(u8, k);
+                allocator.free(k);
+            }
             const v = try allocator.dupe(u8, kv.value_ptr.*);
-            buf[i] = .{ .key = k, .value = v };
+            buf[init_count] = .{ .key = k, .value = v };
+            init_count += 1;
         }
         break :blk buf;
     };
@@ -254,9 +271,15 @@ pub fn restoreVault(state: *const CapturedState, vault: *SecureVault) !void {
 
     for (state.vault_entries) |e| {
         const k = try vault.allocator.dupe(u8, e.key);
-        errdefer vault.allocator.free(k);
+        errdefer {
+            std.crypto.secureZero(u8, k);
+            vault.allocator.free(k);
+        }
         const v = try vault.allocator.dupe(u8, e.value);
-        errdefer vault.allocator.free(v);
+        errdefer {
+            std.crypto.secureZero(u8, v);
+            vault.allocator.free(v);
+        }
         try vault.secrets.put(k, v);
     }
 }
