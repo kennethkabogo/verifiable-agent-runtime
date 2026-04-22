@@ -33,14 +33,28 @@ pub const SecureVault = struct {
     }
 
     /// Stores a secret in the vault. Copies both key and value to internal memory.
+    /// If the key already exists, the old value is securely wiped before being
+    /// freed so it does not linger in the allocator's free list.
     pub fn store(self: *SecureVault, key: []const u8, value: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
         const val_copy = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(val_copy);
 
-        try self.secrets.put(key_copy, val_copy);
+        const result = try self.secrets.getOrPut(key_copy);
+        if (result.found_existing) {
+            // Wipe and free the old key copy (we already have a new one)
+            // and the old value before the map adopts the new value.
+            std.crypto.secureZero(u8, @constCast(result.key_ptr.*));
+            self.allocator.free(result.key_ptr.*);
+            std.crypto.secureZero(u8, @constCast(result.value_ptr.*));
+            self.allocator.free(result.value_ptr.*);
+            result.key_ptr.* = key_copy;
+        }
+        result.value_ptr.* = val_copy;
     }
 
     /// Retrieves a secret. Caller must NOT free the returned slice.
