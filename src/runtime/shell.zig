@@ -305,12 +305,28 @@ pub const SecureLogger = struct {
             defer allocator.free(sh);
             const eh = try hex(allocator, &rec.stderr_hash);
             defer allocator.free(eh);
-            // JSON-escape the cmd string (only `"` and `\` need escaping here).
+            // JSON-escape the cmd string per RFC 8259.
+            // Must handle all control characters (0x00-0x1F, 0x7F), not just
+            // `"` and `\` — an unescaped newline or tab produces invalid JSON
+            // that downstream parsers will reject or silently misparse.
             var escaped = std.ArrayListUnmanaged(u8){};
             defer escaped.deinit(allocator);
             for (rec.cmd) |ch| {
-                if (ch == '"' or ch == '\\') try escaped.append(allocator, '\\');
-                try escaped.append(allocator, ch);
+                switch (ch) {
+                    '"'  => try escaped.appendSlice(allocator, "\\\""),
+                    '\\' => try escaped.appendSlice(allocator, "\\\\"),
+                    0x08 => try escaped.appendSlice(allocator, "\\b"),
+                    0x09 => try escaped.appendSlice(allocator, "\\t"),
+                    0x0A => try escaped.appendSlice(allocator, "\\n"),
+                    0x0C => try escaped.appendSlice(allocator, "\\f"),
+                    0x0D => try escaped.appendSlice(allocator, "\\r"),
+                    0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
+                        var tmp: [6]u8 = undefined;
+                        const enc = std.fmt.bufPrint(&tmp, "\\u{x:0>4}", .{ch}) catch unreachable;
+                        try escaped.appendSlice(allocator, enc);
+                    },
+                    else => try escaped.append(allocator, ch),
+                }
             }
             const entry = try std.fmt.allocPrint(
                 allocator,
