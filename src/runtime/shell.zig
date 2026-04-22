@@ -23,6 +23,7 @@ pub const ExecRecord = struct {
     seq: u64,
 
     pub fn deinit(self: ExecRecord, allocator: std.mem.Allocator) void {
+        std.crypto.secureZero(u8, self.cmd);
         allocator.free(self.cmd);
     }
 };

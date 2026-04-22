@@ -134,6 +134,7 @@ pub const CapturedState = struct {
         }
         self.allocator.free(self.vault_entries);
         for (self.exec_entries) |e| {
+            std.crypto.secureZero(u8, e.cmd);
             self.allocator.free(e.cmd);
         }
         self.allocator.free(self.exec_entries);
@@ -196,7 +197,10 @@ pub fn capture(
         break :blk buf;
     };
     errdefer {
-        for (exec_entries) |e| allocator.free(e.cmd);
+        for (exec_entries) |e| {
+            std.crypto.secureZero(u8, e.cmd);
+            allocator.free(e.cmd);
+        }
         allocator.free(exec_entries);
     }
 
