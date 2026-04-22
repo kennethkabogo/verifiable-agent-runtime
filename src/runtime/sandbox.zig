@@ -420,6 +420,25 @@ const ALLOWED_SYSCALLS = [_]u32{
 
     // Architecture-specific (thread-local storage setup by the Zig runtime).
     158, // arch_prctl
+
+    // Subprocess execution (POST /exec → exec.run()).
+    //
+    // The gateway calls pipe2 to create capture pipes, clone to fork, and
+    // wait4 to reap the child.  The forked child calls dup2 to wire the
+    // pipes to its stdin/stdout/stderr before calling execve.  All four
+    // were absent from the allowlist: any POST /exec request after
+    // hardenProcess() would cause wait4 to hit SECCOMP_RET_KILL_PROCESS,
+    // terminating every thread in the gateway process.
+    //
+    // Note: forked children inherit this seccomp filter and the Landlock
+    // deny-all filesystem policy, so dynamically-linked commands that need
+    // openat (257) for their dynamic linker will fail in production.  Full
+    // exec support in a hardened enclave requires a separate exec-worker
+    // process that is not subject to the gateway's Landlock ruleset.
+    33,  // dup2    — child: redirect pipe ends to stdin/stdout/stderr
+    59,  // execve  — child: replace image with the requested command
+    61,  // wait4   — parent: reap the child after both pipes are drained
+    293, // pipe2   — parent: create stdout/stderr capture pipes before fork
 };
 
 fn installSeccompFilter() !void {
