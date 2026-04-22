@@ -16,7 +16,9 @@ pub const ExecResult = struct {
     exit_code: u8,
 
     pub fn deinit(self: ExecResult, allocator: std.mem.Allocator) void {
+        std.crypto.secureZero(u8, self.stdout);
         allocator.free(self.stdout);
+        std.crypto.secureZero(u8, self.stderr);
         allocator.free(self.stderr);
     }
 };
@@ -46,12 +48,33 @@ fn readPipe(allocator: std.mem.Allocator, file: std.fs.File, max_bytes: usize) !
     return buf.toOwnedSlice(allocator);
 }
 
+/// Per-stream context for the concurrent pipe reader threads spawned by run().
+const PipeCtx = struct {
+    allocator: std.mem.Allocator,
+    file: std.fs.File,
+    max_bytes: usize,
+    bytes: ?[]u8 = null, // set on success; null on error
+    fail: ?anyerror = null, // set on error; null on success
+};
+
+fn readPipeFn(ctx: *PipeCtx) void {
+    ctx.bytes = readPipe(ctx.allocator, ctx.file, ctx.max_bytes) catch |e| {
+        ctx.fail = e;
+        return;
+    };
+}
+
 /// Spawns `argv[0]` with the remaining elements as arguments, waits for it
 /// to exit, and returns captured stdout, stderr, and the exit code.
 ///
 /// Output is captured up to MAX_OUTPUT_BYTES per stream.  If a stream exceeds
 /// that limit the bytes after the limit are discarded and the field is replaced
 /// with the literal "<output truncated>" so callers always receive valid UTF-8.
+///
+/// stdout and stderr are read concurrently to prevent a deadlock: if they were
+/// read sequentially and the child filled the stderr pipe buffer (~64 KiB on
+/// Linux) before closing stdout, the child would block on stderr while we
+/// blocked waiting for stdout EOF — neither side would ever make progress.
 ///
 /// The caller owns the returned ExecResult and must call `deinit` on it.
 pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !ExecResult {
@@ -62,10 +85,22 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !ExecResult {
     child.stderr_behavior = .Pipe;
     try child.spawn();
 
-    const stdout = try readPipe(allocator, child.stdout.?, MAX_OUTPUT_BYTES);
-    errdefer allocator.free(stdout);
-    const stderr = try readPipe(allocator, child.stderr.?, MAX_OUTPUT_BYTES);
-    errdefer allocator.free(stderr);
+    var stdout_ctx = PipeCtx{ .allocator = allocator, .file = child.stdout.?, .max_bytes = MAX_OUTPUT_BYTES };
+    var stderr_ctx = PipeCtx{ .allocator = allocator, .file = child.stderr.?, .max_bytes = MAX_OUTPUT_BYTES };
+
+    const stdout_thread = try std.Thread.spawn(.{}, readPipeFn, .{&stdout_ctx});
+    const stderr_thread = std.Thread.spawn(.{}, readPipeFn, .{&stderr_ctx}) catch |err| {
+        // stderr thread failed to start: join stdout, free any bytes it
+        // may have already allocated, then kill and reap the child.
+        stdout_thread.join();
+        if (stdout_ctx.bytes) |b| allocator.free(b);
+        _ = child.kill() catch {};
+        _ = child.wait() catch {};
+        return err;
+    };
+
+    stdout_thread.join();
+    stderr_thread.join();
 
     const term = try child.wait();
     const exit_code: u8 = switch (term) {
@@ -74,9 +109,18 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !ExecResult {
         else => 255,
     };
 
+    if (stdout_ctx.fail) |e| {
+        if (stderr_ctx.bytes) |b| allocator.free(b);
+        return e;
+    }
+    if (stderr_ctx.fail) |e| {
+        if (stdout_ctx.bytes) |b| allocator.free(b);
+        return e;
+    }
+
     return ExecResult{
-        .stdout = stdout,
-        .stderr = stderr,
+        .stdout = stdout_ctx.bytes.?,
+        .stderr = stderr_ctx.bytes.?,
         .exit_code = exit_code,
     };
 }
