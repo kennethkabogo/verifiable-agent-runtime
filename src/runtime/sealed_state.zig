@@ -496,10 +496,28 @@ const MOCK_WRAP_KEY = [32]u8{
 /// Override with the VAR_KMS_PROXY_PORT environment variable.
 const KMS_PROXY_PORT_DEFAULT: u16 = 8443;
 
+/// Memoized NSM availability — probed once on first call, cached for the
+/// lifetime of the process.  Calling openFileAbsolute on every seal/unseal
+/// operation creates a TOCTOU window: if the NSM device is transiently
+/// unavailable exactly during a seal or unseal call, the code falls back to
+/// simulation mode (MOCK_WRAP_KEY XOR), reducing DEK protection from
+/// KMS PCR-bound policy to a publicly-known constant.  Caching the result
+/// ensures that the production/simulation decision is made once at startup
+/// and never silently downgraded mid-session.
+var g_nsm_available: ?bool = null;
+var g_nsm_mutex: std.Thread.Mutex = .{};
+
 fn hasNsmDevice() bool {
-    const f = std.fs.openFileAbsolute("/dev/nsm", .{ .mode = .read_write }) catch return false;
-    f.close();
-    return true;
+    g_nsm_mutex.lock();
+    defer g_nsm_mutex.unlock();
+    if (g_nsm_available) |cached| return cached;
+    const result = blk: {
+        const f = std.fs.openFileAbsolute("/dev/nsm", .{ .mode = .read_write }) catch break :blk false;
+        f.close();
+        break :blk true;
+    };
+    g_nsm_available = result;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
