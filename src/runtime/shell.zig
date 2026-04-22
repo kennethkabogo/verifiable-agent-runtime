@@ -104,47 +104,57 @@ pub const SecureLogger = struct {
     pub fn logOutput(self: *SecureLogger, data: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        self.logOutputLocked(data);
+    }
 
+    /// Same as logOutput but assumes the caller already holds self.mutex.
+    /// Used by runAndLog to fold stdout into the chain and append the exec
+    /// record in a single atomic critical section (see runAndLog comment).
+    fn logOutputLocked(self: *SecureLogger, data: []const u8) void {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(&self.stream_hash);
         hasher.update(data);
         hasher.final(&self.stream_hash);
-
         self.vt.processInput(data);
     }
 
     /// Runs a subprocess, folds its stdout into the L1 chain and VT parser,
-    /// and records structured execution metadata in `last_exec` for inclusion
-    /// in the next evidence bundle.
+    /// and records structured execution metadata in the executions log for
+    /// inclusion in the next evidence bundle.
     ///
     /// stdout bytes are committed to the L1 chain identically to logOutput,
-    /// so a verifier can confirm that `last_exec.stdout_hash` is consistent
-    /// with the delta between two consecutive L1 hashes.
+    /// so a verifier can confirm that each exec record's stdout_hash is
+    /// consistent with the delta between consecutive L1 hashes (spec §2.3.4).
     ///
     /// stderr is captured and hashed but NOT folded into the L1 chain — it is
     /// diagnostic output that does not affect the verifiable stream.
+    ///
+    /// The stdout fold and exec record append happen under a single mutex
+    /// acquisition so no concurrent getEvidenceBundleJson call can observe a
+    /// bundle where the L1 hash has advanced without a corresponding exec record.
     ///
     /// Returns the raw ExecResult; caller must call `deinit` on it.
     pub fn runAndLog(self: *SecureLogger, argv: []const []const u8) !exec.ExecResult {
         // Run the subprocess outside the mutex — it may take a while.
         const result = try exec.run(self.allocator, argv);
 
-        // Fold stdout into the L1 chain and VT state (uses the mutex internally).
-        if (result.stdout.len > 0) {
-            try self.logOutput(result.stdout);
-        }
-
-        // Content hashes for the evidence record.
+        // Compute content hashes and build the cmd string before taking the
+        // lock — these are pure computation / allocation with no shared state.
         var stdout_hash: [32]u8 = undefined;
         Sha256.hash(result.stdout, &stdout_hash, .{});
         var stderr_hash: [32]u8 = undefined;
         Sha256.hash(result.stderr, &stderr_hash, .{});
-
-        // Build a human-readable command string (argv joined by spaces).
         const cmd_str = try std.mem.join(self.allocator, " ", argv);
+        errdefer self.allocator.free(cmd_str);
 
+        // Single lock acquisition: fold stdout into the L1 chain AND append
+        // the exec record atomically so the two are always visible together.
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (result.stdout.len > 0) {
+            self.logOutputLocked(result.stdout);
+        }
 
         try self.executions.append(self.allocator, ExecRecord{
             .cmd = cmd_str,
@@ -295,12 +305,28 @@ pub const SecureLogger = struct {
             defer allocator.free(sh);
             const eh = try hex(allocator, &rec.stderr_hash);
             defer allocator.free(eh);
-            // JSON-escape the cmd string (only `"` and `\` need escaping here).
+            // JSON-escape the cmd string per RFC 8259.
+            // Must handle all control characters (0x00-0x1F, 0x7F), not just
+            // `"` and `\` — an unescaped newline or tab produces invalid JSON
+            // that downstream parsers will reject or silently misparse.
             var escaped = std.ArrayListUnmanaged(u8){};
             defer escaped.deinit(allocator);
             for (rec.cmd) |ch| {
-                if (ch == '"' or ch == '\\') try escaped.append(allocator, '\\');
-                try escaped.append(allocator, ch);
+                switch (ch) {
+                    '"'  => try escaped.appendSlice(allocator, "\\\""),
+                    '\\' => try escaped.appendSlice(allocator, "\\\\"),
+                    0x08 => try escaped.appendSlice(allocator, "\\b"),
+                    0x09 => try escaped.appendSlice(allocator, "\\t"),
+                    0x0A => try escaped.appendSlice(allocator, "\\n"),
+                    0x0C => try escaped.appendSlice(allocator, "\\f"),
+                    0x0D => try escaped.appendSlice(allocator, "\\r"),
+                    0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
+                        var tmp: [6]u8 = undefined;
+                        const enc = std.fmt.bufPrint(&tmp, "\\u{x:0>4}", .{ch}) catch unreachable;
+                        try escaped.appendSlice(allocator, enc);
+                    },
+                    else => try escaped.append(allocator, ch),
+                }
             }
             const entry = try std.fmt.allocPrint(
                 allocator,

@@ -145,44 +145,37 @@ pub const CapturedState = struct {
 // ---------------------------------------------------------------------------
 
 /// Snapshot all mutable runtime state from vault and logger.
-/// Locks each mutex independently to avoid lock-order deadlocks.
+/// Logger state (scalars + exec entries) is captured under a single mutex
+/// acquisition for consistency.  Vault state is captured under a separate
+/// acquisition — the two locks are never held simultaneously to prevent
+/// deadlocks with concurrent callers.
 /// Caller must call CapturedState.deinit() when done.
 pub fn capture(
     allocator: std.mem.Allocator,
     vault: *SecureVault,
     logger: *SecureLogger,
 ) !CapturedState {
-    // Snapshot scalar logger fields (cheap, no allocation).
-    const session_id = blk: {
-        logger.mutex.lock();
-        defer logger.mutex.unlock();
-        break :blk logger.session_id;
-    };
-    const stream_hash = blk: {
-        logger.mutex.lock();
-        defer logger.mutex.unlock();
-        break :blk logger.stream_hash;
-    };
-    const prev_stream_hash = blk: {
-        logger.mutex.lock();
-        defer logger.mutex.unlock();
-        break :blk logger.prev_stream_hash;
-    };
-    const sequence = blk: {
-        logger.mutex.lock();
-        defer logger.mutex.unlock();
-        break :blk logger.sequence;
-    };
-    const bootstrap_nonce = blk: {
-        logger.mutex.lock();
-        defer logger.mutex.unlock();
-        break :blk logger.bootstrap_nonce;
-    };
+    // Snapshot all logger scalar fields and exec entries under a single mutex
+    // acquisition so the captured state is internally consistent.  The previous
+    // approach used five separate lock/unlock cycles for scalar fields, allowing
+    // concurrent runAndLog or getEvidenceBundleJson calls to modify stream_hash,
+    // sequence, or executions between reads — producing a snapshot where fields
+    // belong to different points in time.
+    var session_id: [16]u8 = undefined;
+    var stream_hash: [32]u8 = undefined;
+    var prev_stream_hash: [32]u8 = undefined;
+    var sequence: u64 = 0;
+    var bootstrap_nonce: [32]u8 = undefined;
 
-    // Snapshot exec entries (requires allocation for cmd strings).
     const exec_entries = blk: {
         logger.mutex.lock();
         defer logger.mutex.unlock();
+
+        session_id       = logger.session_id;
+        stream_hash      = logger.stream_hash;
+        prev_stream_hash = logger.prev_stream_hash;
+        sequence         = logger.sequence;
+        bootstrap_nonce  = logger.bootstrap_nonce;
         const n = logger.executions.items.len;
         const buf = try allocator.alloc(CapturedState.ExecEntry, n);
         var init_count: usize = 0;
