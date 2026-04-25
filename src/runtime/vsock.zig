@@ -96,12 +96,12 @@ pub const VsockServer = struct {
                 std.debug.print("[VAR] Listening on vsock port {d}\n", .{port});
                 return VsockServer{ .fd = fd, .is_vsock = true };
             } else |err| switch (err) {
-                // UnsupportedOs is the only expected error on non-vsock kernels
-                // (returned by the comptime os-tag guard in listenVsock).
-                // All other errors — EADDRINUSE, EPERM, unexpected kernel failures —
-                // indicate a misconfigured environment and must not silently degrade
-                // to TCP, which would bypass the vsock isolation boundary.
-                error.UnsupportedOs => {},
+                // EAFNOSUPPORT: AF_VSOCK module not loaded on this kernel —
+                // acceptable in dev/CI environments where vsock isn't available.
+                // All other errors (EADDRINUSE, EACCES, etc.) indicate a
+                // misconfigured environment and must not silently degrade to TCP,
+                // which would bypass the vsock isolation boundary on Nitro.
+                error.AddressFamilyNotSupported => {},
                 else => return err,
             }
         }
