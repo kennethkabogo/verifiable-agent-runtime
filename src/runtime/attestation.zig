@@ -152,12 +152,11 @@ fn extractPcrFromDoc(doc: []const u8, pcr_index: u8) ![48]u8 {
 /// Searches a CBOR-encoded attestation payload map for the "pcrs" entry and
 /// returns the 48-byte value stored at integer key `pcr_index`.
 ///
-/// Strategy: linear scan for the text-string "pcrs" (CBOR: 0x64 0x70 0x63 0x72 0x73),
-/// then search within the next 1024 bytes for the pattern
-///   pcr_index      (CBOR uint, 1-byte direct encoding for indices 0–23)
-///   0x58 0x30      (bstr, 1-byte length = 0x30 = 48)
-/// and read the following 48 bytes.  The 1024-byte window covers all 16
-/// standard PCR entries (each ~51 bytes; 16 × 51 = 816 < 1024).
+/// Strategy: locate the text-string key "pcrs", then walk the inner map by
+/// parsing each key (CBOR uint, 0–23) and advancing past each value (bstr)
+/// until the target index is found.  Walking the map structure rather than
+/// scanning raw bytes prevents false matches when a PCR value happens to
+/// contain the byte sequence of a later PCR's key header.
 fn extractPcrFromPayload(payload: []const u8, pcr_index: u8) ![48]u8 {
     // Locate the "pcrs" text-key in the CBOR map.
     // CBOR encoding: major type 3 (text), length 4 → 0x64, then "pcrs".
@@ -167,19 +166,37 @@ fn extractPcrFromPayload(payload: []const u8, pcr_index: u8) ![48]u8 {
 
     // The value following "pcrs" must be a CBOR map (major type 5).
     if (pos >= payload.len or (payload[pos] >> 5) != 5) return error.PcrsNotMap;
-    pos += 1; // skip map header byte
+    const map_info = payload[pos] & 0x1f;
+    pos += 1;
 
-    // Within the next 1024 bytes look for the target PCR entry:
-    //   key  = uint pcr_index (0–23) → direct 1-byte CBOR encoding
-    //   value = bstr(48) → CBOR 0x58 0x30 <48 bytes>
-    const search_end = @min(pos + 1024, payload.len);
-    const key_pat = [3]u8{ pcr_index, 0x58, 0x30 };
-    const found = std.mem.indexOf(u8, payload[pos..search_end], &key_pat) orelse
-        return error.NoPcr;
-    pos += found + key_pat.len;
+    // Determine the declared entry count (indices 0–23 fit in 1-byte CBOR uint).
+    const num_entries: usize = switch (map_info) {
+        0...23 => map_info,
+        24 => blk: {
+            if (pos >= payload.len) return error.CborUnexpectedEnd;
+            const n = payload[pos];
+            pos += 1;
+            break :blk n;
+        },
+        else => return error.PcrsMapTooLarge,
+    };
 
-    if (pos + 48 > payload.len) return error.TruncatedPcr;
-    return payload[pos..][0..48].*;
+    // Walk each key-value pair: key = CBOR uint (direct 1-byte, 0–23),
+    // value = bstr read via readCborBstr so we advance past the full value.
+    for (0..num_entries) |_| {
+        if (pos >= payload.len) return error.CborUnexpectedEnd;
+        const key_byte = payload[pos];
+        // CBOR uint with direct value (major type 0, info 0–23).
+        if ((key_byte >> 5) != 0 or (key_byte & 0x1f) > 23) return error.PcrsKeyNotUint;
+        const key_val = key_byte & 0x1f;
+        pos += 1;
+        const val = try readCborBstr(payload, &pos);
+        if (key_val == pcr_index) {
+            if (val.len != 48) return error.PcrWrongSize;
+            return val[0..48].*;
+        }
+    }
+    return error.NoPcr;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
