@@ -95,7 +95,15 @@ pub const VsockServer = struct {
             if (listenVsock(port)) |fd| {
                 std.debug.print("[VAR] Listening on vsock port {d}\n", .{port});
                 return VsockServer{ .fd = fd, .is_vsock = true };
-            } else |_| {}
+            } else |err| switch (err) {
+                // UnsupportedOs is the only expected error on non-vsock kernels
+                // (returned by the comptime os-tag guard in listenVsock).
+                // All other errors — EADDRINUSE, EPERM, unexpected kernel failures —
+                // indicate a misconfigured environment and must not silently degrade
+                // to TCP, which would bypass the vsock isolation boundary.
+                error.UnsupportedOs => {},
+                else => return err,
+            }
         }
         // TCP fallback for dev / simulation.
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
@@ -132,10 +140,32 @@ pub const VsockServer = struct {
     }
 
     pub fn accept(self: *VsockServer) !VsockHandler {
+        if (self.is_vsock) {
+            // On vsock, capture the peer address so we can validate the CID.
+            // Only VMADDR_CID_HOST (2) — the parent EC2 instance — is permitted;
+            // accepting from any CID would allow sibling VMs on the same hypervisor
+            // to reach the enclave without attestation.
+            const SockaddrVm = extern struct {
+                family: u16,
+                reserved1: u16,
+                port: u32,
+                cid: u32,
+                zero: [4]u8,
+            };
+            var peer_addr: SockaddrVm = undefined;
+            var peer_len: posix.socklen_t = @sizeOf(SockaddrVm);
+            const conn_fd = try posix.accept(self.fd, @ptrCast(&peer_addr), &peer_len, 0);
+            errdefer posix.close(conn_fd);
+            if (peer_addr.cid != VsockHandler.VMADDR_CID_HOST) return error.UnexpectedPeer;
+            return VsockHandler{
+                .stream = std.net.Stream{ .handle = conn_fd },
+                .is_vsock = true,
+            };
+        }
         const conn_fd = try posix.accept(self.fd, null, null, 0);
         return VsockHandler{
             .stream = std.net.Stream{ .handle = conn_fd },
-            .is_vsock = self.is_vsock,
+            .is_vsock = false,
         };
     }
 
