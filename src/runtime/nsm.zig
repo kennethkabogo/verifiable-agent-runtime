@@ -53,8 +53,14 @@ pub fn getAttestationDoc(
     nonce: ?[]const u8,
     public_key: ?[]const u8,
 ) ![]u8 {
-    const file = std.fs.openFileAbsolute(NSM_DEV_PATH, .{ .mode = .read_write }) catch {
-        return requestMock(allocator);
+    const file = std.fs.openFileAbsolute(NSM_DEV_PATH, .{ .mode = .read_write }) catch |err| switch (err) {
+        // Device absent: simulation / CI environment — use mock.
+        error.FileNotFound => return requestMock(allocator),
+        // Any other failure (EACCES, EIO, transient hardware stall) means the
+        // device exists but is unusable.  Falling back to mock would produce a
+        // session with a fake attestation document rather than surfacing the
+        // underlying fault, so propagate the error instead.
+        else => return err,
     };
     defer file.close();
     return requestReal(allocator, file.handle, nonce, public_key);
