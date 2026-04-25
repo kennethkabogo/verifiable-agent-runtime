@@ -270,10 +270,10 @@ def provision_secret(sock: socket.socket, name: str, value: str,
         sendline(sock, f"ESECRET:{name}:{payload}")
     else:
         if enc_pub_hex and not _CRYPTO_AVAILABLE:
-            print(
-                "[agent] WARNING: enc_pub present but cryptography package missing — "
-                "falling back to cleartext SECRET",
-                file=sys.stderr,
+            raise RuntimeError(
+                f"Cannot provision secret '{name}': enc_pub is present in the bundle "
+                "header (encrypted transport is required) but the 'cryptography' "
+                "package is not installed. Install it with: pip install cryptography"
             )
         sendline(sock, f"SECRET:{name}:{value}")
 

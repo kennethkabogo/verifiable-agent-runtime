@@ -162,6 +162,11 @@ def _verify_nitro_cose(doc_bytes: bytes) -> "tuple[bool, str, dict | None]":
     # 5. Verify COSE_Sign1 signature (ES384: ECDSA P-384 + SHA-384, raw r‖s)
     sig_structure = _cbor2.dumps(["Signature1", protected_bstr, b"", payload_bstr])
     try:
+        # P-384 raw signatures are exactly 48 bytes for r and 48 bytes for s.
+        # An explicit length check prevents int.from_bytes from silently
+        # producing wrong r/s values from a truncated or padded signature.
+        if len(sig_bstr) != 96:
+            return False, f"COSE_Sign1 signature wrong length: {len(sig_bstr)} (expected 96)", None
         r = int.from_bytes(sig_bstr[:48], "big")
         s = int.from_bytes(sig_bstr[48:], "big")
         der_sig  = _enc_dss(r, s)

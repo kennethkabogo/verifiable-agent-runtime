@@ -220,6 +220,11 @@ def _cbor_read_bstr(data: bytes, pos: int) -> tuple[bytes, int]:
         length = int.from_bytes(data[pos:pos + 4], "big"); pos += 4
     else:
         raise ValueError(f"unsupported bstr additional info: {info}")
+    if pos + length > len(data):
+        raise ValueError(
+            f"CBOR bstr claims {length} bytes at pos {pos} but only "
+            f"{len(data) - pos} remain"
+        )
     return data[pos:pos + length], pos + length
 
 
