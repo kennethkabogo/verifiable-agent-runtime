@@ -293,10 +293,16 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
 fn handleVaultSecret(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
     const key = jsonGetString(req.body, "key", server.allocator) orelse
         return writeError(stream, 400, "missing \"key\" field");
-    defer server.allocator.free(key);
+    defer {
+        std.crypto.secureZero(u8, key);
+        server.allocator.free(key);
+    }
     const value = jsonGetString(req.body, "value", server.allocator) orelse
         return writeError(stream, 400, "missing \"value\" field");
-    defer server.allocator.free(value);
+    defer {
+        std.crypto.secureZero(u8, value);
+        server.allocator.free(value);
+    }
 
     try server.vault.store(key, value);
     try writeResponse(stream, 200, "{\"status\":\"ok\"}");

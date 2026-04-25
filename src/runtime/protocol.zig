@@ -153,6 +153,7 @@ pub const ProtocolHandler = struct {
             //   MAX_SECRET_VALUE_LEN + 32 (ephemeral pub) + 12 (nonce) + 16 (tag)
             const MAX_DECODED = MAX_SECRET_VALUE_LEN + 32 + 12 + 16;
             var decoded_buf: [MAX_DECODED]u8 = undefined;
+            defer std.crypto.secureZero(u8, &decoded_buf);
             const b64 = std.base64.standard;
             const decoded_len = b64.Decoder.calcSizeForSlice(payload) catch
                 return error.EsecretBase64Invalid;
@@ -173,22 +174,24 @@ pub const ProtocolHandler = struct {
             const tag = ct_and_tag[ct_and_tag.len - Aes256Gcm.tag_length ..][0..Aes256Gcm.tag_length].*;
 
             // ECDH: shared_secret = X25519(enc_private, ephemeral_pub)
-            const shared = X25519.scalarmult(self.enc_private, ephemeral_pub) catch
+            var shared: [32]u8 = X25519.scalarmult(self.enc_private, ephemeral_pub) catch
                 return error.EsecretEcdhFailed;
+            defer std.crypto.secureZero(u8, &shared);
 
             // HKDF-SHA256: derive a 32-byte AES-256 key from the shared secret.
             const derived_key = HkdfSha256.extract("", &shared);
             var aes_key: [32]u8 = undefined;
+            defer std.crypto.secureZero(u8, &aes_key);
             HkdfSha256.expand(&aes_key, HKDF_INFO, derived_key);
 
             // AES-256-GCM decrypt.
             var plaintext_buf: [MAX_SECRET_VALUE_LEN]u8 = undefined;
+            defer std.crypto.secureZero(u8, &plaintext_buf);
             if (ct.len > plaintext_buf.len) return error.EsecretPayloadTooLong;
             Aes256Gcm.decrypt(plaintext_buf[0..ct.len], ct, tag, "", nonce, aes_key) catch
                 return error.EsecretDecryptFailed;
             const plaintext = plaintext_buf[0..ct.len];
 
-            std.crypto.secureZero(u8, &aes_key);
             try self.vault.store(key, plaintext);
         } else if (std.mem.eql(u8, verb, "SECRET")) {
             // ── Cleartext path (simulation / CI) ─────────────────────────

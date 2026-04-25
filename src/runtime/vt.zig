@@ -129,21 +129,27 @@ pub const VerifiableTerminal = struct {
                         const rac = pin.rowAndCell();
                         const cell = rac.cell;
 
-                        // A. Codepoint (Serialized as UTF-8, null-padded to 4 bytes)
-                        var cp_buf = [_]u8{0} ** 4;
+                        // A. Codepoint(s) — 4 bytes per codepoint, null-padded UTF-8.
+                        // For grapheme clusters every codepoint in the cluster is
+                        // hashed sequentially; hashing only the first would produce
+                        // identical digests for cells that share a leading codepoint
+                        // but differ in combining characters or skin-tone modifiers.
                         if (cell.hasGrapheme()) {
-                            // Pull from the page's grapheme storage.
                             const page = &pin.node.data;
                             if (page.lookupGrapheme(cell)) |cps| {
-                                // Take the primary (first) codepoint of the grapheme cluster.
-                                const len = std.unicode.utf8Encode(cps[0], &cp_buf) catch 0;
-                                _ = len;
+                                for (cps) |cp| {
+                                    var cp_buf = [_]u8{0} ** 4;
+                                    _ = std.unicode.utf8Encode(cp, &cp_buf) catch 0;
+                                    hasher.update(&cp_buf);
+                                }
+                            } else {
+                                hasher.update(&[_]u8{0} ** 4);
                             }
                         } else {
-                            const len = std.unicode.utf8Encode(cell.codepoint(), &cp_buf) catch 0;
-                            _ = len;
+                            var cp_buf = [_]u8{0} ** 4;
+                            _ = std.unicode.utf8Encode(cell.codepoint(), &cp_buf) catch 0;
+                            hasher.update(&cp_buf);
                         }
-                        hasher.update(&cp_buf);
 
                         // B. Colors and Attributes
                         const page = &pin.node.data;

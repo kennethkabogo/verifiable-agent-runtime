@@ -23,6 +23,7 @@ pub const ExecRecord = struct {
     seq: u64,
 
     pub fn deinit(self: ExecRecord, allocator: std.mem.Allocator) void {
+        std.crypto.secureZero(u8, self.cmd);
         allocator.free(self.cmd);
     }
 };
@@ -243,7 +244,7 @@ pub const SecureLogger = struct {
         // bundle is successfully constructed.  If any allocation below fails,
         // self.sequence and self.prev_stream_hash remain unchanged and the
         // caller can retry without creating a gap in the continuity chain.
-        const next_seq = self.sequence + 1;
+        const next_seq = try std.math.add(u64, self.sequence, 1);
         const prev_hash = self.prev_stream_hash;
         const state_digest = self.vt.digestState();
         const sig = try self.signEvidence(prev_hash, self.stream_hash, state_digest, next_seq);
@@ -279,7 +280,7 @@ pub const SecureLogger = struct {
         // Same commit-last ordering as getEvidenceBundle: build the complete
         // JSON string before touching any persistent state so that an OOM
         // error leaves the continuity chain intact for a subsequent call.
-        const next_seq = self.sequence + 1;
+        const next_seq = try std.math.add(u64, self.sequence, 1);
         const prev_hash = self.prev_stream_hash;
         const state_digest = self.vt.digestState();
         const sig = try self.signEvidence(prev_hash, self.stream_hash, state_digest, next_seq);

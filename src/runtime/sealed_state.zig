@@ -134,6 +134,7 @@ pub const CapturedState = struct {
         }
         self.allocator.free(self.vault_entries);
         for (self.exec_entries) |e| {
+            std.crypto.secureZero(u8, e.cmd);
             self.allocator.free(e.cmd);
         }
         self.allocator.free(self.exec_entries);
@@ -196,7 +197,10 @@ pub fn capture(
         break :blk buf;
     };
     errdefer {
-        for (exec_entries) |e| allocator.free(e.cmd);
+        for (exec_entries) |e| {
+            std.crypto.secureZero(u8, e.cmd);
+            allocator.free(e.cmd);
+        }
         allocator.free(exec_entries);
     }
 
@@ -207,15 +211,32 @@ pub fn capture(
 
         const n = vault.secrets.count();
         const buf = try allocator.alloc(CapturedState.VaultEntry, n);
-        errdefer allocator.free(buf);
+        var init_count: usize = 0;
+        // On error, wipe and free every fully-initialized entry so secret
+        // material never lingers in the allocator's free list.  A plain
+        // `errdefer allocator.free(buf)` would only free the VaultEntry
+        // array itself, silently leaking the key and value strings inside
+        // each already-populated slot.
+        errdefer {
+            for (buf[0..init_count]) |e| {
+                std.crypto.secureZero(u8, @constCast(e.key));
+                std.crypto.secureZero(u8, @constCast(e.value));
+                allocator.free(e.key);
+                allocator.free(e.value);
+            }
+            allocator.free(buf);
+        }
 
         var it = vault.secrets.iterator();
-        var i: usize = 0;
-        while (it.next()) |kv| : (i += 1) {
+        while (it.next()) |kv| {
             const k = try allocator.dupe(u8, kv.key_ptr.*);
-            errdefer allocator.free(k);
+            errdefer {
+                std.crypto.secureZero(u8, k);
+                allocator.free(k);
+            }
             const v = try allocator.dupe(u8, kv.value_ptr.*);
-            buf[i] = .{ .key = k, .value = v };
+            buf[init_count] = .{ .key = k, .value = v };
+            init_count += 1;
         }
         break :blk buf;
     };
@@ -250,9 +271,15 @@ pub fn restoreVault(state: *const CapturedState, vault: *SecureVault) !void {
 
     for (state.vault_entries) |e| {
         const k = try vault.allocator.dupe(u8, e.key);
-        errdefer vault.allocator.free(k);
+        errdefer {
+            std.crypto.secureZero(u8, k);
+            vault.allocator.free(k);
+        }
         const v = try vault.allocator.dupe(u8, e.value);
-        errdefer vault.allocator.free(v);
+        errdefer {
+            std.crypto.secureZero(u8, v);
+            vault.allocator.free(v);
+        }
         try vault.secrets.put(k, v);
     }
 }
@@ -469,10 +496,28 @@ const MOCK_WRAP_KEY = [32]u8{
 /// Override with the VAR_KMS_PROXY_PORT environment variable.
 const KMS_PROXY_PORT_DEFAULT: u16 = 8443;
 
+/// Memoized NSM availability — probed once on first call, cached for the
+/// lifetime of the process.  Calling openFileAbsolute on every seal/unseal
+/// operation creates a TOCTOU window: if the NSM device is transiently
+/// unavailable exactly during a seal or unseal call, the code falls back to
+/// simulation mode (MOCK_WRAP_KEY XOR), reducing DEK protection from
+/// KMS PCR-bound policy to a publicly-known constant.  Caching the result
+/// ensures that the production/simulation decision is made once at startup
+/// and never silently downgraded mid-session.
+var g_nsm_available: ?bool = null;
+var g_nsm_mutex: std.Thread.Mutex = .{};
+
 fn hasNsmDevice() bool {
-    const f = std.fs.openFileAbsolute("/dev/nsm", .{ .mode = .read_write }) catch return false;
-    f.close();
-    return true;
+    g_nsm_mutex.lock();
+    defer g_nsm_mutex.unlock();
+    if (g_nsm_available) |cached| return cached;
+    const result = blk: {
+        const f = std.fs.openFileAbsolute("/dev/nsm", .{ .mode = .read_write }) catch break :blk false;
+        f.close();
+        break :blk true;
+    };
+    g_nsm_available = result;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
