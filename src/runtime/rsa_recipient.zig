@@ -119,6 +119,7 @@ pub fn unwrapDek(key_pair: *const RsaKeyPair, ciphertext: []const u8) ![32]u8 {
     if (out_len != 32) return error.UnexpectedDekLength;
 
     var dek: [32]u8 = undefined;
+    defer std.crypto.secureZero(u8, &dek);
     if (c.EVP_PKEY_decrypt(ctx, &dek, &out_len, ciphertext.ptr, ciphertext.len) <= 0)
         return error.EvpDecryptFailed;
     if (out_len != 32) return error.UnexpectedDekLength;
