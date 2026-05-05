@@ -34,6 +34,32 @@ It is not an SDK you ask developers to adopt. It is a **sidecar** that wraps wha
 
 ---
 
+## Competitive landscape
+
+| | VAR (Sovereign Agent Stack) | Eigen Cloud | Natural AI | Marlin / iExec |
+|---|---|---|---|---|
+| **Core primitive** | Hardware TEE + attestation-gated escrow | TEE-backed restaked compute | Agentic payments API | TEE / FHE compute marketplace |
+| **Ecosystem tie** | Chain-agnostic | Ethereum / EigenLayer restaking | Chain-agnostic | Ethereum |
+| **Hardware measurement** | Yes — PCR0/1/2 pinned to binary | Yes — PCR-based | No | Partial |
+| **Agentic payments** | Yes — Finfiti attestation-gated escrow | No | Yes — API-key delegation | No |
+| **Emerging-market rails** | Yes — MoMo, M-Pesa, SEPA | No | No | No |
+| **API-key leak kills funds?** | No — enclave refuses to sign if PCR mismatch | No | **Yes** | No |
+| **VARA regulatory pathway** | Yes (milestone) | No | No | No |
+
+### Eigen Cloud
+
+EigenLayer's verifiable compute product uses TEEs to provide attested execution backed by restaked ETH as a slashing bond. They validate the market thesis — demand exists for hardware-rooted trust — but are general-purpose cloud compute rather than an agent-native runtime, and their settlement is Ethereum-coupled. Operators and developers who need attested compute *without* EVM infrastructure, or who need built-in payment settlement, are underserved by Eigen Cloud.
+
+**Our position:** Eigen Cloud proves the buy side; VAR serves the slice they can't reach.
+
+### Natural AI
+
+Natural AI is building an agentic payments API — conversational commerce where agents can pay for goods and services through software-defined delegation. The attack surface is the API key: if it leaks, the funds are accessible to anyone holding it. There is no hardware boundary and no binary measurement.
+
+**Our position:** VAR is the secure version of Natural AI. An agent running inside the Sovereign Agent Stack cannot be tricked into signing a transaction by a compromised host — the enclave checks the PCR measurements before releasing the signing key. Natural AI optimises for developer convenience; VAR optimises for adversarial environments where the host itself may be malicious.
+
+---
+
 ## The three pillars
 
 ### 1. TEE / Silicon Isolation
