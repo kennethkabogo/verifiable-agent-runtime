@@ -166,9 +166,9 @@ fn scrubEnvironment() void {
                 str.len > name.len and
                 str[name.len] == '=')
             {
-                // Volatile writes prevent the compiler from optimising away
-                // the zero-fill — identical guarantee to vault.zig's secureZero.
-                std.crypto.secureZero(u8, str[name.len + 1 ..]);
+                // Wipe the full entry (name + '=' + value) so neither the
+                // secret value nor the variable name leaks via /proc/self/environ.
+                std.crypto.secureZero(u8, str);
                 std.log.debug("[sandbox] Scrubbed env: {s}", .{name});
                 break;
             }
@@ -196,8 +196,12 @@ const FS_MAKE_SOCK: u64   = 1 << 9;
 const FS_MAKE_FIFO: u64   = 1 << 10;
 const FS_MAKE_BLOCK: u64  = 1 << 11;
 const FS_MAKE_SYM: u64    = 1 << 12;
+// ABI v2 (kernel 5.19+): cross-directory rename/link.
+const FS_REFER: u64       = 1 << 13;
+// ABI v3 (kernel 6.2+): file truncation.
+const FS_TRUNCATE: u64    = 1 << 14;
 
-const FS_ALL: u64 =
+const FS_ALL_V1: u64 =
     FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_READ_DIR |
     FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR |
     FS_MAKE_REG | FS_MAKE_SOCK | FS_MAKE_FIFO | FS_MAKE_BLOCK | FS_MAKE_SYM;
@@ -220,10 +224,16 @@ fn installLandlock() !void {
         // cannot use Landlock on this kernel.
         return error.LandlockUnsupported;
     }
-    // abi_rc is the positive ABI version — Landlock is available.
-    // Proceed to create the deny-all ruleset.
+    // abi_rc is the positive ABI version — build the access mask for the
+    // highest ABI level the kernel supports so all rights are covered.
+    // Rights absent from handled_access_fs are implicitly *allowed*, so we
+    // must include every right the running kernel knows about.
+    const abi_version: usize = abi_rc;
+    var fs_rights: u64 = FS_ALL_V1;
+    if (abi_version >= 2) fs_rights |= FS_REFER;
+    if (abi_version >= 3) fs_rights |= FS_TRUNCATE;
 
-    const attr = LandlockRulesetAttr{ .handled_access_fs = FS_ALL };
+    const attr = LandlockRulesetAttr{ .handled_access_fs = fs_rights };
     const fd_rc = linux.syscall3(
         .landlock_create_ruleset,
         @intFromPtr(&attr),

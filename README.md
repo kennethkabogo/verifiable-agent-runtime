@@ -164,6 +164,65 @@ flowchart TD
 
 ---
 
+## Real-world applications
+
+### Case study: KelpDAO ($290M, April 2026)
+
+On 18 April 2026, Lazarus Group exploited a missing hardware boundary in KelpDAO's verifier infrastructure. The attack vector was precise: malicious binaries were swapped onto the RPC nodes feeding LayerZero's Decentralised Verifier Network. The compromised nodes showed truth to all monitors and lies to the verifier — an undetectable substitution because there was no hardware measurement binding the running binary to its expected identity.
+
+```
+Without VAR                          With VAR
+─────────────────────────────────    ─────────────────────────────────
+Binary swap on RPC node              Binary swap changes PCR0
+      ↓                                    ↓
+Monitors see valid output            PCR0 no longer matches KMS policy
+      ↓                                    ↓
+Verifier sees falsified data         kms:Decrypt returns AccessDenied
+      ↓                                    ↓
+$290M settles                        Nothing settles
+No recourse                          Attack fails at step one
+```
+
+The root cause was not a smart contract bug or a key compromise — it was the absence of a hardware-enforced execution boundary. PCR0 is the SHA-384 measurement of the enclave image. Any modification to the running binary changes this value, invalidates the KMS attestation policy, and closes the settlement gate before a single token moves.
+
+---
+
+### First application: Lake Victoria
+
+14,000 fish farmers on Lake Victoria take 24–72 hour fuel loans daily. MoMo and Airtel Pay digitised the payment rails a decade ago — the infrastructure exists. What does not exist is a trust layer that lets a lender extend credit to an autonomous disbursement agent without a human approving every transaction.
+
+**How VAR + Finfiti closes this:**
+
+```
+Lender policy loaded into VAR vault (encrypted, hardware-bound)
+        ↓
+Finfiti agent evaluates loan request against policy inside enclave
+        ↓
+VAR attests: this decision was made by the correct binary, within policy
+        ↓
+Finfiti disburses UGX directly to farmer's MoMo wallet
+        ↓
+Attestation receipt written to evidence chain
+        ↓
+Repayment triggers atomically on receipt of funds
+```
+
+No human in the loop. No possibility of the agent exceeding its policy. Full cryptographic audit trail the lender owns and can verify independently.
+
+**Unit economics (single corridor):**
+
+| Metric | Value |
+| :--- | :--- |
+| Average loan size | $50 |
+| Protocol fee | 2% |
+| Net revenue per farmer per day | ~$1 |
+| Lake Victoria corridor ARR (at scale) | $5.5M |
+| AED → KES institutional corridor | $5B+ annually |
+
+The fish farmer workflow is the smallest, most constrained version of the same trust problem that fund managers, DePIN node operators, and AI infrastructure companies face at scale. The unit economics are proven at the micro level before the institutional corridors open.
+
+---
+
 ## Threat model
 
 **What VAR protects against:**

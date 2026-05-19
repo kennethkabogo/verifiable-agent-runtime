@@ -6,6 +6,16 @@ const VsockServer = @import("runtime/vsock.zig").VsockServer;
 const sealed_state = @import("runtime/sealed_state.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+fn fmtHex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const result = try allocator.alloc(u8, bytes.len * 2);
+    const chars = "0123456789abcdef";
+    for (bytes, 0..) |b, i| {
+        result[i * 2]     = chars[b >> 4];
+        result[i * 2 + 1] = chars[b & 0x0f];
+    }
+    return result;
+}
+
 /// Line-based agent protocol (all messages newline-terminated):
 ///
 ///   Enclave → Agent   BUNDLE_HEADER:magic=VARB:version=01:session=<hex>:nonce=<hex>:QUOTE:...
@@ -122,9 +132,7 @@ pub fn main() !void {
 
         // Build the RESUMED confirmation before sending the header (we commit
         // to the restored session_id now to keep the message consistent).
-        const sid_hex = try std.fmt.allocPrint(
-            allocator, "{x}", .{&captured.session_id},
-        );
+        const sid_hex = try fmtHex(allocator, &captured.session_id);
         defer allocator.free(sid_hex);
         pending_resumed_msg = try std.fmt.allocPrint(
             allocator, "RESUMED:session={s}:seq={d}\n", .{ sid_hex, captured.sequence },
@@ -232,7 +240,7 @@ pub fn main() !void {
             const blob = try sealed_state.seal(allocator, &captured);
             defer allocator.free(blob);
 
-            const hex_blob = try std.fmt.allocPrint(allocator, "{x}", .{blob});
+            const hex_blob = try fmtHex(allocator, blob);
             defer allocator.free(hex_blob);
 
             const response = try std.fmt.allocPrint(allocator, "SEALED_STATE:{s}\n", .{hex_blob});
