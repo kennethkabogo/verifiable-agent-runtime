@@ -92,13 +92,27 @@ pub const GatewayServer = struct {
         };
     }
 
-    /// Blocks forever, accepting connections and spawning one thread per request.
+    /// Blocks forever, accepting connections and dispatching them to a bounded
+    /// thread pool.  Bounded concurrency (default 64 workers) prevents
+    /// unbounded thread creation under load — excess connections queue in the
+    /// pool and are served as workers become free.  Override with the
+    /// VAR_WORKER_THREADS environment variable (must be a positive integer).
     pub fn serve(self: *GatewayServer) !void {
         const addr = try net.Address.parseIp(self.config.host, self.config.port);
         var server = try addr.listen(.{ .reuse_address = true });
         defer server.deinit();
 
-        std.log.info("[VAR-gateway] listening on {s}:{d}", .{ self.config.host, self.config.port });
+        const n_workers: u32 = blk: {
+            const s = std.posix.getenv("VAR_WORKER_THREADS") orelse break :blk 64;
+            break :blk std.fmt.parseInt(u32, s, 10) catch 64;
+        };
+        var pool: std.Thread.Pool = undefined;
+        try pool.init(.{ .allocator = self.allocator, .n_jobs = n_workers });
+        defer pool.deinit();
+
+        std.log.info("[VAR-gateway] listening on {s}:{d} (worker threads: {d})", .{
+            self.config.host, self.config.port, n_workers,
+        });
 
         while (true) {
             const conn = server.accept() catch |err| {
@@ -106,12 +120,11 @@ pub const GatewayServer = struct {
                 std.log.err("[VAR-gateway] accept: {}", .{err});
                 continue;
             };
-            const thread = std.Thread.spawn(.{}, handleConnection, .{ self, conn }) catch |err| {
-                std.log.err("[VAR-gateway] thread spawn: {}", .{err});
+            pool.spawn(handleConnection, .{ self, conn }) catch |err| {
+                std.log.err("[VAR-gateway] pool spawn: {}", .{err});
                 conn.stream.close();
                 continue;
             };
-            thread.detach();
         }
     }
 };

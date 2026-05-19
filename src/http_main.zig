@@ -95,9 +95,7 @@ pub fn main() !void {
             protocol.quote.deinit(allocator);
             protocol.quote = new_quote;
 
-            std.log.info("[VAR-gateway] Resumed session {} at seq {d}.", .{
-                std.fmt.fmtSliceHexLower(&captured.session_id), captured.sequence,
-            });
+            std.log.info("[VAR-gateway] Resumed session (seq {d}).", .{captured.sequence});
         }
     }
 
