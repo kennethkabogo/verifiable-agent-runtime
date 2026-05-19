@@ -113,7 +113,7 @@ def _verify_nitro_cose(doc_bytes: bytes) -> "tuple[bool, str, dict | None]":
     try:
         obj = _cbor2.loads(doc_bytes)
         cose_arr = obj.value if hasattr(obj, "value") else obj
-        if not isinstance(cose_arr, list) or len(cose_arr) != 4:
+        if not isinstance(cose_arr, (list, tuple)) or len(cose_arr) != 4:
             return False, f"not a 4-element COSE_Sign1 (got {type(cose_arr).__name__})", None
         protected_bstr, _unprotected, payload_bstr, sig_bstr = cose_arr
     except Exception as exc:
