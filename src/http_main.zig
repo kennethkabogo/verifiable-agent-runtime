@@ -65,7 +65,7 @@ pub fn main() !void {
     if (std.posix.getenv("VAR_RESUME_STATE")) |hex_state| {
         if (hex_state.len > 0 and hex_state.len % 2 == 0) {
             const blob = try allocator.alloc(u8, hex_state.len / 2);
-            defer allocator.free(blob);
+            defer { std.crypto.secureZero(u8, blob); allocator.free(blob); }
             _ = try std.fmt.hexToBytes(blob, hex_state);
 
             var captured = sealed_state.unseal(allocator, blob) catch |err| {
@@ -87,15 +87,16 @@ pub fn main() !void {
             // session_id that was generated during init() above).
             // The keypair stays fresh (per-segment model); bootstrap_nonce is
             // NOT recomputed — it is preserved from the sealed state.
-            protocol.quote.deinit(allocator);
-            protocol.quote = try AttestationQuote.generate(
+            const new_quote = try AttestationQuote.generate(
                 allocator,
                 protocol.keypair.public_key.toBytes(),
                 captured.session_id,
             );
+            protocol.quote.deinit(allocator);
+            protocol.quote = new_quote;
 
-            std.log.info("[VAR-gateway] Resumed session {x} at seq {d}.", .{
-                &captured.session_id, captured.sequence,
+            std.log.info("[VAR-gateway] Resumed session {} at seq {d}.", .{
+                std.fmt.fmtSliceHexLower(&captured.session_id), captured.sequence,
             });
         }
     }

@@ -429,10 +429,12 @@ fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedReques
     );
     defer server.allocator.free(body);
 
-    // Send the response before signalling shutdown — the current connection's
-    // handler runs in a detached thread, so the response is flushed before the
-    // main serve() loop exits.
+    // Send the response and flush before signalling shutdown.
     try writeResponse(stream, 200, body);
+    // Half-close the send side so the TCP stack flushes the response buffer to
+    // the client before SIGTERM terminates the process.  Without this, the kernel
+    // may discard buffered data when the socket is closed during process teardown.
+    std.posix.shutdown(stream.handle, .send) catch {};
     std.log.info("[VAR-gateway] Hibernating ({d}-byte sealed blob). Sending SIGTERM.", .{blob.len});
 
     // Set the shutdown flag and interrupt the blocking accept() in serve().

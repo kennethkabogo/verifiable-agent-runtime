@@ -254,12 +254,38 @@ pub fn capture(
 }
 
 /// Restore vault from a previously captured state.
-/// All existing vault entries are wiped and replaced.
+/// All existing vault entries are wiped and replaced atomically: new entries
+/// are fully allocated before the old entries are touched, so the vault is
+/// never left in a partially-restored state on allocation failure.
 pub fn restoreVault(state: *const CapturedState, vault: *SecureVault) !void {
+    // Pre-allocate all new key/value copies outside the lock.
+    // On any allocation failure the vault is untouched.
+    const new_entries = try vault.allocator.alloc(CapturedState.VaultEntry, state.vault_entries.len);
+    var init_count: usize = 0;
+    errdefer {
+        for (new_entries[0..init_count]) |e| {
+            std.crypto.secureZero(u8, @constCast(e.key));
+            std.crypto.secureZero(u8, @constCast(e.value));
+            vault.allocator.free(e.key);
+            vault.allocator.free(e.value);
+        }
+        vault.allocator.free(new_entries);
+    }
+    for (state.vault_entries, 0..) |e, i| {
+        const k = try vault.allocator.dupe(u8, e.key);
+        errdefer { std.crypto.secureZero(u8, k); vault.allocator.free(k); }
+        const v = try vault.allocator.dupe(u8, e.value);
+        new_entries[i] = .{ .key = k, .value = v };
+        init_count = i + 1;
+    }
+
     vault.mutex.lock();
     defer vault.mutex.unlock();
 
-    // Wipe and free all existing entries before repopulating.
+    // Ensure capacity so the puts below cannot fail (making the swap atomic).
+    try vault.secrets.ensureTotalCapacity(@intCast(state.vault_entries.len));
+
+    // Wipe and free all existing entries.
     var it = vault.secrets.iterator();
     while (it.next()) |entry| {
         std.crypto.secureZero(u8, @constCast(entry.key_ptr.*));
@@ -269,19 +295,10 @@ pub fn restoreVault(state: *const CapturedState, vault: *SecureVault) !void {
     }
     vault.secrets.clearRetainingCapacity();
 
-    for (state.vault_entries) |e| {
-        const k = try vault.allocator.dupe(u8, e.key);
-        errdefer {
-            std.crypto.secureZero(u8, k);
-            vault.allocator.free(k);
-        }
-        const v = try vault.allocator.dupe(u8, e.value);
-        errdefer {
-            std.crypto.secureZero(u8, v);
-            vault.allocator.free(v);
-        }
-        try vault.secrets.put(k, v);
+    for (new_entries) |e| {
+        vault.secrets.putAssumeCapacity(e.key, e.value);
     }
+    vault.allocator.free(new_entries);
 }
 
 /// Restore logger hash-chain state from a previously captured state.
@@ -409,6 +426,8 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
     var vault_init: usize = 0;
     errdefer {
         for (vault_entries[0..vault_init]) |e| {
+            std.crypto.secureZero(u8, @constCast(e.key));
+            std.crypto.secureZero(u8, @constCast(e.value));
             allocator.free(e.key);
             allocator.free(e.value);
         }
@@ -423,10 +442,10 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         const key = try allocator.dupe(u8, buf[pos..][0..key_len]);
         pos += key_len;
 
-        if (pos + 2 > buf.len) { allocator.free(key); return error.TruncatedState; }
+        if (pos + 2 > buf.len) { std.crypto.secureZero(u8, key); allocator.free(key); return error.TruncatedState; }
         const val_len = std.mem.readInt(u16, buf[pos..][0..2], .little);
         pos += 2;
-        if (pos + val_len > buf.len) { allocator.free(key); return error.TruncatedState; }
+        if (pos + val_len > buf.len) { std.crypto.secureZero(u8, key); allocator.free(key); return error.TruncatedState; }
         const value = try allocator.dupe(u8, buf[pos..][0..val_len]);
         pos += val_len;
 
@@ -616,7 +635,7 @@ fn kmsEncrypt(
     const enc = std.base64.standard.Encoder;
     const b64_pt_len = enc.calcSize(plaintext.len);
     const b64_pt_buf = try allocator.alloc(u8, b64_pt_len);
-    defer allocator.free(b64_pt_buf);
+    defer { std.crypto.secureZero(u8, b64_pt_buf); allocator.free(b64_pt_buf); }
     const b64_pt = enc.encode(b64_pt_buf, plaintext);
 
     const req_body = try std.fmt.allocPrint(
@@ -624,7 +643,7 @@ fn kmsEncrypt(
         "{{\"KeyId\":\"{s}\",\"Plaintext\":\"{s}\"}}",
         .{ key_arn, b64_pt },
     );
-    defer allocator.free(req_body);
+    defer { std.crypto.secureZero(u8, req_body); allocator.free(req_body); }
 
     const resp_body = try kmsHttpPost(allocator, proxy_port, "TrentService.Encrypt", req_body);
     defer allocator.free(resp_body);
@@ -638,40 +657,6 @@ fn kmsEncrypt(
     const ct = try allocator.alloc(u8, ct_len);
     try dec.decode(ct, b64_ct);
     return ct;
-}
-
-/// Calls kms:Decrypt and returns the 32-byte plaintext DEK.
-fn kmsDecrypt(
-    allocator: std.mem.Allocator,
-    proxy_port: u16,
-    ciphertext_blob: []const u8,
-) ![32]u8 {
-    const enc = std.base64.standard.Encoder;
-    const b64_ct_len = enc.calcSize(ciphertext_blob.len);
-    const b64_ct_buf = try allocator.alloc(u8, b64_ct_len);
-    defer allocator.free(b64_ct_buf);
-    const b64_ct = enc.encode(b64_ct_buf, ciphertext_blob);
-
-    const req_body = try std.fmt.allocPrint(
-        allocator,
-        "{{\"CiphertextBlob\":\"{s}\"}}",
-        .{b64_ct},
-    );
-    defer allocator.free(req_body);
-
-    const resp_body = try kmsHttpPost(allocator, proxy_port, "TrentService.Decrypt", req_body);
-    defer allocator.free(resp_body);
-
-    const b64_pt = (try jsonExtractString(allocator, resp_body, "Plaintext")) orelse
-        return error.KmsNoPlaintext;
-    defer allocator.free(b64_pt);
-
-    const dec = std.base64.standard.Decoder;
-    const pt_len = try dec.calcSizeForSlice(b64_pt);
-    if (pt_len != 32) return error.KmsUnexpectedPlaintextLength;
-    var dek: [32]u8 = undefined;
-    try dec.decode(&dek, b64_pt);
-    return dek;
 }
 
 /// Returns the KMS proxy port from the environment, or the default.
