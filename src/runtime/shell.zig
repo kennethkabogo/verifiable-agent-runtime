@@ -60,6 +60,10 @@ pub const SecureLogger = struct {
     /// Verifiers iterate the full list to confirm that no command was hidden
     /// by a later benign one (the "cover-up" attack against last_exec-only designs).
     executions: std.ArrayListUnmanaged(ExecRecord) = .{},
+    /// Raw Ed25519 signatures from every evidence packet, in emission order.
+    /// Used to compute TerminalDigest = SHA-256(sig[0] ‖ sig[1] ‖ … ‖ sig[N-1])
+    /// for the Bundle Seal and Settlement Block.
+    sig_log: std.ArrayListUnmanaged([64]u8) = .{},
 
     /// init anchors the hash chain to the session.  The caller passes the
     /// pre-computed bootstrap_nonce (SHA-256(attestation_doc || session_id))
@@ -88,6 +92,7 @@ pub const SecureLogger = struct {
         self.vt.deinit();
         for (self.executions.items) |rec| rec.deinit(self.allocator);
         self.executions.deinit(self.allocator);
+        self.sig_log.deinit(self.allocator);
     }
 
     fn hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -264,6 +269,10 @@ pub const SecureLogger = struct {
             .{ prev_h, stream_h, state_h, sig_h, next_seq },
         );
 
+        // Record signature before committing — if this fails (OOM) neither
+        // sequence nor sig_log will have advanced and the caller can retry.
+        try self.sig_log.append(self.allocator, sig_bytes);
+
         // Commit state only after the bundle is fully built.
         self.sequence = next_seq;
         self.prev_stream_hash = self.stream_hash;
@@ -343,6 +352,10 @@ pub const SecureLogger = struct {
             \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d},"executions":{s}}}
         , .{ prev_h, stream_h, state_h, sig_h, next_seq, execs_buf.items });
 
+        // Record signature before committing — if this fails (OOM) neither
+        // sequence nor sig_log will have advanced and the caller can retry.
+        try self.sig_log.append(self.allocator, sig_bytes);
+
         // Commit state only after the bundle is fully built.
         self.sequence = next_seq;
         self.prev_stream_hash = self.stream_hash;
@@ -350,6 +363,118 @@ pub const SecureLogger = struct {
         return result;
     }
 };
+
+/// Parameters for a settlement authorisation (spec §6).
+pub const SettlementParams = struct {
+    /// UUID v4 identifying the escrow contract.
+    escrow_id: [16]u8,
+    /// Decimal amount string (e.g. "100.00"). Must be ≤ 31 bytes.
+    amount: []const u8,
+    /// ISO 4217 or "USDT", space-padded to 8 bytes.
+    currency: [8]u8,
+    /// Opaque recipient identifier, zero-padded to 64 bytes.
+    recipient: [64]u8,
+};
+
+/// SHA-256(sig[0] ‖ sig[1] ‖ … ‖ sig[N-1]).
+/// Caller must hold self.mutex.
+fn computeTerminalDigestLocked(self: *const SecureLogger) [32]u8 {
+    var hasher = Sha256.init(.{});
+    for (self.sig_log.items) |sig| hasher.update(&sig);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+/// Emits a Bundle Seal line (spec §7).
+///
+///   BUNDLE_SEAL:magic=APXZ:terminal_digest=<hex>:bundle_hash=<hex>:seal_sig=<hex>
+///
+/// TerminalDigest = SHA-256(all packet signatures in order)
+/// BundleHash     = SHA-256("VARB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest)
+/// SealSig        = Ed25519(session_keypair, BundleHash)
+pub fn sealBundle(self: *SecureLogger, allocator: std.mem.Allocator) ![]u8 {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    const terminal_digest = self.computeTerminalDigestLocked();
+    const signing_pub = self.keypair.public_key.toBytes();
+
+    var bh_hasher = Sha256.init(.{});
+    bh_hasher.update("VARB");
+    bh_hasher.update(&self.session_id);
+    bh_hasher.update(&self.bootstrap_nonce);
+    bh_hasher.update(&signing_pub);
+    bh_hasher.update(&terminal_digest);
+    var bundle_hash: [32]u8 = undefined;
+    bh_hasher.final(&bundle_hash);
+
+    const seal_sig = try self.keypair.sign(&bundle_hash, null);
+    const seal_sig_bytes = seal_sig.toBytes();
+
+    const td_h = try hex(allocator, &terminal_digest);
+    defer allocator.free(td_h);
+    const bh_h = try hex(allocator, &bundle_hash);
+    defer allocator.free(bh_h);
+    const ss_h = try hex(allocator, &seal_sig_bytes);
+    defer allocator.free(ss_h);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "BUNDLE_SEAL:magic=APXZ:terminal_digest={s}:bundle_hash={s}:seal_sig={s}",
+        .{ td_h, bh_h, ss_h },
+    );
+}
+
+/// Emits a Settlement Block line (spec §6).
+///
+///   SETTLEMENT:magic=APXT:escrow_id=<hex>:amount=<str>:currency=<str>:
+///              recipient=<hex>:condition=01:terminal_digest=<hex>:sig=<hex>
+///
+/// SettlementSig = Ed25519(session_keypair, EscrowID ‖ Amount[32] ‖ Currency[8] ‖ TerminalDigest)
+pub fn settleBundle(
+    self: *SecureLogger,
+    allocator: std.mem.Allocator,
+    params: SettlementParams,
+) ![]u8 {
+    if (params.amount.len > 31) return error.AmountTooLong;
+
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    const terminal_digest = self.computeTerminalDigestLocked();
+
+    // Fixed-width amount field: zero-padded to 32 bytes (spec §6).
+    var amount_field: [32]u8 = [_]u8{0} ** 32;
+    @memcpy(amount_field[0..params.amount.len], params.amount);
+
+    // Signature scope: EscrowID(16) ‖ Amount(32) ‖ Currency(8) ‖ TerminalDigest(32) = 88 bytes
+    var sig_msg: [88]u8 = undefined;
+    @memcpy(sig_msg[0..16], &params.escrow_id);
+    @memcpy(sig_msg[16..48], &amount_field);
+    @memcpy(sig_msg[48..56], &params.currency);
+    @memcpy(sig_msg[56..88], &terminal_digest);
+
+    const settlement_sig = try self.keypair.sign(&sig_msg, null);
+    const settlement_sig_bytes = settlement_sig.toBytes();
+
+    const currency_str = std.mem.trimRight(u8, &params.currency, " \x00");
+
+    const eid_h = try hex(allocator, &params.escrow_id);
+    defer allocator.free(eid_h);
+    const rec_h = try hex(allocator, &params.recipient);
+    defer allocator.free(rec_h);
+    const td_h = try hex(allocator, &terminal_digest);
+    defer allocator.free(td_h);
+    const ss_h = try hex(allocator, &settlement_sig_bytes);
+    defer allocator.free(ss_h);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "SETTLEMENT:magic=APXT:escrow_id={s}:amount={s}:currency={s}:recipient={s}:condition=01:terminal_digest={s}:sig={s}",
+        .{ eid_h, params.amount, currency_str, rec_h, td_h, ss_h },
+    );
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -406,4 +531,134 @@ test "executions: JSON bundle contains all records" {
     try std.testing.expect(std.mem.indexOf(u8, json, "/bin/echo world") != null);
     // The array field must be present.
     try std.testing.expect(std.mem.indexOf(u8, json, "\"executions\":[") != null);
+}
+
+test "sealBundle: terminal_digest is sha256 of accumulated packet signatures" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    // Emit two packets so sig_log has two entries.
+    const e1 = try logger.getEvidenceBundle();
+    allocator.free(e1);
+    const e2 = try logger.getEvidenceBundle();
+    allocator.free(e2);
+
+    try std.testing.expectEqual(@as(usize, 2), logger.sig_log.items.len);
+
+    // Recompute expected terminal digest independently.
+    var hasher = Sha256.init(.{});
+    for (logger.sig_log.items) |sig| hasher.update(&sig);
+    var expected: [32]u8 = undefined;
+    hasher.final(&expected);
+
+    const seal = try logger.sealBundle(allocator);
+    defer allocator.free(seal);
+
+    // Extract the terminal_digest field from the emitted line.
+    const td_prefix = "terminal_digest=";
+    const td_start = (std.mem.indexOf(u8, seal, td_prefix) orelse
+        return error.MissingTerminalDigest) + td_prefix.len;
+    const td_end = std.mem.indexOfScalarPos(u8, seal, td_start, ':') orelse seal.len;
+    const td_hex = seal[td_start..td_end];
+
+    var actual: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&actual, td_hex);
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "sealBundle: seal_sig verifies against bundle_hash with session public key" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const e1 = try logger.getEvidenceBundle();
+    allocator.free(e1);
+
+    const seal = try logger.sealBundle(allocator);
+    defer allocator.free(seal);
+
+    // Parse bundle_hash and seal_sig from the emitted line.
+    const bh_prefix = "bundle_hash=";
+    const bh_start = (std.mem.indexOf(u8, seal, bh_prefix) orelse
+        return error.MissingBundleHash) + bh_prefix.len;
+    const bh_end = std.mem.indexOfScalarPos(u8, seal, bh_start, ':') orelse seal.len;
+
+    const ss_prefix = "seal_sig=";
+    const ss_start = (std.mem.indexOf(u8, seal, ss_prefix) orelse
+        return error.MissingSealSig) + ss_prefix.len;
+
+    var bundle_hash: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bundle_hash, seal[bh_start..bh_end]);
+    var sig_bytes: [64]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&sig_bytes, seal[ss_start..]);
+
+    const sig = Ed25519.Signature.fromBytes(sig_bytes);
+    try sig.verify(&bundle_hash, kp.public_key);
+}
+
+test "settleBundle: settlement_sig verifies against escrow_id+amount+currency+terminal_digest" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const e1 = try logger.getEvidenceBundle();
+    allocator.free(e1);
+
+    var escrow_id: [16]u8 = undefined;
+    std.crypto.random.bytes(&escrow_id);
+    var currency: [8]u8 = [_]u8{' '} ** 8;
+    @memcpy(currency[0..4], "USDT");
+    const params = SettlementParams{
+        .escrow_id = escrow_id,
+        .amount = "100.00",
+        .currency = currency,
+        .recipient = [_]u8{0xAB} ** 64,
+    };
+
+    const line = try logger.settleBundle(allocator, params);
+    defer allocator.free(line);
+
+    // Confirm magic is present.
+    try std.testing.expect(std.mem.indexOf(u8, line, "magic=APXT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "condition=01") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "amount=100.00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "currency=USDT") != null);
+
+    // Re-derive terminal digest and reconstruct the signature scope.
+    const terminal_digest = logger.computeTerminalDigestLocked();
+    var amount_field: [32]u8 = [_]u8{0} ** 32;
+    @memcpy(amount_field[0..6], "100.00");
+    var sig_msg: [88]u8 = undefined;
+    @memcpy(sig_msg[0..16], &escrow_id);
+    @memcpy(sig_msg[16..48], &amount_field);
+    @memcpy(sig_msg[48..56], &currency);
+    @memcpy(sig_msg[56..88], &terminal_digest);
+
+    // Extract settlement sig from the line and verify it.
+    const ss_prefix = "sig=";
+    const ss_start = (std.mem.lastIndexOf(u8, line, ss_prefix) orelse
+        return error.MissingSig) + ss_prefix.len;
+    var sig_bytes: [64]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&sig_bytes, line[ss_start..]);
+    const sig = Ed25519.Signature.fromBytes(sig_bytes);
+    try sig.verify(&sig_msg, kp.public_key);
+}
+
+test "settleBundle: amount longer than 31 bytes returns AmountTooLong" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const params = SettlementParams{
+        .escrow_id = [_]u8{0} ** 16,
+        .amount = "1" ** 32,
+        .currency = [_]u8{' '} ** 8,
+        .recipient = [_]u8{0} ** 64,
+    };
+    try std.testing.expectError(error.AmountTooLong, logger.settleBundle(allocator, params));
 }
