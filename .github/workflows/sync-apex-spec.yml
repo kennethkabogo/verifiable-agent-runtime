@@ -1,0 +1,38 @@
+name: Sync APEX spec
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "spec/APEX.md"
+
+jobs:
+  sync:
+    name: Publish to apex-spec repo
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push spec to apex-spec
+        env:
+          APEX_REPO_TOKEN: ${{ secrets.APEX_REPO_TOKEN }}
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git clone "https://x-access-token:${APEX_REPO_TOKEN}@github.com/kennethkabogo/apex-spec.git" apex-spec-repo
+
+          cp spec/APEX.md apex-spec-repo/README.md
+          cp spec/_config.yml apex-spec-repo/_config.yml
+
+          cd apex-spec-repo
+          git add README.md _config.yml
+
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+
+          COMMIT=$(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD)
+          git commit -m "spec: sync APEX.md from verifiable-agent-runtime@${COMMIT}"
+          git push
