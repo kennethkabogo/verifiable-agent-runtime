@@ -1,0 +1,4 @@
+theme: jekyll-theme-minimal
+title: "APEX — Attested Proof of EXecution"
+description: "Open specification for cryptographically verifiable agent execution bundles. v2.0.0"
+show_downloads: false
