@@ -15,6 +15,9 @@
 ///   GET  /attestation                                        → 200 {"pcr0":"…","pcr1":"…","pcr2":"…","public_key":"…","doc":"…"}
 ///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
 ///   GET  /verify-and-attest                                  → 200 {"decision":{…},"evidence":{…},"attestation":{…}}
+///   GET  /seal                                               → 200 {"bundle_seal":"BUNDLE_SEAL:…"}
+///   POST /settle         {"escrow_id":"<32hex>","amount":"…","currency":"…","recipient":"<128hex>"}
+///                                                            → 200 {"settlement":"SETTLEMENT:…"}
 ///   GET  /health                                             → 200 {"status":"healthy"}
 ///
 const std = @import("std");
@@ -24,6 +27,7 @@ const Allocator = mem.Allocator;
 
 const SecureVault = @import("vault.zig").SecureVault;
 const SecureLogger = @import("shell.zig").SecureLogger;
+const SettlementParams = @import("shell.zig").SettlementParams;
 const AttestationQuote = @import("attestation.zig").AttestationQuote;
 const sealed_state = @import("sealed_state.zig");
 
@@ -295,6 +299,10 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleSession(server, stream, req);
     if (get and mem.eql(u8, req.path, "/verify-and-attest"))
         return handleVerifyAndAttest(server, stream, req);
+    if (get and mem.eql(u8, req.path, "/seal"))
+        return handleSeal(server, stream, req);
+    if (post and mem.eql(u8, req.path, "/settle"))
+        return handleSettle(server, stream, req);
     if (get and mem.eql(u8, req.path, "/health"))
         return writeResponse(stream, 200, "{\"status\":\"healthy\"}");
 
@@ -557,6 +565,76 @@ fn handleVerifyAndAttest(server: *GatewayServer, stream: net.Stream, req: Parsed
     try writeResponse(stream, 200, body);
 }
 
+fn handleSeal(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    _ = req;
+    const line = server.logger.sealBundle(server.allocator) catch |err| {
+        std.log.err("[VAR-gateway] sealBundle: {}", .{err});
+        return writeError(stream, 500, "sealBundle failed");
+    };
+    defer server.allocator.free(line);
+
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"bundle_seal\":\"{s}\"}}",
+        .{line},
+    );
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
+}
+
+fn handleSettle(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    const escrow_id_str = jsonGetString(req.body, "escrow_id", server.allocator) orelse
+        return writeError(stream, 400, "missing \"escrow_id\" field");
+    defer server.allocator.free(escrow_id_str);
+
+    const amount_str = jsonGetString(req.body, "amount", server.allocator) orelse
+        return writeError(stream, 400, "missing \"amount\" field");
+    defer server.allocator.free(amount_str);
+
+    const currency_str = jsonGetString(req.body, "currency", server.allocator) orelse
+        return writeError(stream, 400, "missing \"currency\" field");
+    defer server.allocator.free(currency_str);
+
+    const recipient_str = jsonGetString(req.body, "recipient", server.allocator) orelse
+        return writeError(stream, 400, "missing \"recipient\" field");
+    defer server.allocator.free(recipient_str);
+
+    const escrow_id = parseHexFixed(16, escrow_id_str) catch
+        return writeError(stream, 400, "\"escrow_id\" must be 32 hex chars");
+
+    if (currency_str.len > 8)
+        return writeError(stream, 400, "\"currency\" must be 8 characters or fewer");
+    var currency: [8]u8 = [_]u8{' '} ** 8;
+    @memcpy(currency[0..currency_str.len], currency_str);
+
+    const recipient = parseHexFixed(64, recipient_str) catch
+        return writeError(stream, 400, "\"recipient\" must be 128 hex chars");
+
+    const params = SettlementParams{
+        .escrow_id = escrow_id,
+        .amount = amount_str,
+        .currency = currency,
+        .recipient = recipient,
+    };
+
+    const line = server.logger.settleBundle(server.allocator, params) catch |err| switch (err) {
+        error.AmountTooLong => return writeError(stream, 400, "\"amount\" exceeds 31 bytes"),
+        else => {
+            std.log.err("[VAR-gateway] settleBundle: {}", .{err});
+            return writeError(stream, 500, "settleBundle failed");
+        },
+    };
+    defer server.allocator.free(line);
+
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"settlement\":\"{s}\"}}",
+        .{line},
+    );
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
+}
+
 // ── JSON helpers ───────────────────────────────────────────────────────────
 
 /// Extracts the string value for `key` from a flat JSON object.
@@ -591,6 +669,18 @@ fn jsonGetString(json: []const u8, key: []const u8, allocator: Allocator) ?[]u8 
     }
     if (end >= MAX_FIELD_BYTES) return null; // value exceeds hard cap
     return allocator.dupe(u8, rest[0..end]) catch null;
+}
+
+/// Decodes a lowercase-hex string of exactly `N*2` characters into `[N]u8`.
+fn parseHexFixed(comptime N: usize, s: []const u8) ![N]u8 {
+    if (s.len != N * 2) return error.InvalidHex;
+    var result: [N]u8 = undefined;
+    for (0..N) |i| {
+        const hi = std.fmt.charToDigit(s[i * 2], 16) catch return error.InvalidHex;
+        const lo = std.fmt.charToDigit(s[i * 2 + 1], 16) catch return error.InvalidHex;
+        result[i] = (hi << 4) | lo;
+    }
+    return result;
 }
 
 fn fmtHex(allocator: Allocator, bytes: []const u8) ![]u8 {
@@ -691,4 +781,20 @@ test "jsonGetString: handles escaped quote in value" {
     defer std.testing.allocator.free(val);
     // Raw bytes are returned (un-unescaped), so the backslashes are present.
     try std.testing.expect(val.len > 0);
+}
+
+test "parseHexFixed: round-trips fmtHex output" {
+    const input = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const hex_str = try fmtHex(std.testing.allocator, &input);
+    defer std.testing.allocator.free(hex_str);
+    const decoded = try parseHexFixed(4, hex_str);
+    try std.testing.expectEqualSlices(u8, &input, &decoded);
+}
+
+test "parseHexFixed: wrong length returns InvalidHex" {
+    try std.testing.expectError(error.InvalidHex, parseHexFixed(4, "deadbe")); // 3 bytes worth
+}
+
+test "parseHexFixed: non-hex char returns InvalidHex" {
+    try std.testing.expectError(error.InvalidHex, parseHexFixed(2, "deadXX"));
 }

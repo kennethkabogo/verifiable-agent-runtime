@@ -12,10 +12,12 @@ Flow
   2. Finfiti holds requested UGX in escrow
   3. Agent logs the disbursement decision inside the VAR enclave
   4. Finfiti calls GET /verify-and-attest — receives evidence + attestation
-  5. Finfiti verifies the Ed25519 signature against the attested public key
-  6. PASS → escrow releases to MoMo/Airtel Pay in UGX
+  5. Finfiti verifies the Ed25519 packet signature against the attested public key
+  6. Finfiti calls GET /seal — verifies SealSig over BundleHash (covers all packets)
+  7. Finfiti calls POST /settle — verifies SettlementSig anchored to TerminalDigest
+     PASS → escrow releases to MoMo/Airtel Pay in UGX
      FAIL → escrow holds, dispute flag raised
-  7. 48 h later: repayment arrives → loan closes atomically
+  8. 48 h later: repayment arrives → loan closes atomically
 
 Usage
 ─────
@@ -137,6 +139,17 @@ def _start_gateway(bin_path: str, base_url: str) -> subprocess.Popen:
         raise
     return proc
 
+# ── Line protocol helpers ────────────────────────────────────────────────────
+
+def _parse_kv_line(line: str) -> dict:
+    """Parse 'PREFIX:key=val:key=val:...' into a dict (skips the prefix token)."""
+    result = {}
+    for part in line.split(":")[1:]:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            result[k] = v
+    return result
+
 # ── Ed25519 verification ─────────────────────────────────────────────────────
 
 def _build_signed_message(evidence: dict, session_id_hex: str) -> bytes:
@@ -163,7 +176,7 @@ def _build_signed_message(evidence: dict, session_id_hex: str) -> bytes:
 
 
 def _verify_signature(evidence: dict, attestation: dict, session_id_hex: str) -> tuple[bool, str]:
-    """Return (ok, reason). Verifies Ed25519 sig in evidence against attested key."""
+    """Return (ok, reason). Verifies Ed25519 packet sig against the attested key."""
     if not HAS_CRYPTOGRAPHY:
         return False, "pip install cryptography required for signature verification"
 
@@ -173,11 +186,75 @@ def _verify_signature(evidence: dict, attestation: dict, session_id_hex: str) ->
         msg        = _build_signed_message(evidence, session_id_hex)
         pub_key    = Ed25519PublicKey.from_public_bytes(pub_bytes)
         pub_key.verify(sig_bytes, msg)
-        return True, "Ed25519 signature valid"
+        return True, "Ed25519 packet signature valid"
     except InvalidSignature:
         return False, "Ed25519 signature INVALID — evidence may be tampered"
     except Exception as exc:
         return False, f"Verification error: {exc}"
+
+
+def _verify_seal(bundle_seal_line: str, attestation: dict) -> tuple[bool, str]:
+    """Verify the SealSig in the BUNDLE_SEAL line against the attested public key."""
+    if not HAS_CRYPTOGRAPHY:
+        return False, "pip install cryptography required for SealSig verification"
+
+    fields          = _parse_kv_line(bundle_seal_line)
+    bundle_hash_hex = fields.get("bundle_hash", "")
+    seal_sig_hex    = fields.get("seal_sig", "")
+
+    if not bundle_hash_hex or not seal_sig_hex:
+        return False, "malformed BUNDLE_SEAL line"
+
+    try:
+        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(attestation["public_key"]))
+        pub_key.verify(bytes.fromhex(seal_sig_hex), bytes.fromhex(bundle_hash_hex))
+        return True, "SealSig valid — bundle covers all session packets"
+    except InvalidSignature:
+        return False, "SealSig INVALID — bundle may be tampered"
+    except Exception as exc:
+        return False, f"Seal verification error: {exc}"
+
+
+def _verify_settlement(
+    settlement_line: str,
+    attestation: dict,
+    escrow_id: bytes,
+    amount_str: str,
+    currency_str: str,
+) -> tuple[bool, str]:
+    """Verify the SettlementSig in the SETTLEMENT line (spec §6).
+
+    Sig scope: EscrowID(16) ‖ Amount[32] ‖ Currency[8] ‖ TerminalDigest(32) = 88 bytes
+    """
+    if not HAS_CRYPTOGRAPHY:
+        return False, "pip install cryptography required for SettlementSig verification"
+
+    fields              = _parse_kv_line(settlement_line)
+    terminal_digest_hex = fields.get("terminal_digest", "")
+    sig_hex             = fields.get("sig", "")
+
+    if not terminal_digest_hex or not sig_hex:
+        return False, "malformed SETTLEMENT line"
+
+    # Amount: zero-padded to 32 bytes (spec §6)
+    amount_bytes = amount_str.encode()
+    amount_field = amount_bytes + b'\x00' * (32 - len(amount_bytes))
+
+    # Currency: space-padded to 8 bytes
+    currency_bytes = currency_str.encode()
+    currency_field = currency_bytes + b' ' * (8 - len(currency_bytes))
+
+    sig_scope = escrow_id + amount_field + currency_field + bytes.fromhex(terminal_digest_hex)
+    assert len(sig_scope) == 88, f"sig scope length {len(sig_scope)} != 88"
+
+    try:
+        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(attestation["public_key"]))
+        pub_key.verify(bytes.fromhex(sig_hex), sig_scope)
+        return True, "SettlementSig valid — escrow anchored to TerminalDigest"
+    except InvalidSignature:
+        return False, "SettlementSig INVALID — escrow params or session may be tampered"
+    except Exception as exc:
+        return False, f"Settlement verification error: {exc}"
 
 # ── Escrow state machine ─────────────────────────────────────────────────────
 
@@ -237,27 +314,33 @@ def run_demo(gateway_bin: Optional[str], base_url: str) -> bool:
 
 def _run(base_url: str) -> bool:
 
-    # ── Step 1: Loan request ─────────────────────────────────────────────────
+    # ── Step 1: Loan request ──────────────────────────────────────────────────
     _step("STEP 1 — Farmer registers a microloan request")
 
-    farmer      = "Okello James"
-    action_id   = "loan-okello-001"
-    amount_ugx  = 15_000   # ~$4 USD — daily fuel for a fishing boat
+    farmer     = "Okello James"
+    action_id  = "loan-okello-001"
+    amount_ugx = 15_000   # ~$4 USD — daily fuel for a fishing boat
+    currency   = "UGX"
 
     escrow = Escrow(action_id, farmer, amount_ugx)
+
+    # Deterministic identifiers derived from the action so the demo is reproducible.
+    escrow_id = hashlib.sha256(f"finfiti:{action_id}".encode()).digest()[:16]
+    recipient = hashlib.sha256(f"momo:{farmer}".encode()).digest() + b'\x00' * 32  # 64 bytes
 
     _ok(f"Farmer:      {farmer}")
     _ok(f"Amount:      {amount_ugx:,} UGX  (~${escrow.amount_usd} USD)")
     _ok(f"Purpose:     Boat fuel, Lake Victoria — 48 h loan")
     _ok(f"Action ID:   {action_id}")
+    _ok(f"Escrow ID:   {escrow_id.hex()}")
     _ok(f"Rail:        MoMo Pay (UGX)")
 
-    # ── Step 2: Finfiti holds in escrow ──────────────────────────────────────
+    # ── Step 2: Finfiti holds in escrow ───────────────────────────────────────
     _step("STEP 2 — Finfiti holds funds in escrow pending attestation")
     _ok(f"Escrow state: {escrow.state}")
     _info(f"{amount_ugx:,} UGX locked. Will release only on valid VAR attestation.", dim=True)
 
-    # ── Step 3: Agent logs disbursement decision inside VAR enclave ──────────
+    # ── Step 3: Agent logs disbursement decision inside VAR enclave ───────────
     _step("STEP 3 — Agent logs disbursement decision inside VAR enclave")
 
     log_msg = (
@@ -276,7 +359,7 @@ def _run(base_url: str) -> bool:
         _fail("Could not commit action to evidence chain.")
         return False
 
-    # ── Step 4: Finfiti calls /verify-and-attest ─────────────────────────────
+    # ── Step 4: Finfiti calls /verify-and-attest ──────────────────────────────
     _step("STEP 4 — Finfiti calls GET /verify-and-attest")
 
     try:
@@ -299,10 +382,9 @@ def _run(base_url: str) -> bool:
     _info(f"sig:       {evidence.get('sig', '?')[:20]}…", dim=True)
     _info(f"pcr0:      {attestation.get('pcr0', '?')[:20]}…", dim=True)
 
-    # ── Step 5: Verify Ed25519 signature ─────────────────────────────────────
-    _step("STEP 5 — Finfiti verifies Ed25519 signature")
+    # ── Step 5: Verify packet Ed25519 signature ───────────────────────────────
+    _step("STEP 5 — Finfiti verifies Ed25519 packet signature")
 
-    # Retrieve session_id for signature reconstruction.
     try:
         session_info   = _get(f"{base_url}/session")
         session_id_hex = session_info["session_id"]
@@ -315,9 +397,9 @@ def _run(base_url: str) -> bool:
     sig_ok, sig_reason = _verify_signature(evidence, attestation, session_id_hex)
 
     if sig_ok:
-        _ok(f"Signature: {sig_reason}")
+        _ok(f"Packet signature: {sig_reason}")
     else:
-        _warn(f"Signature: {sig_reason}")
+        _warn(f"Packet signature: {sig_reason}")
         if not HAS_CRYPTOGRAPHY:
             _warn("Install cryptography to enable full verification:  pip install cryptography")
             _warn("Proceeding with structural checks only (demo mode).")
@@ -326,32 +408,102 @@ def _run(base_url: str) -> bool:
             _fail(sig_reason)
             return False
 
-    # ── Step 6: Escrow decision ───────────────────────────────────────────────
-    _step("STEP 6 — Escrow release decision")
+    # ── Step 6: Seal the bundle and verify SealSig ────────────────────────────
+    _step("STEP 6 — Finfiti seals the bundle (GET /seal) and verifies SealSig")
 
+    try:
+        seal_resp = _get(f"{base_url}/seal")
+    except Exception as exc:
+        _err(f"GET /seal failed: {exc}")
+        escrow.hold(str(exc))
+        _fail("Could not seal evidence bundle.")
+        return False
+
+    bundle_seal_line = seal_resp.get("bundle_seal", "")
+    seal_fields      = _parse_kv_line(bundle_seal_line)
+    terminal_digest  = seal_fields.get("terminal_digest", "")
+    bundle_hash      = seal_fields.get("bundle_hash", "")
+
+    _ok("Bundle seal received")
+    _info(f"terminal_digest: {terminal_digest[:20]}…", dim=True)
+    _info(f"bundle_hash:     {bundle_hash[:20]}…", dim=True)
+
+    seal_ok, seal_reason = _verify_seal(bundle_seal_line, attestation)
+    if seal_ok:
+        _ok(f"SealSig: {seal_reason}")
+    else:
+        _warn(f"SealSig: {seal_reason}")
+        if HAS_CRYPTOGRAPHY:
+            escrow.hold(seal_reason)
+            _fail(seal_reason)
+            return False
+
+    # ── Step 7: Settle and verify SettlementSig ───────────────────────────────
+    _step("STEP 7 — Finfiti calls POST /settle, verifies SettlementSig")
+
+    try:
+        settle_resp = _post(f"{base_url}/settle", {
+            "escrow_id": escrow_id.hex(),
+            "amount":    str(amount_ugx),
+            "currency":  currency,
+            "recipient": recipient.hex(),
+        })
+    except Exception as exc:
+        _err(f"POST /settle failed: {exc}")
+        escrow.hold(str(exc))
+        _fail("Settlement endpoint rejected the request.")
+        return False
+
+    settlement_line = settle_resp.get("settlement", "")
+    settle_fields   = _parse_kv_line(settlement_line)
+    settlement_sig  = settle_fields.get("sig", "")
+
+    _ok("Settlement block received")
+    _info(f"escrow_id:  {settle_fields.get('escrow_id', '?')[:20]}…", dim=True)
+    _info(f"amount:     {settle_fields.get('amount', '?')} {settle_fields.get('currency', '?')}", dim=True)
+    _info(f"sig:        {settlement_sig[:20]}…", dim=True)
+
+    settle_ok, settle_reason = _verify_settlement(
+        settlement_line, attestation,
+        escrow_id, str(amount_ugx), currency,
+    )
+    if settle_ok:
+        _ok(f"SettlementSig: {settle_reason}")
+    else:
+        _warn(f"SettlementSig: {settle_reason}")
+        if HAS_CRYPTOGRAPHY:
+            escrow.hold(settle_reason)
+            _fail(settle_reason)
+            return False
+
+    # ── Escrow release (anchored to TerminalDigest) ───────────────────────────
     receipt = {
-        "action_id":  action_id,
-        "farmer":     farmer,
-        "amount_ugx": amount_ugx,
-        "amount_usd": escrow.amount_usd,
-        "rail":       "MoMo Pay (UGX)",
-        "sequence":   evidence.get("sequence"),
-        "stream":     evidence.get("stream"),
-        "sig":        evidence.get("sig"),
-        "pcr0":       attestation.get("pcr0"),
-        "public_key": attestation.get("public_key"),
-        "sim_mode":   sim_mode,
-        "sig_valid":  sig_ok,
-        "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action_id":        action_id,
+        "farmer":           farmer,
+        "amount_ugx":       amount_ugx,
+        "amount_usd":       escrow.amount_usd,
+        "rail":             "MoMo Pay (UGX)",
+        "escrow_id":        escrow_id.hex(),
+        "sequence":         evidence.get("sequence"),
+        "terminal_digest":  terminal_digest,
+        "bundle_hash":      bundle_hash,
+        "settlement_sig":   settlement_sig,
+        "pcr0":             attestation.get("pcr0"),
+        "public_key":       attestation.get("public_key"),
+        "sim_mode":         sim_mode,
+        "sig_valid":        sig_ok,
+        "seal_valid":       seal_ok,
+        "settlement_valid": settle_ok,
+        "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     escrow.release(receipt)
 
     _ok(f"Escrow state: {escrow.state}")
     _ok(f"Releasing {amount_ugx:,} UGX to {farmer} via MoMo Pay")
-    _info("Hardware-attested proof of disbursement decision attached to receipt.", dim=True)
+    _info("Receipt anchored to TerminalDigest — covers all packets in this session.", dim=True)
 
-    # ── Step 7: Simulated repayment ───────────────────────────────────────────
-    _step("STEP 7 — Simulated repayment (48 h later)")
+    # ── Step 8: Simulated repayment ───────────────────────────────────────────
+    _step("STEP 8 — Simulated repayment (48 h later)")
 
     repayment_ugx = amount_ugx + 300  # principal + ~2% fee
     _ok(f"Repayment received: {repayment_ugx:,} UGX from {farmer}")

@@ -395,7 +395,30 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 
 ---
 
-## 13. Version History
+## 13. Roadmap
+
+### v2.1.0 — Test Vectors
+
+A test vector section is the difference between a *readable* spec and an *independently implementable* one. The planned addition is a single fully-worked example:
+
+- Known PCR0/PCR1/PCR2 values (48-byte zero vectors, clearly labelled synthetic)
+- Known SessionID and AgentID
+- Known Ed25519 signing keypair (hex-encoded, for test use only)
+- Known session public key and BootstrapNonce derivation steps
+- A single `STREAM` Evidence Packet with known payload bytes, showing the complete 162-byte signature scope byte-by-byte
+- The expected Ed25519 signature over that scope
+- The expected L1 stream hash after one packet
+- The expected BundleHash and SealSig
+
+A third-party implementer who can reproduce those values against their own code has confirmed correct byte layout, correct endianness, and correct hash chaining without needing to run VAR or ask the spec authors.
+
+### v2.2.0 — Settlement Block Test Vector
+
+A second vector covering a two-packet session with a Settlement Block — verifying TerminalDigest computation and the APXT structure end-to-end.
+
+---
+
+## 14. Version History
 
 | Version | Changes |
 |:---|:---|
