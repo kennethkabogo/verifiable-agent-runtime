@@ -362,6 +362,106 @@ pub const SecureLogger = struct {
 
         return result;
     }
+
+    /// SHA-256(sig[0] ‖ sig[1] ‖ … ‖ sig[N-1]).
+    /// Caller must hold self.mutex.
+    fn computeTerminalDigestLocked(self: *const SecureLogger) [32]u8 {
+        var hasher = Sha256.init(.{});
+        for (self.sig_log.items) |sig| hasher.update(&sig);
+        var digest: [32]u8 = undefined;
+        hasher.final(&digest);
+        return digest;
+    }
+
+    /// Emits a Bundle Seal line (spec §7).
+    ///
+    ///   BUNDLE_SEAL:magic=APXZ:terminal_digest=<hex>:bundle_hash=<hex>:seal_sig=<hex>
+    ///
+    /// TerminalDigest = SHA-256(all packet signatures in order)
+    /// BundleHash     = SHA-256("VARB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest)
+    /// SealSig        = Ed25519(session_keypair, BundleHash)
+    pub fn sealBundle(self: *SecureLogger, allocator: std.mem.Allocator) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const terminal_digest = self.computeTerminalDigestLocked();
+        const signing_pub = self.keypair.public_key.toBytes();
+
+        var bh_hasher = Sha256.init(.{});
+        bh_hasher.update("VARB");
+        bh_hasher.update(&self.session_id);
+        bh_hasher.update(&self.bootstrap_nonce);
+        bh_hasher.update(&signing_pub);
+        bh_hasher.update(&terminal_digest);
+        var bundle_hash: [32]u8 = undefined;
+        bh_hasher.final(&bundle_hash);
+
+        const seal_sig = try self.keypair.sign(&bundle_hash, null);
+        const seal_sig_bytes = seal_sig.toBytes();
+
+        const td_h = try hex(allocator, &terminal_digest);
+        defer allocator.free(td_h);
+        const bh_h = try hex(allocator, &bundle_hash);
+        defer allocator.free(bh_h);
+        const ss_h = try hex(allocator, &seal_sig_bytes);
+        defer allocator.free(ss_h);
+
+        return std.fmt.allocPrint(
+            allocator,
+            "BUNDLE_SEAL:magic=APXZ:terminal_digest={s}:bundle_hash={s}:seal_sig={s}",
+            .{ td_h, bh_h, ss_h },
+        );
+    }
+
+    /// Emits a Settlement Block line (spec §6).
+    ///
+    ///   SETTLEMENT:magic=APXT:escrow_id=<hex>:amount=<str>:currency=<str>:
+    ///              recipient=<hex>:condition=01:terminal_digest=<hex>:sig=<hex>
+    ///
+    /// SettlementSig = Ed25519(session_keypair, EscrowID ‖ Amount[32] ‖ Currency[8] ‖ TerminalDigest)
+    pub fn settleBundle(
+        self: *SecureLogger,
+        allocator: std.mem.Allocator,
+        params: SettlementParams,
+    ) ![]u8 {
+        if (params.amount.len > 31) return error.AmountTooLong;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const terminal_digest = self.computeTerminalDigestLocked();
+
+        // Fixed-width amount field: zero-padded to 32 bytes (spec §6).
+        var amount_field: [32]u8 = [_]u8{0} ** 32;
+        @memcpy(amount_field[0..params.amount.len], params.amount);
+
+        // Signature scope: EscrowID(16) ‖ Amount(32) ‖ Currency(8) ‖ TerminalDigest(32) = 88 bytes
+        var sig_msg: [88]u8 = undefined;
+        @memcpy(sig_msg[0..16], &params.escrow_id);
+        @memcpy(sig_msg[16..48], &amount_field);
+        @memcpy(sig_msg[48..56], &params.currency);
+        @memcpy(sig_msg[56..88], &terminal_digest);
+
+        const settlement_sig = try self.keypair.sign(&sig_msg, null);
+        const settlement_sig_bytes = settlement_sig.toBytes();
+
+        const currency_str = std.mem.trimRight(u8, &params.currency, " \x00");
+
+        const eid_h = try hex(allocator, &params.escrow_id);
+        defer allocator.free(eid_h);
+        const rec_h = try hex(allocator, &params.recipient);
+        defer allocator.free(rec_h);
+        const td_h = try hex(allocator, &terminal_digest);
+        defer allocator.free(td_h);
+        const ss_h = try hex(allocator, &settlement_sig_bytes);
+        defer allocator.free(ss_h);
+
+        return std.fmt.allocPrint(
+            allocator,
+            "SETTLEMENT:magic=APXT:escrow_id={s}:amount={s}:currency={s}:recipient={s}:condition=01:terminal_digest={s}:sig={s}",
+            .{ eid_h, params.amount, currency_str, rec_h, td_h, ss_h },
+        );
+    }
 };
 
 /// Parameters for a settlement authorisation (spec §6).
@@ -375,106 +475,6 @@ pub const SettlementParams = struct {
     /// Opaque recipient identifier, zero-padded to 64 bytes.
     recipient: [64]u8,
 };
-
-/// SHA-256(sig[0] ‖ sig[1] ‖ … ‖ sig[N-1]).
-/// Caller must hold self.mutex.
-fn computeTerminalDigestLocked(self: *const SecureLogger) [32]u8 {
-    var hasher = Sha256.init(.{});
-    for (self.sig_log.items) |sig| hasher.update(&sig);
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
-}
-
-/// Emits a Bundle Seal line (spec §7).
-///
-///   BUNDLE_SEAL:magic=APXZ:terminal_digest=<hex>:bundle_hash=<hex>:seal_sig=<hex>
-///
-/// TerminalDigest = SHA-256(all packet signatures in order)
-/// BundleHash     = SHA-256("VARB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest)
-/// SealSig        = Ed25519(session_keypair, BundleHash)
-pub fn sealBundle(self: *SecureLogger, allocator: std.mem.Allocator) ![]u8 {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    const terminal_digest = self.computeTerminalDigestLocked();
-    const signing_pub = self.keypair.public_key.toBytes();
-
-    var bh_hasher = Sha256.init(.{});
-    bh_hasher.update("VARB");
-    bh_hasher.update(&self.session_id);
-    bh_hasher.update(&self.bootstrap_nonce);
-    bh_hasher.update(&signing_pub);
-    bh_hasher.update(&terminal_digest);
-    var bundle_hash: [32]u8 = undefined;
-    bh_hasher.final(&bundle_hash);
-
-    const seal_sig = try self.keypair.sign(&bundle_hash, null);
-    const seal_sig_bytes = seal_sig.toBytes();
-
-    const td_h = try hex(allocator, &terminal_digest);
-    defer allocator.free(td_h);
-    const bh_h = try hex(allocator, &bundle_hash);
-    defer allocator.free(bh_h);
-    const ss_h = try hex(allocator, &seal_sig_bytes);
-    defer allocator.free(ss_h);
-
-    return std.fmt.allocPrint(
-        allocator,
-        "BUNDLE_SEAL:magic=APXZ:terminal_digest={s}:bundle_hash={s}:seal_sig={s}",
-        .{ td_h, bh_h, ss_h },
-    );
-}
-
-/// Emits a Settlement Block line (spec §6).
-///
-///   SETTLEMENT:magic=APXT:escrow_id=<hex>:amount=<str>:currency=<str>:
-///              recipient=<hex>:condition=01:terminal_digest=<hex>:sig=<hex>
-///
-/// SettlementSig = Ed25519(session_keypair, EscrowID ‖ Amount[32] ‖ Currency[8] ‖ TerminalDigest)
-pub fn settleBundle(
-    self: *SecureLogger,
-    allocator: std.mem.Allocator,
-    params: SettlementParams,
-) ![]u8 {
-    if (params.amount.len > 31) return error.AmountTooLong;
-
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    const terminal_digest = self.computeTerminalDigestLocked();
-
-    // Fixed-width amount field: zero-padded to 32 bytes (spec §6).
-    var amount_field: [32]u8 = [_]u8{0} ** 32;
-    @memcpy(amount_field[0..params.amount.len], params.amount);
-
-    // Signature scope: EscrowID(16) ‖ Amount(32) ‖ Currency(8) ‖ TerminalDigest(32) = 88 bytes
-    var sig_msg: [88]u8 = undefined;
-    @memcpy(sig_msg[0..16], &params.escrow_id);
-    @memcpy(sig_msg[16..48], &amount_field);
-    @memcpy(sig_msg[48..56], &params.currency);
-    @memcpy(sig_msg[56..88], &terminal_digest);
-
-    const settlement_sig = try self.keypair.sign(&sig_msg, null);
-    const settlement_sig_bytes = settlement_sig.toBytes();
-
-    const currency_str = std.mem.trimRight(u8, &params.currency, " \x00");
-
-    const eid_h = try hex(allocator, &params.escrow_id);
-    defer allocator.free(eid_h);
-    const rec_h = try hex(allocator, &params.recipient);
-    defer allocator.free(rec_h);
-    const td_h = try hex(allocator, &terminal_digest);
-    defer allocator.free(td_h);
-    const ss_h = try hex(allocator, &settlement_sig_bytes);
-    defer allocator.free(ss_h);
-
-    return std.fmt.allocPrint(
-        allocator,
-        "SETTLEMENT:magic=APXT:escrow_id={s}:amount={s}:currency={s}:recipient={s}:condition=01:terminal_digest={s}:sig={s}",
-        .{ eid_h, params.amount, currency_str, rec_h, td_h, ss_h },
-    );
-}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
