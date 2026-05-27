@@ -173,16 +173,16 @@ Each cell contributes exactly 11 bytes per codepoint. Multi-codepoint grapheme c
 
 | Field | Type | Description |
 |:---|:---|:---|
-| Magic | `[4]u8` | `"APXE"` (`0x41 0x50 0x58 0x45`) |
+| Magic | `[4]u8` | `"VARE"` (`0x56 0x41 0x52 0x45`) |
 | FormatVer | `u8` | Packet format version. Current: `0x01` |
 | Sequence | `u64` LE | Monotonically increasing, starting at 1. No gaps permitted. |
 | PrevL1Hash | `[32]u8` | `L1[n-1]` — enables gap detection |
 | L1Hash | `[32]u8` | `L1[n]` |
 | L2Hash | `[32]u8` | Terminal state at emission time |
-| ActionType | `u8` | See §5.4 |
+| ActionType | `u8` | See §5.4. Validated by verifier but not included in signature scope. |
 | PayloadLen | `u32` LE | Byte length of payload (0 in snapshot mode) |
 | Payload | `[PayloadLen]u8` | Raw terminal data (empty in snapshot mode) |
-| Signature | `[64]u8` | Ed25519 over 162-byte message — §5.5 |
+| Signature | `[64]u8` | Ed25519 over 161-byte message — §5.5 |
 
 ### 5.4 Action Types
 
@@ -201,24 +201,23 @@ Unknown action types MUST cause verification to fail. Implementers MUST NOT sile
 
 ### 5.5 Signature Scope
 
-The enclave signs a fixed-length 162-byte message:
+The enclave signs a fixed-length 161-byte message. ActionType is a packet field (§5.3) but is NOT included in the signed scope — it is validated by the verifier as a parsing step (§8 Step 5).
 
 | Offset | Size | Field |
 |---:|---:|:---|
-| 0 | 4 | Magic `"APXE"` |
+| 0 | 4 | Magic `"VARE"` |
 | 4 | 1 | FormatVer |
 | 5 | 8 | Sequence (u64 LE) |
 | 13 | 32 | PrevL1Hash |
 | 45 | 32 | L1Hash |
 | 77 | 32 | L2Hash |
-| 109 | 1 | ActionType |
-| 110 | 4 | PayloadLen (u32 LE) |
-| 114 | 32 | SHA-256(Payload); `SHA-256(b"")` in snapshot mode |
-| 146 | 16 | SessionID |
-| **162** | | **total** |
+| 109 | 4 | PayloadLen (u32 LE) |
+| 113 | 32 | SHA-256(Payload); `SHA-256(b"")` in snapshot mode |
+| 145 | 16 | SessionID |
+| **161** | | **total** |
 
 ```
-Signature = Ed25519_Sign(segment_secret_key, msg_162)
+Signature = Ed25519_Sign(segment_secret_key, msg_161)
 ```
 
 ### 5.6 Execution Records
@@ -269,7 +268,7 @@ Emitted once, after the final Evidence Packet (and Settlement Block if present).
 |:---|:---|:---|
 | Magic | `[4]u8` | `"APXZ"` (`0x41 0x50 0x58 0x5A`) |
 | TerminalDigest | `[32]u8` | SHA-256 of all Packet Signatures in sequence order |
-| BundleHash | `[32]u8` | SHA-256 of (BundleHeader ‖ all SegmentHeaders ‖ TerminalDigest) |
+| BundleHash | `[32]u8` | SHA-256(`"VARB"` ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ TerminalDigest) |
 | SealSig | `[64]u8` | Ed25519(last_segment_secret_key, BundleHash) |
 
 ---
@@ -308,9 +307,9 @@ for n in 2..N:
 ### Step 5 — Verify each packet signature
 For each packet:
 1. Identify the segment whose index covers this packet's sequence number
-2. Reconstruct the 162-byte message (§5.5)
-3. `Ed25519_Verify(segment.SessionPub, msg_162, Packet[n].Signature)`
-4. Assert ActionType is a known value (§5.4)
+2. Reconstruct the 161-byte message (§5.5)
+3. `Ed25519_Verify(segment.SessionPub, msg_161, Packet[n].Signature)`
+4. Assert ActionType is a known value (§5.4) — field validation, not part of signed scope
 
 ### Step 6 — Verify the Terminal Digest
 ```
@@ -319,7 +318,7 @@ assert BundleSeal.TerminalDigest == SHA-256(concat(Packet[1..N].Signature))
 
 ### Step 7 — Verify the Bundle Seal
 ```
-assert BundleSeal.BundleHash == SHA-256(BundleHeader ‖ all SegmentHeaders ‖ BundleSeal.TerminalDigest)
+assert BundleSeal.BundleHash == SHA-256("VARB" ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ BundleSeal.TerminalDigest)
 Ed25519_Verify(last_segment.SessionPub, BundleSeal.BundleHash, BundleSeal.SealSig)
 ```
 
