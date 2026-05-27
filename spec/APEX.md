@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.0.0
+## Specification v2.1.0
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -173,16 +173,16 @@ Each cell contributes exactly 11 bytes per codepoint. Multi-codepoint grapheme c
 
 | Field | Type | Description |
 |:---|:---|:---|
-| Magic | `[4]u8` | `"APXE"` (`0x41 0x50 0x58 0x45`) |
+| Magic | `[4]u8` | `"VARE"` (`0x56 0x41 0x52 0x45`) |
 | FormatVer | `u8` | Packet format version. Current: `0x01` |
 | Sequence | `u64` LE | Monotonically increasing, starting at 1. No gaps permitted. |
 | PrevL1Hash | `[32]u8` | `L1[n-1]` — enables gap detection |
 | L1Hash | `[32]u8` | `L1[n]` |
 | L2Hash | `[32]u8` | Terminal state at emission time |
-| ActionType | `u8` | See §5.4 |
+| ActionType | `u8` | See §5.4. Validated by verifier but not included in signature scope. |
 | PayloadLen | `u32` LE | Byte length of payload (0 in snapshot mode) |
 | Payload | `[PayloadLen]u8` | Raw terminal data (empty in snapshot mode) |
-| Signature | `[64]u8` | Ed25519 over 162-byte message — §5.5 |
+| Signature | `[64]u8` | Ed25519 over 161-byte message — §5.5 |
 
 ### 5.4 Action Types
 
@@ -201,24 +201,23 @@ Unknown action types MUST cause verification to fail. Implementers MUST NOT sile
 
 ### 5.5 Signature Scope
 
-The enclave signs a fixed-length 162-byte message:
+The enclave signs a fixed-length 161-byte message. ActionType is a packet field (§5.3) but is NOT included in the signed scope — it is validated by the verifier as a parsing step (§8 Step 5).
 
 | Offset | Size | Field |
 |---:|---:|:---|
-| 0 | 4 | Magic `"APXE"` |
+| 0 | 4 | Magic `"VARE"` |
 | 4 | 1 | FormatVer |
 | 5 | 8 | Sequence (u64 LE) |
 | 13 | 32 | PrevL1Hash |
 | 45 | 32 | L1Hash |
 | 77 | 32 | L2Hash |
-| 109 | 1 | ActionType |
-| 110 | 4 | PayloadLen (u32 LE) |
-| 114 | 32 | SHA-256(Payload); `SHA-256(b"")` in snapshot mode |
-| 146 | 16 | SessionID |
-| **162** | | **total** |
+| 109 | 4 | PayloadLen (u32 LE) |
+| 113 | 32 | SHA-256(Payload); `SHA-256(b"")` in snapshot mode |
+| 145 | 16 | SessionID |
+| **161** | | **total** |
 
 ```
-Signature = Ed25519_Sign(segment_secret_key, msg_162)
+Signature = Ed25519_Sign(segment_secret_key, msg_161)
 ```
 
 ### 5.6 Execution Records
@@ -269,7 +268,7 @@ Emitted once, after the final Evidence Packet (and Settlement Block if present).
 |:---|:---|:---|
 | Magic | `[4]u8` | `"APXZ"` (`0x41 0x50 0x58 0x5A`) |
 | TerminalDigest | `[32]u8` | SHA-256 of all Packet Signatures in sequence order |
-| BundleHash | `[32]u8` | SHA-256 of (BundleHeader ‖ all SegmentHeaders ‖ TerminalDigest) |
+| BundleHash | `[32]u8` | SHA-256(`"VARB"` ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ TerminalDigest) |
 | SealSig | `[64]u8` | Ed25519(last_segment_secret_key, BundleHash) |
 
 ---
@@ -308,9 +307,9 @@ for n in 2..N:
 ### Step 5 — Verify each packet signature
 For each packet:
 1. Identify the segment whose index covers this packet's sequence number
-2. Reconstruct the 162-byte message (§5.5)
-3. `Ed25519_Verify(segment.SessionPub, msg_162, Packet[n].Signature)`
-4. Assert ActionType is a known value (§5.4)
+2. Reconstruct the 161-byte message (§5.5)
+3. `Ed25519_Verify(segment.SessionPub, msg_161, Packet[n].Signature)`
+4. Assert ActionType is a known value (§5.4) — field validation, not part of signed scope
 
 ### Step 6 — Verify the Terminal Digest
 ```
@@ -319,7 +318,7 @@ assert BundleSeal.TerminalDigest == SHA-256(concat(Packet[1..N].Signature))
 
 ### Step 7 — Verify the Bundle Seal
 ```
-assert BundleSeal.BundleHash == SHA-256(BundleHeader ‖ all SegmentHeaders ‖ BundleSeal.TerminalDigest)
+assert BundleSeal.BundleHash == SHA-256("VARB" ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ BundleSeal.TerminalDigest)
 Ed25519_Verify(last_segment.SessionPub, BundleSeal.BundleHash, BundleSeal.SealSig)
 ```
 
@@ -397,31 +396,228 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 
 ## 13. Roadmap
 
-### v2.1.0 — Test Vectors
-
-A test vector section is the difference between a *readable* spec and an *independently implementable* one. The planned addition is a single fully-worked example:
-
-- Known PCR0/PCR1/PCR2 values (48-byte zero vectors, clearly labelled synthetic)
-- Known SessionID and AgentID
-- Known Ed25519 signing keypair (hex-encoded, for test use only)
-- Known session public key and BootstrapNonce derivation steps
-- A single `STREAM` Evidence Packet with known payload bytes, showing the complete 162-byte signature scope byte-by-byte
-- The expected Ed25519 signature over that scope
-- The expected L1 stream hash after one packet
-- The expected BundleHash and SealSig
-
-A third-party implementer who can reproduce those values against their own code has confirmed correct byte layout, correct endianness, and correct hash chaining without needing to run VAR or ask the spec authors.
-
 ### v2.2.0 — Settlement Block Test Vector
 
 A second vector covering a two-packet session with a Settlement Block — verifying TerminalDigest computation and the APXT structure end-to-end.
 
 ---
 
-## 14. Version History
+## 14. Test Vectors
+
+### §14.1 Scope and Notation
+
+The following test vectors give a fully-worked single-packet session using
+known synthetic inputs. A third-party implementer who can reproduce every
+value independently has confirmed correct byte layout, correct endianness,
+and correct hash chaining without running VAR.
+
+#### Notation
+
+- `‖` denotes byte concatenation.
+- All hex strings are lowercase, no spaces, unless formatted as byte blocks.
+- `u64 LE` / `u32 LE` = little-endian unsigned integer.
+- Values labelled **SYNTHETIC / TEST-ONLY** MUST NOT appear in production bundles.
+
+> **Implementation note.** The VAR reference implementation
+> (`src/runtime/shell.zig`) uses magic bytes `VARE` (0x56 0x41 0x52 0x45)
+> and a **161-byte** signature scope (ActionType byte omitted).
+> These test vectors match that behaviour. A future APEX 3.0 revision
+> will unify the magic bytes across all packet types under the `APX*` prefix.
+
+---
+
+### §14.2 Fixed Inputs
+
+#### Ed25519 Signing Keypair (SYNTHETIC / TEST-ONLY)
+
+| Field | Value |
+|:------|:------|
+| Seed (32 bytes) | `0000000000000000000000000000000000000000000000000000000000000000` |
+| Public key (32 bytes) | `3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29` |
+
+#### Platform Configuration Registers (SYNTHETIC — all-zero simulation)
+
+| Register | Value (48 bytes) |
+|:---------|:-----------------|
+| PCR0 | `000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000` |
+| PCR1 | `000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000` |
+| PCR2 | `000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000` |
+| PCRCommitment | `81c611f35bff79491538b2f7cf201c7597a661a5c549633541c62bdc8af1613f` |
+
+#### Session Identity
+
+| Field | Value |
+|:------|:------|
+| SessionID (16 bytes) | `00000000000040008000000000000001` |
+| BundleID (16 bytes) | `deadbeefdead40008000deadbeef0001` |
+| AgentID (32 bytes) | `3f89a1b22305afcc23f99eeb2310bf4b1a1398aac586b5cd102feab8ebb90aa9` |
+| CreatedAt (u64 LE ns) | `000057c07e681618` = 1735689600000000000 ns |
+
+#### Attestation Document (SYNTHETIC — simulation mode §11)
+
+96 bytes of `0xaa`, representing the placeholder attestation used in
+simulation mode when Nitro hardware is absent:
+
+```
+  aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa
+  aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa
+  aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa
+  aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa
+  aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa
+  aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa
+```
+
+#### Packet Payload
+
+| Field | Value |
+|:------|:------|
+| Payload bytes | `68656c6c6f` (`hello`) |
+| PayloadLen | 5 |
+| ActionType | `01` (STREAM) |
+| Sequence | 1 |
+
+---
+
+### §14.3 Bootstrap Nonce
+
+```
+BootstrapNonce = SHA-256(AttestationDoc ‖ SessionID)
+```
+
+| Input | Bytes | Hex |
+|:------|------:|:----|
+| AttestationDoc | 96 | `aaaaaaaaaaaaaaaa…` (96 × 0xaa) |
+| SessionID | 16 | `00000000000040008000000000000001` |
+| **BootstrapNonce** | **32** | `b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63` |
+
+> **L1 chain genesis:** `L1[0] = BootstrapNonce`
+
+---
+
+### §14.4 L1 Hash After One Packet
+
+```
+L1[1] = SHA-256(L1[0] ‖ payload)
+      = SHA-256(BootstrapNonce ‖ b"hello")
+```
+
+| Field | Value |
+|:------|:------|
+| L1[0] = BootstrapNonce | `b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63` |
+| Payload (`hello`) | `68656c6c6f` |
+| **L1[1]** | **`a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b`** |
+
+---
+
+### §14.5 L2 State Hash
+
+Computed over a minimal terminal state (80 × 24, cursor at origin, empty cell grid):
+
+```
+L2 = SHA-256(format_version ‖ cursor_x ‖ cursor_y ‖ width ‖ height ‖ cell_digest)
+```
+
+| Component | Size | Value |
+|:----------|-----:|:------|
+| format_version (u8) | 1 | `01` |
+| cursor_x (u16 LE) | 2 | `0000` |
+| cursor_y (u16 LE) | 2 | `0000` |
+| terminal_width (u16 LE = 80) | 2 | `5000` |
+| terminal_height (u16 LE = 24) | 2 | `1800` |
+| cell_digest = SHA-256(`""`) | 32 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| **L2Hash** | **32** | **`d416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71`** |
+
+---
+
+### §14.6 Evidence Packet — 161-byte Signature Scope
+
+The enclave signs this fixed-length 161-byte message:
+
+| Offset | Size | Field | Value |
+|-------:|-----:|:------|:------|
+| 0 | 4 | Magic (`"VARE"`) | `56415245` |
+| 4 | 1 | FormatVer | `01` |
+| 5 | 8 | Sequence (u64 LE = 1) | `0100000000000000` |
+| 13 | 32 | PrevL1Hash (= BootstrapNonce) | `b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63` |
+| 45 | 32 | L1Hash | `a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b` |
+| 77 | 32 | L2Hash | `d416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71` |
+| 109 | 4 | PayloadLen (u32 LE = 5) | `05000000` |
+| 113 | 32 | SHA-256(Payload) | `2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824` |
+| 145 | 16 | SessionID | `00000000000040008000000000000001` |
+| **161** | | **total** | |
+
+Full scope (161 bytes):
+
+```
+  56 41 52 45 01 01 00 00 00 00 00 00 00 b7 51 e7
+  86 08 6c 23 13 51 23 cf 48 6a d4 63 34 9f eb e3
+  08 f9 c5 4c 58 c0 44 78 a4 53 af 0e 63 a2 31 fc
+  d1 c0 4f ef 6e 33 39 54 f2 2b 31 14 25 d7 d5 5c
+  e3 99 4b 9a 6d 38 a7 cb 72 ee dc e6 4b d4 16 43
+  42 44 a2 ce 82 76 e6 f3 d7 2c c5 3f 95 3f 5e 3f
+  58 1f 2e 68 62 e5 e3 6f ad be 10 ab 71 05 00 00
+  00 2c f2 4d ba 5f b0 a3 0e 26 e8 3b 2a c5 b9 e2
+  9e 1b 16 1e 5c 1f a7 42 5e 73 04 33 62 93 8b 98
+  24 00 00 00 00 00 00 40 00 80 00 00 00 00 00 00
+  01
+```
+
+#### Packet Signature
+
+```
+Signature = Ed25519_Sign(signing_key, scope_161)
+```
+
+| Field | Value |
+|:------|:------|
+| Signature (64 bytes) | `36092fb379e6e33a6dccf33be6c9b617e0f9b2837195d0e6414ce00590383988a208d9b37d065d1b1999ecb4872b26f4c8ce0bf3f4c91f90cb07b94c0c2b1f05` |
+
+---
+
+### §14.7 Terminal Digest and Bundle Seal
+
+Single-packet session; TerminalDigest covers exactly one signature.
+
+```
+TerminalDigest = SHA-256(Packet[1].Signature)
+BundleHash     = SHA-256("VARB" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest)
+SealSig        = Ed25519_Sign(signing_key, BundleHash)
+```
+
+| Field | Value |
+|:------|:------|
+| Packet[1].Signature | `36092fb379e6e33a6dccf33be6c9b617e0f9b2837195d0e6414ce00590383988a208d9b37d065d1b1999ecb4872b26f4c8ce0bf3f4c91f90cb07b94c0c2b1f05` |
+| **TerminalDigest** | **`33c143a8fd36b26f375339c66ab10aab0f457e5a5678790c38cdf2fac08f9978`** |
+| `"VARB"` prefix | `56415242` |
+| SessionID | `00000000000040008000000000000001` |
+| BootstrapNonce | `b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63` |
+| SigningPub | `3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29` |
+| **BundleHash** | **`ddb62dbda59c6ea21ea7d6227d00e0d267dd8b1b3d35ad6a88c5fbfe4612399a`** |
+| **SealSig** | **`8e0b8126cdf3f6453ecdbcbfe2656693b0d386b9a76dffe23875e95d487ce4b151ba37b9e0df690c44a23b388e1e50661ac7b1531b9a963907b737f2eb3b120d`** |
+
+---
+
+### §14.8 Summary
+
+A compliant implementation MUST produce these exact values given the inputs in §14.2:
+
+| Value | Expected |
+|:------|:---------|
+| BootstrapNonce | `b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63` |
+| L1[1] | `a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b` |
+| L2Hash | `d416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71` |
+| Packet[1].Signature | `36092fb379e6e33a6dccf33be6c9b617e0f9b2837195d0e6414ce00590383988a208d9b37d065d1b1999ecb4872b26f4c8ce0bf3f4c91f90cb07b94c0c2b1f05` |
+| TerminalDigest | `33c143a8fd36b26f375339c66ab10aab0f457e5a5678790c38cdf2fac08f9978` |
+| BundleHash | `ddb62dbda59c6ea21ea7d6227d00e0d267dd8b1b3d35ad6a88c5fbfe4612399a` |
+| SealSig | `8e0b8126cdf3f6453ecdbcbfe2656693b0d386b9a76dffe23875e95d487ce4b151ba37b9e0df690c44a23b388e1e50661ac7b1531b9a963907b737f2eb3b120d` |
+
+---
+
+## 15. Version History
 
 | Version | Changes |
 |:---|:---|
+| 2.1.0 | §14 Test Vectors — fully-worked single-packet session with known synthetic inputs |
 | 2.0.0 | APEX spec. New magic bytes, named action types, Settlement Block, Bundle Seal, strict unknown-type rejection, grapheme cluster correction |
 | 1.5 | VAR evidence_spec: CBOR map walk for PCR extraction, CBOR bounds check, session_pub_cert |
 | 1.4 | executions array replaces last_exec; cover-up attack prevention |
@@ -431,7 +627,7 @@ A second vector covering a two-packet session with a Settlement Block — verify
 
 ---
 
-## 14. Conformance
+## 16. Conformance
 
 An implementation is **APEX-compliant** if it:
 
