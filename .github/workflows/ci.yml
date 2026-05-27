@@ -6,6 +6,31 @@ on:
   pull_request:
 
 jobs:
+  # ── Struct integrity (fast, no toolchain needed) ───────────────────────────
+  lint-struct:
+    name: Zig struct lint
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify SecureLogger methods are inside the struct
+        run: |
+          # sealBundle, settleBundle, and computeTerminalDigestLocked must be
+          # indented inside SecureLogger (4-space prefix).  If they appear at
+          # column 0 they are free module-level functions and will fail to
+          # compile because they use method-call syntax and the private hex()
+          # helper that only exists in the struct's namespace.
+          if grep -En '^(pub fn (sealBundle|settleBundle)|fn computeTerminalDigestLocked)' \
+              src/runtime/shell.zig; then
+            echo ""
+            echo "ERROR: the above function(s) are defined at module scope."
+            echo "They must be indented inside 'pub const SecureLogger = struct {'."
+            echo "This branch is likely based on commits that predate the struct"
+            echo "fix — rebase onto main to pick it up automatically."
+            exit 1
+          fi
+          echo "OK: all SecureLogger methods correctly scoped inside the struct."
+
   # ── Zig build ──────────────────────────────────────────────────────────────
   build:
     name: Zig build
