@@ -11,6 +11,7 @@
 ///   POST /log            {"msg":"…"}  (+X-Skill-Id header)  → 200 {"status":"ok"}
 ///   POST /exec           {"cmd":["arg0","arg1",…]}          → 200 {"exit_code":0,"stdout_b64":"…","stderr_b64":"…","stdout_hash":"…","stderr_hash":"…"}
 ///   POST /hibernate                                          → 200 {"sealed_state":"<hex>"}  (gateway exits cleanly after response)
+///   POST /terminate                                          → 200 {"evidence":{…},"bundle_seal":"BUNDLE_SEAL:…"}  (final proof, no resume blob, then exits)
 ///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","executions":[…]}
 ///   GET  /attestation                                        → 200 {"pcr0":"…","pcr1":"…","pcr2":"…","public_key":"…","doc":"…"}
 ///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
@@ -291,6 +292,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleExec(server, stream, req);
     if (post and mem.eql(u8, req.path, "/hibernate"))
         return handleHibernate(server, stream, req);
+    if (post and mem.eql(u8, req.path, "/terminate"))
+        return handleTerminate(server, stream, req);
     if (get and mem.eql(u8, req.path, "/evidence"))
         return handleEvidence(server, stream, req);
     if (get and mem.eql(u8, req.path, "/attestation"))
@@ -459,6 +462,36 @@ fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedReques
     std.log.info("[VAR-gateway] Hibernating ({d}-byte sealed blob). Sending SIGTERM.", .{blob.len});
 
     // Set the shutdown flag and interrupt the blocking accept() in serve().
+    requestShutdown();
+    std.posix.kill(std.c.getpid(), std.posix.SIG.TERM) catch {};
+}
+
+fn handleTerminate(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    _ = req;
+    // Emit one final signed evidence packet covering any work since the last
+    // /evidence call, then seal the bundle so the TerminalDigest is computed
+    // over every packet signature including the one we just emitted.
+    const evidence_json = try server.logger.getEvidenceBundleJson(server.allocator);
+    defer server.allocator.free(evidence_json);
+
+    const seal_line = server.logger.sealBundle(server.allocator) catch |err| {
+        std.log.err("[VAR-gateway] terminate: sealBundle: {}", .{err});
+        return writeError(stream, 500, "sealBundle failed");
+    };
+    defer server.allocator.free(seal_line);
+
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"evidence\":{s},\"bundle_seal\":\"{s}\"}}",
+        .{ evidence_json, seal_line },
+    );
+    defer server.allocator.free(body);
+
+    try writeResponse(stream, 200, body);
+    // Flush before signalling shutdown — same rationale as /hibernate.
+    std.posix.shutdown(stream.handle, .send) catch {};
+    std.log.info("[VAR-gateway] Terminating with final proof. Sending SIGTERM.", .{});
+
     requestShutdown();
     std.posix.kill(std.c.getpid(), std.posix.SIG.TERM) catch {};
 }
