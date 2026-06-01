@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.1.0
+## Specification v2.2.0
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -396,9 +396,11 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 
 ## 13. Roadmap
 
-### v2.2.0 — Settlement Block Test Vector
+### ~~v2.2.0 — Settlement Block Test Vector~~ ✓ Complete
 
-A second vector covering a two-packet session with a Settlement Block — verifying TerminalDigest computation and the APXT structure end-to-end.
+§15 adds a fully-worked two-packet session with a Settlement Block, covering
+TerminalDigest computation for multiple signatures and the APXT settlement
+signature scope end-to-end.
 
 ---
 
@@ -613,10 +615,182 @@ A compliant implementation MUST produce these exact values given the inputs in �
 
 ---
 
-## 15. Version History
+## 15. Settlement Block Test Vectors
+
+### §15.1 Scope
+
+§15 extends the §14 session by one additional evidence packet and a Settlement
+Block.  The two-packet session verifies:
+
+- TerminalDigest computation over **multiple** concatenated signatures
+- Scope[2] byte layout for a packet with sequence > 1
+- Settlement signature scope (88 bytes: `EscrowID ‖ Amount ‖ Currency ‖
+  TerminalDigest`)
+
+All §14.2 fixed inputs carry over unchanged.
+
+---
+
+### §15.2 Additional Fixed Inputs
+
+#### Second Packet
+
+| Field | Value |
+|:------|:------|
+| Payload bytes | `776f726c64` (`world`) |
+| PayloadLen | 5 |
+| ActionType | `01` (STREAM) |
+| Sequence | 2 |
+
+#### Settlement Block Inputs (SYNTHETIC / TEST-ONLY)
+
+The settlement signature scope sizes match §6: EscrowID=16 bytes, Amount=32
+bytes (decimal string zero-padded), Currency=8 bytes (space-padded).
+
+| Field | Size | Value |
+|:------|-----:|:------|
+| EscrowID | 16 | `deadbeefdead40008000deadbeef0001` (BundleID from §14.2) |
+| Amount | 32 | `31303030303030000000000000000000` `00000000000000000000000000000000` (ASCII `"1000000"`, zero-padded) |
+| Currency | 8 | `5553444320202020` (ASCII `"USDC    "`, space-padded) |
+
+---
+
+### §15.3 L1 Chain Extension
+
+```
+L1[2] = SHA-256(L1[1] ‖ b"world")
+```
+
+| Field | Value |
+|:------|:------|
+| L1[1] (from §14) | `a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b` |
+| Payload (`world`) | `776f726c64` |
+| **L1[2]** | **`cd84b951c893096829a4c78ac9d3efc65f4dc9b3c3896df0653ea887d50142fe`** |
+
+---
+
+### §15.4 Scope[2] — 161-byte Signature Scope for Packet 2
+
+| Offset | Size | Field | Value |
+|-------:|-----:|:------|:------|
+| 0 | 4 | Magic (`"VARE"`) | `56415245` |
+| 4 | 1 | FormatVer | `01` |
+| 5 | 8 | Sequence (u64 LE = 2) | `0200000000000000` |
+| 13 | 32 | PrevL1Hash (= L1[1]) | `a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b` |
+| 45 | 32 | L1Hash (= L1[2]) | `cd84b951c893096829a4c78ac9d3efc65f4dc9b3c3896df0653ea887d50142fe` |
+| 77 | 32 | L2Hash (same as §14) | `d416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71` |
+| 109 | 4 | PayloadLen (u32 LE = 5) | `05000000` |
+| 113 | 32 | SHA-256(Payload) | `486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7` |
+| 145 | 16 | SessionID | `00000000000040008000000000000001` |
+| **161** | | **total** | |
+
+Full scope (161 bytes):
+
+```
+  56 41 52 45 01 02 00 00 00 00 00 00 00 a2 31 fc
+  d1 c0 4f ef 6e 33 39 54 f2 2b 31 14 25 d7 d5 5c
+  e3 99 4b 9a 6d 38 a7 cb 72 ee dc e6 4b cd 84 b9
+  51 c8 93 09 68 29 a4 c7 8a c9 d3 ef c6 5f 4d c9
+  b3 c3 89 6d f0 65 3e a8 87 d5 01 42 fe d4 16 43
+  42 44 a2 ce 82 76 e6 f3 d7 2c c5 3f 95 3f 5e 3f
+  58 1f 2e 68 62 e5 e3 6f ad be 10 ab 71 05 00 00
+  00 48 6e a4 62 24 d1 bb 4f b6 80 f3 4f 7c 9a d9
+  6a 8f 24 ec 88 be 73 ea 8e 5a 6c 65 26 0e 9c b8
+  a7 00 00 00 00 00 00 40 00 80 00 00 00 00 00 00
+  01
+```
+
+#### Packet 2 Signature
+
+```
+Sig[2] = Ed25519_Sign(signing_key, Scope[2])
+```
+
+| Field | Value |
+|:------|:------|
+| Sig[2] (64 bytes) | `937b3e0585745ce592b903c6b7fb0132d5b9658a7eae218ae8019353dd59b2006d8f84f7b2bb756940c7708308c8268315d1d09196f7bf2e68a5be9815d44904` |
+
+---
+
+### §15.5 Terminal Digest — Two-Packet Session
+
+TerminalDigest covers all packet signatures in sequence order by concatenation.
+
+```
+TerminalDigest = SHA-256(Sig[1] ‖ Sig[2])
+```
+
+> **Order is binding.** `SHA-256(Sig[2] ‖ Sig[1])` produces a different digest
+> and MUST be rejected.
+
+| Field | Value |
+|:------|:------|
+| Sig[1] (from §14) | `36092fb379e6e33a6dccf33be6c9b617e0f9b2837195d0e6414ce00590383988a208d9b37d065d1b1999ecb4872b26f4c8ce0bf3f4c91f90cb07b94c0c2b1f05` |
+| Sig[2] | `937b3e0585745ce592b903c6b7fb0132d5b9658a7eae218ae8019353dd59b2006d8f84f7b2bb756940c7708308c8268315d1d09196f7bf2e68a5be9815d44904` |
+| **TerminalDigest** | **`88e004ad67bf28c7a00d6c097ba8a6a09a11508af30b816dff692429b3c33c3d`** |
+
+The §14 single-packet TerminalDigest (`33c143a8…`) MUST NOT match this value.
+
+---
+
+### §15.6 Bundle Seal — Two-Packet Session
+
+```
+BundleHash = SHA-256("VARB" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest)
+SealSig    = Ed25519_Sign(signing_key, BundleHash)
+```
+
+| Field | Value |
+|:------|:------|
+| **BundleHash** | **`e05dd6abae2ee095b5895632845c55ecf44e91bb6c166b83899eb10381f4990c`** |
+| **SealSig** | **`fa384faab2d5d6fb2cd5df6a094cf800f6298ecfab4c3bdfbac2e58c687d651b8ff604df2f92b0f6e5c019189f8f18cb2e7058a878e05ce7496735ab10e3c00e`** |
+
+---
+
+### §15.7 Settlement Block — APXT Signature Scope
+
+The 88-byte settlement signature scope (`APXT`) is formed by concatenating four
+fields in order, matching the Settlement Block wire format (§6):
+
+| Offset | Size | Field | Value |
+|-------:|-----:|:------|:------|
+| 0 | 16 | EscrowID | `deadbeefdead40008000deadbeef0001` |
+| 16 | 32 | Amount (decimal, zero-padded) | `3130303030303000000000000000000000000000000000000000000000000000` |
+| 48 | 8 | Currency (space-padded) | `5553444320202020` |
+| 56 | 32 | TerminalDigest | `88e004ad67bf28c7a00d6c097ba8a6a09a11508af30b816dff692429b3c33c3d` |
+| **88** | | **total** | |
+
+```
+SettlementSig = Ed25519_Sign(signing_key, settle_scope_88)
+```
+
+| Field | Value |
+|:------|:------|
+| **SettlementSig** | **`101f4cf36ec03be2ed7289b4acc664ed2353053a7f336f0094572a6dbb644b91980f7646defb52b4530a8855b4b780d9551375effa9f38b5a251aa861c43880b`** |
+
+---
+
+### §15.8 Summary
+
+A compliant implementation MUST produce these exact values given the §14.2
+inputs plus the §15.2 additional inputs:
+
+| Value | Expected |
+|:------|:---------|
+| L1[2] | `cd84b951c893096829a4c78ac9d3efc65f4dc9b3c3896df0653ea887d50142fe` |
+| Sig[2] | `937b3e0585745ce592b903c6b7fb0132d5b9658a7eae218ae8019353dd59b2006d8f84f7b2bb756940c7708308c8268315d1d09196f7bf2e68a5be9815d44904` |
+| TerminalDigest | `88e004ad67bf28c7a00d6c097ba8a6a09a11508af30b816dff692429b3c33c3d` |
+| BundleHash | `e05dd6abae2ee095b5895632845c55ecf44e91bb6c166b83899eb10381f4990c` |
+| SealSig | `fa384faab2d5d6fb2cd5df6a094cf800f6298ecfab4c3bdfbac2e58c687d651b8ff604df2f92b0f6e5c019189f8f18cb2e7058a878e05ce7496735ab10e3c00e` |
+| SettlementSig | `101f4cf36ec03be2ed7289b4acc664ed2353053a7f336f0094572a6dbb644b91980f7646defb52b4530a8855b4b780d9551375effa9f38b5a251aa861c43880b` |
+
+---
+
+## 16. Version History
 
 | Version | Changes |
 |:---|:---|
+| 2.2.0 | §15 Settlement Block Test Vectors — two-packet session, TerminalDigest over multiple signatures, 88-byte APXT settlement signature scope; §13 roadmap marked complete |
 | 2.1.0 | §14 Test Vectors — fully-worked single-packet session with known synthetic inputs |
 | 2.0.0 | APEX spec. New magic bytes, named action types, Settlement Block, Bundle Seal, strict unknown-type rejection, grapheme cluster correction |
 | 1.5 | VAR evidence_spec: CBOR map walk for PCR extraction, CBOR bounds check, session_pub_cert |
@@ -627,7 +801,7 @@ A compliant implementation MUST produce these exact values given the inputs in �
 
 ---
 
-## 16. Conformance
+## 17. Conformance
 
 An implementation is **APEX-compliant** if it:
 
