@@ -64,6 +64,10 @@ pub const SecureLogger = struct {
     /// Used to compute TerminalDigest = SHA-256(sig[0] ‖ sig[1] ‖ … ‖ sig[N-1])
     /// for the Bundle Seal and Settlement Block.
     sig_log: std.ArrayListUnmanaged([64]u8) = .{},
+    /// Skill IDs observed via noteSkillId() between evidence emissions.
+    /// Drained and cleared by getEvidenceBundle*/getEvidenceBundleJson.
+    /// Each entry is a heap-allocated copy owned by this list.
+    pending_skill_ids: std.ArrayListUnmanaged([]u8) = .{},
 
     /// init anchors the hash chain to the session.  The caller passes the
     /// pre-computed bootstrap_nonce (SHA-256(attestation_doc || session_id))
@@ -93,6 +97,22 @@ pub const SecureLogger = struct {
         for (self.executions.items) |rec| rec.deinit(self.allocator);
         self.executions.deinit(self.allocator);
         self.sig_log.deinit(self.allocator);
+        for (self.pending_skill_ids.items) |s| self.allocator.free(s);
+        self.pending_skill_ids.deinit(self.allocator);
+    }
+
+    /// Records a skill ID for inclusion in the next evidence packet.
+    /// Deduplicates: if the ID is already pending, this is a no-op.
+    /// Safe to call from any thread — acquires the mutex internally.
+    pub fn noteSkillId(self: *SecureLogger, skill_id: []const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.pending_skill_ids.items) |existing| {
+            if (std.mem.eql(u8, existing, skill_id)) return;
+        }
+        const copy = try self.allocator.dupe(u8, skill_id);
+        errdefer self.allocator.free(copy);
+        try self.pending_skill_ids.append(self.allocator, copy);
     }
 
     fn hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -264,9 +284,20 @@ pub const SecureLogger = struct {
         const sig_h = try hex(self.allocator, &sig_bytes);
         defer self.allocator.free(sig_h);
 
+        // Build the optional :skill_ids=foo,bar suffix (empty when no skills active).
+        var skill_buf = std.ArrayListUnmanaged(u8){};
+        defer skill_buf.deinit(self.allocator);
+        if (self.pending_skill_ids.items.len > 0) {
+            try skill_buf.appendSlice(self.allocator, ":skill_ids=");
+            for (self.pending_skill_ids.items, 0..) |id, i| {
+                if (i > 0) try skill_buf.append(self.allocator, ',');
+                try skill_buf.appendSlice(self.allocator, id);
+            }
+        }
+
         const result = try std.fmt.allocPrint(self.allocator,
-            "EVIDENCE:prev_stream={s}:stream={s}:state={s}:sig={s}:seq={d}",
-            .{ prev_h, stream_h, state_h, sig_h, next_seq },
+            "EVIDENCE:prev_stream={s}:stream={s}:state={s}:sig={s}:seq={d}{s}",
+            .{ prev_h, stream_h, state_h, sig_h, next_seq, skill_buf.items },
         );
 
         // Record signature before committing — if this fails (OOM) neither
@@ -276,6 +307,8 @@ pub const SecureLogger = struct {
         // Commit state only after the bundle is fully built.
         self.sequence = next_seq;
         self.prev_stream_hash = self.stream_hash;
+        for (self.pending_skill_ids.items) |s| self.allocator.free(s);
+        self.pending_skill_ids.clearRetainingCapacity();
 
         return result;
     }
@@ -348,9 +381,27 @@ pub const SecureLogger = struct {
         }
         try execs_buf.append(allocator, ']');
 
+        // Build skill_ids JSON array (always present; empty array when no skills active).
+        var skill_ids_buf = std.ArrayListUnmanaged(u8){};
+        defer skill_ids_buf.deinit(allocator);
+        try skill_ids_buf.append(allocator, '[');
+        for (self.pending_skill_ids.items, 0..) |id, i| {
+            if (i > 0) try skill_ids_buf.append(allocator, ',');
+            try skill_ids_buf.append(allocator, '"');
+            for (id) |ch| {
+                switch (ch) {
+                    '"'  => try skill_ids_buf.appendSlice(allocator, "\\\""),
+                    '\\' => try skill_ids_buf.appendSlice(allocator, "\\\\"),
+                    else => try skill_ids_buf.append(allocator, ch),
+                }
+            }
+            try skill_ids_buf.append(allocator, '"');
+        }
+        try skill_ids_buf.append(allocator, ']');
+
         const result = try std.fmt.allocPrint(allocator,
-            \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d},"executions":{s}}}
-        , .{ prev_h, stream_h, state_h, sig_h, next_seq, execs_buf.items });
+            \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d},"skill_ids":{s},"executions":{s}}}
+        , .{ prev_h, stream_h, state_h, sig_h, next_seq, skill_ids_buf.items, execs_buf.items });
 
         // Record signature before committing — if this fails (OOM) neither
         // sequence nor sig_log will have advanced and the caller can retry.
@@ -359,6 +410,8 @@ pub const SecureLogger = struct {
         // Commit state only after the bundle is fully built.
         self.sequence = next_seq;
         self.prev_stream_hash = self.stream_hash;
+        for (self.pending_skill_ids.items) |s| self.allocator.free(s);
+        self.pending_skill_ids.clearRetainingCapacity();
 
         return result;
     }

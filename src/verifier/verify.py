@@ -69,6 +69,7 @@ class EvidencePacket:
     sig: bytes          # 64 bytes — Ed25519 signature
     seq: int
     executions: list = field(default_factory=list)  # present in JSON bundles
+    skill_ids: list = field(default_factory=list)   # present when X-Skill-Id was set
 
 
 @dataclass
@@ -155,6 +156,8 @@ def parse_evidence_line(line: str) -> EvidencePacket:
             k, v = part.split("=", 1)
             fields[k] = v
 
+    raw_ids = fields.get("skill_ids", "")
+    skill_ids = [s for s in raw_ids.split(",") if s]
     return EvidencePacket(
         raw=line,
         prev_stream=_unhex(fields["prev_stream"], "prev_stream", 32),
@@ -162,6 +165,7 @@ def parse_evidence_line(line: str) -> EvidencePacket:
         state=_unhex(fields["state"],             "state",       32),
         sig=_unhex(fields["sig"],                 "sig",         64),
         seq=int(fields["seq"]),
+        skill_ids=skill_ids,
     )
 
 
@@ -197,6 +201,7 @@ def parse_evidence_json(obj: dict) -> EvidencePacket:
         sig=_unhex(obj["sig"],                 "sig",         64),
         seq=int(obj["sequence"]),
         executions=obj.get("executions", []),
+        skill_ids=obj.get("skill_ids", []),
     )
 
 
@@ -523,6 +528,27 @@ def check_settlement_block(
 
 
 # ---------------------------------------------------------------------------
+# §2.4  Skill attribution
+# ---------------------------------------------------------------------------
+
+def check_skill_attribution(packets: list[EvidencePacket]) -> Optional[CheckResult]:
+    """§2.4: Report per-packet skill ID attribution when at least one packet carries IDs.
+
+    Returns None (silent) when no packet in the segment carries skill IDs,
+    so sessions that don't use skills produce no noise in the report.
+    """
+    attributed = [(pkt.seq, pkt.skill_ids) for pkt in packets if pkt.skill_ids]
+    if not attributed:
+        return None
+    lines = [f"seq={seq}: {', '.join(ids)}" for seq, ids in attributed]
+    return CheckResult(
+        "§2.4 Skill attribution",
+        True,
+        f"{len(attributed)}/{len(packets)} packet(s) carry skill ID(s)\n  " + "\n  ".join(lines),
+    )
+
+
+# ---------------------------------------------------------------------------
 # §5.4  Cross-segment PCR consistency
 # ---------------------------------------------------------------------------
 
@@ -662,6 +688,12 @@ def verify_segments(segments: list[Segment]) -> tuple[bool, list[CheckResult]]:
         if exec_check is not None:
             exec_check.section += seg_label
             results.append(exec_check)
+
+        # §2.4 — skill attribution (silent when no skills present).
+        skill_check = check_skill_attribution(seg.packets)
+        if skill_check is not None:
+            skill_check.section += seg_label
+            results.append(skill_check)
 
         if seg.packets:
             last_stream = seg.packets[-1].stream
