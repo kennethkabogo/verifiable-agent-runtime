@@ -88,4 +88,4 @@ jobs:
         run: pip install cryptography cbor2 pytest
 
       - name: Test
-        run: pytest src/agent/tests/ -v
+        run: pytest src/agent/tests/ tests/ -v
