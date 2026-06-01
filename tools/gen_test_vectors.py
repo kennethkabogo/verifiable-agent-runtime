@@ -392,10 +392,173 @@ def main():
     out.append(f"| SealSig | `{SEAL_SIG.hex()}` |")
     out.append("")
 
+    # ── §15: Settlement Block Test Vectors ────────────────────────────────────
+
+    # Additional fixed inputs (§15.2)
+    PAYLOAD_2 = b"world"
+    SEQ_2     = 2
+
+    # Settlement scope sizes per §6: EscrowID=16, Amount=32, Currency=8
+    ESCROW_ID = bytes.fromhex("deadbeefdead40008000deadbeef0001")
+    AMOUNT    = b"1000000" + b"\x00" * 25   # 32 bytes decimal zero-padded
+    CURRENCY  = b"USDC    "                  # 8 bytes space-padded
+
+    # L1 chain extension
+    L1_2 = sha256(L1_1 + PAYLOAD_2)
+
+    # Scope[2] — 161-byte STREAM mode for packet 2
+    def build_scope2() -> bytes:
+        msg = bytearray(161)
+        msg[0:4] = b"VARE"
+        msg[4] = 0x01
+        struct.pack_into("<Q", msg, 5, SEQ_2)
+        msg[13:45]  = L1_1
+        msg[45:77]  = L1_2
+        msg[77:109] = L2_HASH
+        struct.pack_into("<I", msg, 109, len(PAYLOAD_2))
+        msg[113:145] = sha256(PAYLOAD_2)
+        msg[145:161] = SESSION_ID
+        assert len(msg) == 161
+        return bytes(msg)
+
+    SIG_SCOPE_2  = build_scope2()
+    PACKET_SIG_2 = SIGNING_KEY.sign(SIG_SCOPE_2)
+
+    # Two-packet TerminalDigest: SHA-256(Sig[1] ‖ Sig[2])
+    TERMINAL_DIGEST_2 = sha256(PACKET_SIG + PACKET_SIG_2)
+
+    # BundleHash and SealSig for two-packet session
+    BUNDLE_HASH_2 = sha256(b"VARB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + TERMINAL_DIGEST_2)
+    SEAL_SIG_2    = SIGNING_KEY.sign(BUNDLE_HASH_2)
+
+    # Settlement scope: EscrowID(16) | Amount(32) | Currency(8) | TerminalDigest(32) = 88 bytes
+    SETTLE_SCOPE = ESCROW_ID + AMOUNT + CURRENCY + TERMINAL_DIGEST_2
+    assert len(SETTLE_SCOPE) == 88
+    SETTLE_SIG = SIGNING_KEY.sign(SETTLE_SCOPE)
+
+    out.append("---")
+    out.append("")
+    out.append("## 15. Settlement Block Test Vectors")
+    out.append("")
+    out.append("### §15.1 Scope")
+    out.append("")
+    out.append("§15 extends the §14 session by one additional evidence packet and a")
+    out.append("Settlement Block, verifying TerminalDigest over multiple signatures")
+    out.append("and the 88-byte APXT settlement signature scope.")
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("### §15.2 Additional Fixed Inputs")
+    out.append("")
+    out.append("#### Second Packet")
+    out.append("")
+    out.append("| Field | Value |")
+    out.append("|:------|:------|")
+    out.append(f"| Payload bytes | `{PAYLOAD_2.hex()}` (`{PAYLOAD_2.decode()}`) |")
+    out.append(f"| PayloadLen | {len(PAYLOAD_2)} |")
+    out.append(f"| ActionType | `01` (STREAM) |")
+    out.append(f"| Sequence | {SEQ_2} |")
+    out.append("")
+    out.append("#### Settlement Inputs (SYNTHETIC / TEST-ONLY)")
+    out.append("")
+    out.append("| Field | Size | Value |")
+    out.append("|:------|-----:|:------|")
+    out.append(f"| EscrowID | 16 | `{ESCROW_ID.hex()}` |")
+    out.append(f"| Amount (decimal, zero-padded) | 32 | `{AMOUNT.hex()}` |")
+    out.append(f"| Currency (space-padded) | 8 | `{CURRENCY.hex()}` (`\"USDC    \"`) |")
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("### §15.3 L1 Chain Extension")
+    out.append("")
+    out.append("```")
+    out.append("L1[2] = SHA-256(L1[1] ‖ b\"world\")")
+    out.append("```")
+    out.append("")
+    out.append("| Field | Value |")
+    out.append("|:------|:------|")
+    out.append(f"| L1[1] (from §14) | `{L1_1.hex()}` |")
+    out.append(f"| Payload (`world`) | `{PAYLOAD_2.hex()}` |")
+    out.append(f"| **L1[2]** | **`{L1_2.hex()}`** |")
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("### §15.4 Scope[2] — 161-byte Signature Scope for Packet 2")
+    out.append("")
+    out.append(render_scope_table(SIG_SCOPE_2))
+    out.append("")
+    out.append("Full scope (161 bytes):")
+    out.append("")
+    out.append("```")
+    out.append(render_hex_block(SIG_SCOPE_2))
+    out.append("```")
+    out.append("")
+    out.append("#### Packet 2 Signature")
+    out.append("")
+    out.append(f"| Field | Value |")
+    out.append(f"|:------|:------|")
+    out.append(f"| Sig[2] (64 bytes) | `{PACKET_SIG_2.hex()}` |")
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("### §15.5 Terminal Digest — Two-Packet Session")
+    out.append("")
+    out.append("```")
+    out.append("TerminalDigest = SHA-256(Sig[1] ‖ Sig[2])")
+    out.append("```")
+    out.append("")
+    out.append("| Field | Value |")
+    out.append("|:------|:------|")
+    out.append(f"| Sig[1] (from §14) | `{PACKET_SIG.hex()}` |")
+    out.append(f"| Sig[2] | `{PACKET_SIG_2.hex()}` |")
+    out.append(f"| **TerminalDigest** | **`{TERMINAL_DIGEST_2.hex()}`** |")
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("### §15.6 Bundle Seal — Two-Packet Session")
+    out.append("")
+    out.append("| Field | Value |")
+    out.append("|:------|:------|")
+    out.append(f"| **BundleHash** | **`{BUNDLE_HASH_2.hex()}`** |")
+    out.append(f"| **SealSig** | **`{SEAL_SIG_2.hex()}`** |")
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("### §15.7 Settlement Block — APXT Signature Scope")
+    out.append("")
+    out.append("| Offset | Size | Field | Value |")
+    out.append("|-------:|-----:|:------|:------|")
+    out.append(f"| 0 | 16 | EscrowID | `{ESCROW_ID.hex()}` |")
+    out.append(f"| 16 | 32 | Amount (decimal, zero-padded) | `{AMOUNT.hex()}` |")
+    out.append(f"| 48 | 8 | Currency (space-padded) | `{CURRENCY.hex()}` |")
+    out.append(f"| 56 | 32 | TerminalDigest | `{TERMINAL_DIGEST_2.hex()}` |")
+    out.append(f"| **88** | | **total** | |")
+    out.append("")
+    out.append(f"| Field | Value |")
+    out.append(f"|:------|:------|")
+    out.append(f"| **SettlementSig** | **`{SETTLE_SIG.hex()}`** |")
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("### §15.8 Summary")
+    out.append("")
+    out.append("A compliant implementation MUST produce these exact values given the §14.2")
+    out.append("inputs plus the §15.2 additional inputs:")
+    out.append("")
+    out.append("| Value | Expected |")
+    out.append("|:------|:---------|")
+    out.append(f"| L1[2] | `{L1_2.hex()}` |")
+    out.append(f"| Sig[2] | `{PACKET_SIG_2.hex()}` |")
+    out.append(f"| TerminalDigest | `{TERMINAL_DIGEST_2.hex()}` |")
+    out.append(f"| BundleHash | `{BUNDLE_HASH_2.hex()}` |")
+    out.append(f"| SealSig | `{SEAL_SIG_2.hex()}` |")
+    out.append(f"| SettlementSig | `{SETTLE_SIG.hex()}` |")
+    out.append("")
+
     # Print to stdout
     print("\n".join(out))
 
-    # Sanity-check sizes
+    # Sanity-check sizes — §14
     assert len(BOOTSTRAP_NONCE) == 32
     assert len(L1_1) == 32
     assert len(L2_HASH) == 32
@@ -404,8 +567,20 @@ def main():
     assert len(BUNDLE_HASH) == 32
     assert len(SEAL_SIG) == 64
     assert len(SIG_SCOPE) == 161
-    print(f"<!-- Generated by tools/gen_test_vectors.py — all {len(SIG_SCOPE)}-byte scope assertions pass -->",
-          file=__import__("sys").stderr)
+    # Sanity-check sizes — §15
+    assert len(L1_2) == 32
+    assert len(PACKET_SIG_2) == 64
+    assert len(TERMINAL_DIGEST_2) == 32
+    assert len(BUNDLE_HASH_2) == 32
+    assert len(SEAL_SIG_2) == 64
+    assert len(SETTLE_SIG) == 64
+    assert len(SETTLE_SCOPE) == 88
+    assert len(SIG_SCOPE_2) == 161
+    print(
+        f"<!-- Generated by tools/gen_test_vectors.py — "
+        f"§14 ({len(SIG_SCOPE)}-byte scope) and §15 ({len(SETTLE_SCOPE)}-byte settlement scope) assertions pass -->",
+        file=__import__("sys").stderr,
+    )
 
 if __name__ == "__main__":
     main()

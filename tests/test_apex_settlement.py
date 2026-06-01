@@ -4,14 +4,17 @@ APEX v2.2.0 Settlement Block Conformance Tests  (§15 Test Vectors)
 27 tests pinning all §15.8 golden values for a two-packet session
 with a Settlement Block.
 
+33 tests total (27 crypto vectors + 6 verifier integration):
+
 Coverage:
-  TestL1ChainExtension    (4)  — L1[2] formula and golden value
-  TestScope2Layout        (6)  — 161-byte Scope[2] field layout
-  TestSig2                (2)  — Packet 2 signature
-  TestTerminalDigest2     (4)  — SHA-256(Sig[1]‖Sig[2]); ordering / §14 divergence
-  TestBundleHash2         (3)  — BundleHash for two-packet session
-  TestSealSig2            (3)  — SealSig for two-packet session
-  TestSettlementSig       (5)  — 88-byte APXT scope; SettlementSig golden value
+  TestL1ChainExtension      (4)  — L1[2] formula and golden value
+  TestScope2Layout          (6)  — 161-byte Scope[2] field layout
+  TestSig2                  (2)  — Packet 2 signature
+  TestTerminalDigest2       (4)  — SHA-256(Sig[1]‖Sig[2]); ordering / §14 divergence
+  TestBundleHash2           (3)  — BundleHash for two-packet session
+  TestSealSig2              (3)  — SealSig for two-packet session
+  TestSettlementSig         (5)  — 88-byte APXT scope; SettlementSig golden value
+  TestCheckSettlementBlock  (6)  — verify.check_settlement_block() / parse_settlement_line()
 
 Run:
   pip install cryptography pytest
@@ -320,3 +323,109 @@ class TestSettlementSig:
         pub = Ed25519PublicKey.from_public_bytes(_PUB)
         with pytest.raises(InvalidSignature):
             pub.verify(_SETTLE_SIG, wrong_scope)
+
+
+# ===========================================================================
+# TestCheckSettlementBlock — 6 tests
+# Exercise verify.check_settlement_block() and verify.parse_settlement_line()
+# ===========================================================================
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "verifier"))
+import verify as _v  # noqa: E402
+
+
+def _make_settlement_line() -> str:
+    """Build a well-formed SETTLEMENT: line using §15 golden values."""
+    return (
+        f"SETTLEMENT:magic=APXT"
+        f":escrow_id={ESCROW_ID.hex()}"
+        f":amount={AMOUNT.hex()}"
+        f":currency={CURRENCY.hex()}"
+        f":terminal_digest={_TERMINAL_DIGEST_2.hex()}"
+        f":sig={_SETTLE_SIG.hex()}"
+    )
+
+
+def _make_evidence_packets() -> list[_v.EvidencePacket]:
+    """Return the two §15 evidence packets as EvidencePacket objects."""
+    return [
+        _v.EvidencePacket(raw="", prev_stream=_L1_0, stream=_L1_1,
+                          state=_L2_HASH, sig=_SIG_1, seq=SEQ_1),
+        _v.EvidencePacket(raw="", prev_stream=_L1_1, stream=_L1_2,
+                          state=_L2_HASH, sig=_SIG_2, seq=SEQ_2),
+    ]
+
+
+class TestCheckSettlementBlock:
+
+    def test_parse_settlement_line_round_trips(self):
+        """parse_settlement_line() correctly extracts all five fields."""
+        block = _v.parse_settlement_line(_make_settlement_line())
+        assert block.escrow_id        == ESCROW_ID
+        assert block.amount           == AMOUNT
+        assert block.currency         == CURRENCY
+        assert block.terminal_digest  == _TERMINAL_DIGEST_2
+        assert block.sig              == _SETTLE_SIG
+
+    def test_happy_path_passes(self):
+        """Happy path: correct §15 settlement block passes all three steps."""
+        block   = _v.parse_settlement_line(_make_settlement_line())
+        packets = _make_evidence_packets()
+        result  = _v.check_settlement_block(block, packets, _PUB)
+        assert result.passed, result.detail
+
+    def test_terminal_digest_mismatch_fails(self):
+        """A settlement block whose TerminalDigest doesn't match the evidence chain fails."""
+        # Swap in the §14 single-packet TerminalDigest — wrong for a two-packet session.
+        tampered_line = (
+            f"SETTLEMENT:magic=APXT"
+            f":escrow_id={ESCROW_ID.hex()}"
+            f":amount={AMOUNT.hex()}"
+            f":currency={CURRENCY.hex()}"
+            f":terminal_digest={TERMINAL_DIGEST_14_HEX}"
+            f":sig={_SETTLE_SIG.hex()}"
+        )
+        block   = _v.parse_settlement_line(tampered_line)
+        packets = _make_evidence_packets()
+        result  = _v.check_settlement_block(block, packets, _PUB)
+        assert not result.passed
+        assert "TerminalDigest mismatch" in result.detail
+
+    def test_invalid_settlement_sig_fails(self):
+        """A SettlementSig that doesn't verify over the 88-byte APXT scope fails."""
+        bad_sig = bytes([s ^ 0xFF for s in _SETTLE_SIG])  # flip every bit
+        bad_line = (
+            f"SETTLEMENT:magic=APXT"
+            f":escrow_id={ESCROW_ID.hex()}"
+            f":amount={AMOUNT.hex()}"
+            f":currency={CURRENCY.hex()}"
+            f":terminal_digest={_TERMINAL_DIGEST_2.hex()}"
+            f":sig={bad_sig.hex()}"
+        )
+        block   = _v.parse_settlement_line(bad_line)
+        packets = _make_evidence_packets()
+        result  = _v.check_settlement_block(block, packets, _PUB)
+        assert not result.passed
+        assert "SettlementSig invalid" in result.detail
+
+    def test_wrong_signing_pub_fails(self):
+        """Verifying with a different public key fails the SettlementSig check."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        wrong_pub = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+        block   = _v.parse_settlement_line(_make_settlement_line())
+        packets = _make_evidence_packets()
+        result  = _v.check_settlement_block(block, packets, wrong_pub)
+        assert not result.passed
+
+    def test_extract_settlement_returns_none_when_absent(self):
+        """extract_settlement() returns None when no SETTLEMENT: line is present."""
+        lines = [
+            "BUNDLE_HEADER:magic=VARB:session=" + "00" * 16 + ":nonce=" + "00" * 32 +
+            ":enc_pub=" + "00" * 32 + ":pk=" + "00" * 32 + ":doc=\n",
+            "EVIDENCE:prev_stream=" + "aa" * 32 + ":stream=" + "bb" * 32 +
+            ":state=" + "cc" * 32 + ":sig=" + "dd" * 64 + ":seq=1\n",
+        ]
+        assert _v.extract_settlement(lines) is None
