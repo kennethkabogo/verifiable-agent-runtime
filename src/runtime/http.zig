@@ -356,6 +356,7 @@ fn handleLog(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !vo
     defer server.allocator.free(line);
 
     try server.logger.logOutput(line);
+    if (has_skill) try server.logger.noteSkillId(req.skill_id);
     try writeResponse(stream, 200, "{\"status\":\"ok\"}");
 }
 
