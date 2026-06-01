@@ -79,6 +79,17 @@ class Segment:
 
 
 @dataclass
+class SettlementBlock:
+    """Parsed SETTLEMENT:... line (spec §6 / verification Step 8)."""
+    raw: str
+    escrow_id: bytes        # 16 bytes — UUID v4
+    amount: bytes           # 32 bytes — decimal string, zero-padded
+    currency: bytes         # 8 bytes  — ISO 4217, space-padded
+    terminal_digest: bytes  # 32 bytes — must equal bundle-seal TerminalDigest
+    sig: bytes              # 64 bytes — Ed25519 over 88-byte APXT scope
+
+
+@dataclass
 class CheckResult:
     section: str
     passed: bool
@@ -151,6 +162,28 @@ def parse_evidence_line(line: str) -> EvidencePacket:
         state=_unhex(fields["state"],             "state",       32),
         sig=_unhex(fields["sig"],                 "sig",         64),
         seq=int(fields["seq"]),
+    )
+
+
+def parse_settlement_line(line: str) -> SettlementBlock:
+    """Parse a SETTLEMENT:magic=APXT:escrow_id=...:amount=...:... line."""
+    fields: dict[str, str] = {}
+    for part in line.split(":"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            fields[k] = v
+
+    magic = fields.get("magic", "APXT")
+    if magic != "APXT":
+        raise ValueError(f"settlement magic: expected APXT, got {magic!r}")
+
+    return SettlementBlock(
+        raw=line,
+        escrow_id=_unhex(fields["escrow_id"],             "escrow_id",       16),
+        amount=_unhex(fields["amount"],                   "amount",          32),
+        currency=_unhex(fields["currency"],               "currency",         8),
+        terminal_digest=_unhex(fields["terminal_digest"], "terminal_digest", 32),
+        sig=_unhex(fields["sig"],                         "sig",             64),
     )
 
 
@@ -421,6 +454,75 @@ def check_exec_hashes(packets: list[EvidencePacket]) -> Optional[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# §8 Step 8  Settlement Block verification
+# ---------------------------------------------------------------------------
+
+def check_settlement_block(
+    settlement: SettlementBlock,
+    packets: list[EvidencePacket],
+    signing_pub: bytes,
+) -> CheckResult:
+    """§8 Step 8: verify the Settlement Block against the evidence chain.
+
+    1. Recompute TerminalDigest = SHA-256(Sig[1] ‖ … ‖ Sig[N]) from the
+       collected evidence packets.
+    2. Assert settlement.terminal_digest matches that value.
+    3. Verify SettlementSig over the 88-byte APXT scope:
+         EscrowID(16) ‖ Amount(32) ‖ Currency(8) ‖ TerminalDigest(32)
+    """
+    if not packets:
+        return CheckResult(
+            "§8 Settlement Block", False,
+            "no evidence packets — cannot compute TerminalDigest",
+        )
+
+    # Step 1: recompute TerminalDigest from evidence chain
+    terminal_digest = hashlib.sha256(b"".join(pkt.sig for pkt in packets)).digest()
+
+    # Step 2: cross-check against Settlement Block's claimed TerminalDigest
+    if settlement.terminal_digest != terminal_digest:
+        return CheckResult(
+            "§8 Settlement Block", False,
+            f"TerminalDigest mismatch\n"
+            f"  from evidence chain : {terminal_digest.hex()}\n"
+            f"  from settlement     : {settlement.terminal_digest.hex()}",
+        )
+
+    # Step 3: verify SettlementSig over 88-byte APXT scope
+    if not _ED25519_AVAILABLE:
+        return CheckResult(
+            "§8 Settlement Block", True,
+            "TerminalDigest matches; SettlementSig skipped — pip install cryptography",
+            skipped=True,
+        )
+
+    # EscrowID(16) | Amount(32) | Currency(8) | TerminalDigest(32) = 88 bytes
+    scope = (
+        settlement.escrow_id
+        + settlement.amount
+        + settlement.currency
+        + terminal_digest
+    )
+
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(signing_pub)
+        pub.verify(settlement.sig, scope)
+    except InvalidSignature:
+        return CheckResult(
+            "§8 Settlement Block", False,
+            "SettlementSig invalid — does not verify over 88-byte APXT scope",
+        )
+    except Exception as exc:
+        return CheckResult("§8 Settlement Block", False, f"SettlementSig error: {exc}")
+
+    return CheckResult(
+        "§8 Settlement Block", True,
+        f"TerminalDigest matches and SettlementSig valid "
+        f"(escrow={settlement.escrow_id.hex()})",
+    )
+
+
+# ---------------------------------------------------------------------------
 # §5.4  Cross-segment PCR consistency
 # ---------------------------------------------------------------------------
 
@@ -597,6 +699,15 @@ def load_session_log(lines: list[str]) -> list[Segment]:
     return segments
 
 
+def extract_settlement(lines: list[str]) -> Optional[SettlementBlock]:
+    """Return the first SETTLEMENT: block found in a session log, or None."""
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("SETTLEMENT:"):
+            return parse_settlement_line(line)
+    return None
+
+
 def load_json_evidence(header_line: str, json_obj: dict) -> list[Segment]:
     """Build a single-segment list from an explicit BUNDLE_HEADER + JSON bundle."""
     hdr = parse_header(header_line)
@@ -693,6 +804,7 @@ def main() -> int:
     args = parser.parse_args()
 
     # ── Load input ────────────────────────────────────────────────────────────
+    settlement: Optional[SettlementBlock] = None
     try:
         if args.json_file:
             if not args.header:
@@ -701,12 +813,14 @@ def main() -> int:
             with open(args.json_file) as f:
                 json_obj = json.load(f)
             segments = load_json_evidence(args.header, json_obj)
+            settlement = None
 
         elif args.file:
             src = sys.stdin if args.file == "-" else open(args.file)
             with src:
                 lines = src.readlines()
             segments = load_session_log(lines)
+            settlement = extract_settlement(lines)
 
         else:
             parser.print_help()
@@ -719,6 +833,15 @@ def main() -> int:
     # ── Verify ────────────────────────────────────────────────────────────────
     try:
         all_passed, results = verify_segments(segments)
+
+        if settlement is not None:
+            all_packets = [p for seg in segments for p in seg.packets]
+            settle_result = check_settlement_block(
+                settlement, all_packets, segments[-1].header.signing_pub
+            )
+            results.append(settle_result)
+            if not settle_result.passed and not settle_result.skipped:
+                all_passed = False
     except Exception as exc:
         print(f"verification error: {exc}", file=sys.stderr)
         return 2
