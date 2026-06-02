@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.2.0
+## Specification v2.3.0
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -304,6 +304,8 @@ for n in 2..N:
     assert Packet[n].Sequence == Packet[n-1].Sequence + 1
 ```
 
+For multi-segment bundles, apply this check within each segment independently. Cross-segment continuity is verified in Step 10.
+
 ### Step 5 — Verify each packet signature
 For each packet:
 1. Identify the segment whose index covers this packet's sequence number
@@ -331,11 +333,21 @@ Ed25519_Verify(last_segment.SessionPub, EscrowID ‖ Amount ‖ Currency ‖ Ter
 ### Step 9 — L2 Verification (Optional)
 Replay the PTY stream through a VT-compatible parser, compute L2 over the resulting grid (§5.2), and assert it matches each packet's L2Hash. This confirms the signed terminal state corresponds to the actual visible output.
 
+### Step 10 — Verify segment boundaries (multi-segment bundles only)
+If the bundle contains more than one segment, for each boundary between segment N and segment N+1:
+
+1. Assert the first packet of segment N+1 has ActionType == SESSION_RESUME (`0x07`). Do not infer segment boundaries from timing gaps alone.
+2. Assert `first_packet(segment[N+1]).PrevL1Hash == last_evidence_packet(segment[N]).L1Hash`.
+3. Assert sequence numbers are strictly monotonically increasing across the boundary: `first_packet(segment[N+1]).Sequence == last_packet(segment[N]).Sequence + 1`. No reset is permitted.
+4. WARN if the timestamp gap between `last_packet(segment[N])` and `first_packet(segment[N+1])` exceeds the configured threshold (implementation default: 3600 seconds). Do not FAIL — a crash recovery gap is expected and legitimate. The WARN surfaces the gap for audit without invalidating an otherwise intact chain.
+
 ---
 
 ## 9. Hibernate / Resume Protocol
 
 Sessions may span multiple enclave lifecycles. Each resume creates a new segment with a fresh keypair.
+
+### 9.1 Planned Hibernate / Resume
 
 ```
 Agent → Enclave   RESUME:<hex_sealed_blob>
@@ -344,26 +356,57 @@ Enclave → Agent   READY
 Enclave → Agent   RESUMED:session=<orig_session_id>:seq=<last_seq+1>
 ```
 
+### 9.2 Crash Recovery (Unclean Exit)
+
+An unclean exit (OOM kill, SIGKILL, hardware reset) may occur at any point during a session. To guarantee a recoverable chain, the enclave writes a sealed checkpoint after each EVIDENCE emission (§10.3) — before returning acknowledgment to the agent. No separate crash-handling path is required; the same `RESUME` flow applies.
+
+**In-flight data policy.** Log lines accumulated since the last EVIDENCE emission and not yet included in an EVIDENCE packet are not included in the sealed checkpoint and are not recoverable. The resumed segment begins from the last committed EVIDENCE packet. Verifiers MUST NOT expect continuity at sub-EVIDENCE granularity across a segment boundary.
+
+### 9.3 Session Resume First Packet
+
+The first packet of every resumed segment MUST have ActionType == SESSION_RESUME (`0x07`). This provides an explicit boundary marker; verifiers MUST NOT infer segment boundaries from timing gaps alone.
+
+### 9.4 Verifier Requirements for Multi-Segment Sessions
+
 A verifier processing a resumed session MUST:
-1. Accept that SessionPub changes across segments for the same SessionID
-2. Verify each segment's signatures against that segment's SessionPub
-3. Assert `Packet[1].PrevL1Hash` of the resumed segment equals the last L1Hash of the preceding segment
+
+1. Accept that SessionPub changes across segments for the same SessionID.
+2. Verify each segment's signatures against that segment's SessionPub.
+3. Apply Step 10 at each segment boundary (§8 Step 10).
 
 ---
 
 ## 10. Sealed State
 
-Sealed state allows session continuity across enclave restarts. The sealed blob format:
+### 10.1 Blob Format
 
 ```
 [ sealed_dek_len : 4 bytes  ]  u32 LE
 [ sealed_dek     : N bytes  ]  KMS ciphertext of AES-256 DEK
 [ nonce          : 12 bytes ]  AES-GCM nonce
 [ tag            : 16 bytes ]  AES-GCM authentication tag
-[ ciphertext     : M bytes  ]  AES-256-GCM of serialised state
+[ ciphertext     : M bytes  ]  AES-256-GCM of serialised payload (§10.2)
 ```
 
-The Ed25519 signing keypair MUST NOT be persisted in the sealed state. Each resumed segment generates a fresh keypair bound to a new attestation quote.
+### 10.2 Sealed Payload
+
+The plaintext inside the AES-GCM ciphertext contains the minimum state required to resume the evidence chain:
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| SessionID | `[36]u8` | UUID of the original session |
+| BootstrapNonce | `[32]u8` | Original nonce from segment 0; replayed in `BUNDLE_HEADER` on resume |
+| SegmentIndex | `u32` LE | Index of the next segment to be created on resume |
+| LastSeq | `u64` LE | Sequence number of the last committed EVIDENCE packet |
+| LastEvidenceL1Hash | `[32]u8` | L1Hash of the last committed EVIDENCE packet; becomes `PrevL1Hash` of the first packet in the resumed segment |
+
+The Ed25519 signing keypair MUST NOT be included in the sealed payload. Each resumed segment generates a fresh keypair bound to a new attestation quote.
+
+### 10.3 Checkpoint Timing
+
+The enclave MUST write a sealed checkpoint synchronously after each successful EVIDENCE emission, before returning acknowledgment to the agent. A crash between two evidence windows loses at most the in-flight window opened since the last checkpoint.
+
+The TERMINATE path SHOULD write a final checkpoint in the same format. No separate terminal-seal format is defined.
 
 ---
 
@@ -391,6 +434,7 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 | Settlement detachment | TerminalDigest is bound in both the Bundle Seal and Settlement Block signatures (Step 8) |
 | Short CBOR slice | Verifiers MUST bounds-check all CBOR bstr reads; a truncated document MUST fail, not yield a short slice |
 | ECDSA signature truncation | Settlement signatures MUST be validated for correct length before r/s extraction |
+| Input-channel attestation (known gap) | APEX attests the output side of process attestation — what the agent produced. Input-channel attestation (verifying that inputs were not synthetically replayed) is out of scope for v2.x and is a known gap for adversarial input replay on owned hardware. |
 
 ---
 
@@ -846,6 +890,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.3.0 | §9 Hibernate/Resume expanded to four subsections covering crash recovery (§9.2), SESSION_RESUME first-packet requirement (§9.3), and verifier rules (§9.4); §10 Sealed State expanded with sealed payload field table (§10.2) and checkpoint timing (§10.3); §8 Step 10 added for multi-segment boundary verification; §17 Conformance updated; input-channel attestation gap documented in §12 |
 | 2.2.0 | §15 Settlement Block Test Vectors — two-packet session, TerminalDigest over multiple signatures, 88-byte APXT settlement signature scope; §13 roadmap marked complete |
 | 2.1.0 | §14 Test Vectors — fully-worked single-packet session with known synthetic inputs |
 | 2.0.0 | APEX spec. New magic bytes, named action types, Settlement Block, Bundle Seal, strict unknown-type rejection, grapheme cluster correction |
@@ -861,13 +906,14 @@ inputs plus the §15.2 additional inputs:
 
 An implementation is **APEX-compliant** if it:
 
-1. Produces bundles that pass all Steps 1–8 of the verification algorithm (§8)
+1. Produces bundles that pass all Steps 1–10 of the verification algorithm (§8)
 2. Rejects unknown ActionType values rather than passing them through
 3. Performs CBOR map walk (not byte scan) for PCR extraction
 4. Does not persist the Ed25519 signing keypair across hibernate/resume cycles
 5. Gates settlement on a verified TerminalDigest
+6. Writes a sealed checkpoint after each EVIDENCE emission (§10.3) and emits SESSION_RESUME as the first packet of every resumed segment (§9.3)
 
-A verifier is **APEX-compliant** if it implements all Steps 1–8 and correctly handles multi-segment sessions.
+A verifier is **APEX-compliant** if it implements all Steps 1–10 and correctly handles multi-segment sessions per §9.4.
 
 ---
 
