@@ -394,13 +394,69 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 
 ---
 
-## 13. Roadmap
+## 13. Post-Quantum Migration Path
 
-### ~~v2.2.0 — Settlement Block Test Vector~~ ✓ Complete
+### 13.1 Exposure
 
-§15 adds a fully-worked two-packet session with a Settlement Block, covering
-TerminalDigest computation for multiple signatures and the APXT settlement
-signature scope end-to-end.
+APEX uses Ed25519 (Curve25519) at three points:
+
+| Surface | Usage | Forgery consequence |
+| :--- | :--- | :--- |
+| Evidence packet signatures | Signs the 161-byte scope per packet | Fabricated audit trail |
+| BundleSeal signature | Signs BundleHash over TerminalDigest | False proof of clean termination |
+| SettlementSig | Signs 88-byte APXT scope | **Redirected funds** |
+
+Ed25519 is an elliptic curve scheme. Shor's algorithm breaks the elliptic curve discrete
+logarithm problem on a sufficiently capable quantum computer; the curve choice (Curve25519
+vs secp256k1) does not affect this exposure.
+
+**What is already quantum-resistant:**
+
+The L1/L2 hash chain, TerminalDigest, BundleHash, and bootstrap nonce are all SHA-256.
+SHA-256 provides approximately 128 bits of quantum security under Grover's algorithm —
+adequate at current projections. The protocol skeleton survives post-quantum migration intact;
+only the three signature surfaces above require replacement.
+
+### 13.2 Migration Target
+
+| Scheme | Standard | Notes |
+| :--- | :--- | :--- |
+| ML-DSA | NIST FIPS 204 (2024) | Primary candidate. Lattice-based; NIST-standardized. |
+| SPHINCS+ | NIST FIPS 205 (2024) | Hash-based alternative. No lattice assumption dependency; larger signatures (~8–50 KB). |
+
+The signed scope format changes in width, not structure. The 161-byte evidence packet scope,
+88-byte APXT settlement scope, and 32-byte BundleHash input remain structurally unchanged;
+only the signature bytes appended to each grow. A MAJOR version bump (v3.0.0) handles the
+transition cleanly — v2.x and v3.x bundles are distinguishable by the version field in the
+Bundle Header.
+
+Hybrid signatures (Ed25519 + ML-DSA in parallel, both required to verify) are the
+recommended transitional approach: they provide backward compatibility for v2.x verifiers
+while hardening against quantum adversaries before full migration is complete.
+
+### 13.3 Migration Priority
+
+Replace in this order:
+
+1. **SettlementSig** — financial forgery risk. An attacker who breaks the session keypair can
+   redirect an in-flight settlement. This is the highest-value target and the first surface
+   to harden.
+2. **BundleSeal signature** — proof-of-termination forgery risk. A forged BundleSeal breaks
+   the clean-termination guarantee that `POST /terminate` relies on.
+3. **Evidence packet signatures** — audit trail forgery risk. Lower urgency because the L1
+   hash chain itself is quantum-resistant; a forged packet signature alone does not let an
+   attacker alter the hash chain without detection.
+
+### 13.4 Timeline Guidance
+
+NIST, Google, and Cloudflare have each named 2029 as the target completion date for
+post-quantum migration. The US government (NSA/NIST) currently specifies 2035 as the
+deadline for retiring quantum-vulnerable cryptography in federal use; this date is widely
+regarded as a floor, not a ceiling.
+
+APEX implementations targeting regulated environments or long-lived settlement records
+SHOULD begin planning SettlementSig migration no later than 2028 to allow adequate
+verification tooling and key infrastructure lead time.
 
 ---
 
