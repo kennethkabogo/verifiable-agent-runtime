@@ -87,6 +87,9 @@ pub const SecureLogger = struct {
     /// Used to serve GET /evidence?from=&to= range queries without
     /// replaying the full bundle.
     evidence_log: std.ArrayListUnmanaged(EvidenceRecord) = .{},
+    /// Signaled (broadcast) after each successful evidence emission.
+    /// GET /evidence/stream clients wait on this to receive live packets.
+    stream_cond: std.Thread.Condition = .{},
 
     /// init anchors the hash chain to the session.  The caller passes the
     /// pre-computed bootstrap_nonce (SHA-256(attestation_doc || session_id))
@@ -356,6 +359,7 @@ pub const SecureLogger = struct {
         self.prev_stream_hash = self.stream_hash;
         for (self.pending_skill_ids.items) |s| self.allocator.free(s);
         self.pending_skill_ids.clearRetainingCapacity();
+        self.stream_cond.broadcast();
 
         return result;
     }
@@ -484,6 +488,7 @@ pub const SecureLogger = struct {
         self.prev_stream_hash = self.stream_hash;
         for (self.pending_skill_ids.items) |s| self.allocator.free(s);
         self.pending_skill_ids.clearRetainingCapacity();
+        self.stream_cond.broadcast();
 
         return result;
     }
@@ -566,6 +571,70 @@ pub const SecureLogger = struct {
 
         try buf.appendSlice(allocator, count_and_rest);
         return buf.toOwnedSlice(allocator);
+    }
+
+    /// Serializes one EvidenceRecord into a JSON packet string.
+    /// Caller owns the returned slice.  Must be called without holding the mutex
+    /// (or with a copy of the record) since it allocates.
+    fn formatEvidencePacket(allocator: std.mem.Allocator, rec: EvidenceRecord) ![]u8 {
+        const prev_h = try hex(allocator, &rec.prev_stream);
+        defer allocator.free(prev_h);
+        const stream_h = try hex(allocator, &rec.stream);
+        defer allocator.free(stream_h);
+        const state_h = try hex(allocator, &rec.state);
+        defer allocator.free(state_h);
+        const sig_h = try hex(allocator, &rec.sig);
+        defer allocator.free(sig_h);
+
+        var sids_json = std.ArrayListUnmanaged(u8){};
+        defer sids_json.deinit(allocator);
+        try sids_json.append(allocator, '[');
+        if (rec.skill_ids.len > 0) {
+            var it = std.mem.splitScalar(u8, rec.skill_ids, ',');
+            var first = true;
+            while (it.next()) |sid| {
+                if (!first) try sids_json.append(allocator, ',');
+                first = false;
+                try sids_json.append(allocator, '"');
+                try sids_json.appendSlice(allocator, sid);
+                try sids_json.append(allocator, '"');
+            }
+        }
+        try sids_json.append(allocator, ']');
+
+        return std.fmt.allocPrint(allocator,
+            "{{\"prev_stream\":\"{s}\",\"stream\":\"{s}\",\"state\":\"{s}\",\"sig\":\"{s}\",\"sequence\":{d},\"skill_ids\":{s}}}",
+            .{ prev_h, stream_h, state_h, sig_h, rec.seq, sids_json.items },
+        );
+    }
+
+    /// Blocks until new evidence records are available since `cursor` (or until
+    /// `timeout_ns` elapses), then serializes each new record as a JSON packet
+    /// string and appends it to `out`.  Returns the updated cursor.  If no new
+    /// records arrive before the timeout, returns `cursor` unchanged and leaves
+    /// `out` unmodified.  Caller owns all strings appended to `out`.
+    pub fn pollEvidenceSince(
+        self: *SecureLogger,
+        allocator: std.mem.Allocator,
+        cursor: usize,
+        timeout_ns: u64,
+        out: *std.ArrayListUnmanaged([]u8),
+    ) !usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (cursor >= self.evidence_log.items.len) {
+            self.stream_cond.timedWait(&self.mutex, timeout_ns) catch {};
+            if (cursor >= self.evidence_log.items.len) return cursor;
+        }
+
+        const new_cursor = self.evidence_log.items.len;
+        for (self.evidence_log.items[cursor..new_cursor]) |rec| {
+            const json = try formatEvidencePacket(allocator, rec);
+            errdefer allocator.free(json);
+            try out.append(allocator, json);
+        }
+        return new_cursor;
     }
 
     /// SHA-256(sig[0] ‖ sig[1] ‖ … ‖ sig[N-1]).
@@ -947,4 +1016,71 @@ test "getEvidenceRange: skill_ids propagated into range response" {
 
     try std.testing.expect(std.mem.indexOf(u8, range, "\"alpha\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, range, "\"count\":2") != null);
+}
+
+test "pollEvidenceSince: returns existing records immediately" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const e1 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e1);
+    const e2 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e2);
+
+    var out = std.ArrayListUnmanaged([]u8){};
+    defer {
+        for (out.items) |j| allocator.free(j);
+        out.deinit(allocator);
+    }
+    const new_cursor = try logger.pollEvidenceSince(allocator, 0, std.time.ns_per_s, &out);
+
+    try std.testing.expectEqual(@as(usize, 2), new_cursor);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, out.items[0], "\"sequence\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items[1], "\"sequence\":2") != null);
+}
+
+test "pollEvidenceSince: times out with no new records" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    var out = std.ArrayListUnmanaged([]u8){};
+    defer out.deinit(allocator);
+
+    // 1ms timeout — should return immediately with cursor unchanged.
+    const new_cursor = try logger.pollEvidenceSince(allocator, 0, std.time.ns_per_ms, &out);
+
+    try std.testing.expectEqual(@as(usize, 0), new_cursor);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "pollEvidenceSince: wakes on emission from another thread" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const T = struct {
+        fn emit(l: *SecureLogger, a: std.mem.Allocator) void {
+            std.time.sleep(10 * std.time.ns_per_ms);
+            const e = l.getEvidenceBundleJson(a) catch return;
+            a.free(e);
+        }
+    };
+    const t = try std.Thread.spawn(.{}, T.emit, .{ &logger, allocator });
+
+    var out = std.ArrayListUnmanaged([]u8){};
+    defer {
+        for (out.items) |j| allocator.free(j);
+        out.deinit(allocator);
+    }
+    const new_cursor = try logger.pollEvidenceSince(allocator, 0, std.time.ns_per_s, &out);
+    t.join();
+
+    try std.testing.expectEqual(@as(usize, 1), new_cursor);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
 }

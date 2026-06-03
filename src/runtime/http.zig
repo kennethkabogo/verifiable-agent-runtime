@@ -14,6 +14,7 @@
 ///   POST /terminate                                          → 200 {"evidence":{…},"bundle_seal":"BUNDLE_SEAL:…"}  (final proof, no resume blob, then exits)
 ///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","executions":[…]}
 ///   GET  /evidence?from=<seq>&to=<seq>                       → 200 {"from":N,"to":N,"count":K,"packets":[…]}
+///   GET  /evidence/stream                                    → 200 text/event-stream (one "data: {…}\n\n" per evidence emission)
 ///   GET  /attestation                                        → 200 {"pcr0":"…","pcr1":"…","pcr2":"…","public_key":"…","doc":"…"}
 ///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
 ///   GET  /verify-and-attest                                  → 200 {"decision":{…},"evidence":{…},"attestation":{…}}
@@ -296,6 +297,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
     if (post and mem.eql(u8, req.path, "/terminate"))
         return handleTerminate(server, stream, req);
     if (get and mem.startsWith(u8, req.path, "/evidence")) {
+        if (mem.eql(u8, req.path, "/evidence/stream"))
+            return handleEvidenceStream(server, stream, req);
         if (mem.indexOfScalar(u8, req.path, '?') != null)
             return handleEvidenceRange(server, stream, req);
         return handleEvidence(server, stream, req);
@@ -467,6 +470,39 @@ fn parseQueryParam(query: []const u8, name: []const u8) ?u64 {
             return std.fmt.parseInt(u64, pair[eq + 1 ..], 10) catch null;
     }
     return null;
+}
+
+fn handleEvidenceStream(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    _ = req;
+    try stream.writeAll(
+        "HTTP/1.1 200 OK\r\n" ++
+        "Content-Type: text/event-stream\r\n" ++
+        "Cache-Control: no-cache\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "\r\n",
+    );
+
+    var cursor: usize = 0;
+    outer: while (!g_shutdown.load(.monotonic)) {
+        var out = std.ArrayListUnmanaged([]u8){};
+        defer {
+            for (out.items) |j| server.allocator.free(j);
+            out.deinit(server.allocator);
+        }
+        cursor = try server.logger.pollEvidenceSince(
+            server.allocator, cursor, 5 * std.time.ns_per_s, &out,
+        );
+        for (out.items) |json| {
+            if (!writeSSEPacket(stream, json)) break :outer;
+        }
+    }
+}
+
+fn writeSSEPacket(stream: net.Stream, json: []const u8) bool {
+    stream.writeAll("data: ") catch return false;
+    stream.writeAll(json) catch return false;
+    stream.writeAll("\n\n") catch return false;
+    return true;
 }
 
 fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
