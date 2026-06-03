@@ -343,7 +343,7 @@ pub const SecureLogger = struct {
             return err;
         };
         errdefer {
-            const popped = self.evidence_log.pop();
+            const popped = self.evidence_log.pop() orelse unreachable;
             self.allocator.free(popped.skill_ids);
         }
 
@@ -471,7 +471,7 @@ pub const SecureLogger = struct {
             return err;
         };
         errdefer {
-            const popped = self.evidence_log.pop();
+            const popped = self.evidence_log.pop() orelse unreachable;
             self.allocator.free(popped.skill_ids);
         }
 
