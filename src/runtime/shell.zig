@@ -4,6 +4,21 @@ const exec = @import("exec.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// Compact record of one evidence emission, stored for range queries.
+/// skill_ids is a comma-separated owned string ("foo,bar" or "" when empty).
+pub const EvidenceRecord = struct {
+    seq: u64,
+    prev_stream: [32]u8,
+    stream: [32]u8,
+    state: [32]u8,
+    sig: [64]u8,
+    skill_ids: []u8,
+
+    pub fn deinit(self: EvidenceRecord, allocator: std.mem.Allocator) void {
+        allocator.free(self.skill_ids);
+    }
+};
+
 /// Structured record of the most recent subprocess execution.
 /// Stored in SecureLogger and emitted in the evidence bundle so verifiers
 /// can bind a specific command invocation to the L1 hash chain without
@@ -68,6 +83,10 @@ pub const SecureLogger = struct {
     /// Drained and cleared by getEvidenceBundle*/getEvidenceBundleJson.
     /// Each entry is a heap-allocated copy owned by this list.
     pending_skill_ids: std.ArrayListUnmanaged([]u8) = .{},
+    /// One entry per evidence emission, in seq order.
+    /// Used to serve GET /evidence?from=&to= range queries without
+    /// replaying the full bundle.
+    evidence_log: std.ArrayListUnmanaged(EvidenceRecord) = .{},
 
     /// init anchors the hash chain to the session.  The caller passes the
     /// pre-computed bootstrap_nonce (SHA-256(attestation_doc || session_id))
@@ -99,6 +118,8 @@ pub const SecureLogger = struct {
         self.sig_log.deinit(self.allocator);
         for (self.pending_skill_ids.items) |s| self.allocator.free(s);
         self.pending_skill_ids.deinit(self.allocator);
+        for (self.evidence_log.items) |rec| rec.deinit(self.allocator);
+        self.evidence_log.deinit(self.allocator);
     }
 
     /// Records a skill ID for inclusion in the next evidence packet.
@@ -300,6 +321,32 @@ pub const SecureLogger = struct {
             .{ prev_h, stream_h, state_h, sig_h, next_seq, skill_buf.items },
         );
 
+        // Build skill_ids CSV for evidence_log (comma-separated, "" when empty).
+        var sids_csv = std.ArrayListUnmanaged(u8){};
+        defer sids_csv.deinit(self.allocator);
+        for (self.pending_skill_ids.items, 0..) |id, i| {
+            if (i > 0) try sids_csv.append(self.allocator, ',');
+            try sids_csv.appendSlice(self.allocator, id);
+        }
+        const sids_owned = try sids_csv.toOwnedSlice(self.allocator);
+
+        // Record evidence entry before sig_log so OOM in either is recoverable.
+        self.evidence_log.append(self.allocator, EvidenceRecord{
+            .seq = next_seq,
+            .prev_stream = prev_hash,
+            .stream = self.stream_hash,
+            .state = state_digest,
+            .sig = sig_bytes,
+            .skill_ids = sids_owned,
+        }) catch |err| {
+            self.allocator.free(sids_owned);
+            return err;
+        };
+        errdefer {
+            const popped = self.evidence_log.pop() orelse unreachable;
+            self.allocator.free(popped.skill_ids);
+        }
+
         // Record signature before committing — if this fails (OOM) neither
         // sequence nor sig_log will have advanced and the caller can retry.
         try self.sig_log.append(self.allocator, sig_bytes);
@@ -403,6 +450,31 @@ pub const SecureLogger = struct {
             \\{{"prev_stream":"{s}","stream":"{s}","state":"{s}","sig":"{s}","sequence":{d},"skill_ids":{s},"executions":{s}}}
         , .{ prev_h, stream_h, state_h, sig_h, next_seq, skill_ids_buf.items, execs_buf.items });
 
+        // Build skill_ids CSV for evidence_log (comma-separated, "" when empty).
+        var sids_csv = std.ArrayListUnmanaged(u8){};
+        defer sids_csv.deinit(self.allocator);
+        for (self.pending_skill_ids.items, 0..) |id, i| {
+            if (i > 0) try sids_csv.append(self.allocator, ',');
+            try sids_csv.appendSlice(self.allocator, id);
+        }
+        const sids_owned = try sids_csv.toOwnedSlice(self.allocator);
+
+        self.evidence_log.append(self.allocator, EvidenceRecord{
+            .seq = next_seq,
+            .prev_stream = prev_hash,
+            .stream = self.stream_hash,
+            .state = state_digest,
+            .sig = sig_bytes,
+            .skill_ids = sids_owned,
+        }) catch |err| {
+            self.allocator.free(sids_owned);
+            return err;
+        };
+        errdefer {
+            const popped = self.evidence_log.pop() orelse unreachable;
+            self.allocator.free(popped.skill_ids);
+        }
+
         // Record signature before committing — if this fails (OOM) neither
         // sequence nor sig_log will have advanced and the caller can retry.
         try self.sig_log.append(self.allocator, sig_bytes);
@@ -414,6 +486,86 @@ pub const SecureLogger = struct {
         self.pending_skill_ids.clearRetainingCapacity();
 
         return result;
+    }
+
+    /// Returns a JSON object containing all evidence records with seq in [from_seq, to_seq].
+    /// Response: {"from":N,"to":N,"count":K,"packets":[{prev_stream,stream,state,sig,sequence,skill_ids},...]}
+    /// Out-of-range queries return an empty packets array; no 400 is raised for unknown seq values.
+    pub fn getEvidenceRange(
+        self: *SecureLogger,
+        allocator: std.mem.Allocator,
+        from_seq: u64,
+        to_seq: u64,
+    ) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(allocator);
+
+        const header = try std.fmt.allocPrint(allocator,
+            "{{\"from\":{d},\"to\":{d},\"count\":",
+            .{ from_seq, to_seq },
+        );
+        defer allocator.free(header);
+        try buf.appendSlice(allocator, header);
+
+        // Reserve space for count — we don't know it yet; fill in after building packets.
+        // Instead: build packets first into a separate buffer, then assemble.
+        var pkts_buf = std.ArrayListUnmanaged(u8){};
+        defer pkts_buf.deinit(allocator);
+        try pkts_buf.append(allocator, '[');
+
+        var count: usize = 0;
+        for (self.evidence_log.items) |rec| {
+            if (rec.seq < from_seq or rec.seq > to_seq) continue;
+
+            if (count > 0) try pkts_buf.append(allocator, ',');
+            count += 1;
+
+            const prev_h = try hex(allocator, &rec.prev_stream);
+            defer allocator.free(prev_h);
+            const stream_h = try hex(allocator, &rec.stream);
+            defer allocator.free(stream_h);
+            const state_h = try hex(allocator, &rec.state);
+            defer allocator.free(state_h);
+            const sig_h = try hex(allocator, &rec.sig);
+            defer allocator.free(sig_h);
+
+            // Convert comma-separated skill_ids to a JSON array.
+            var sids_json = std.ArrayListUnmanaged(u8){};
+            defer sids_json.deinit(allocator);
+            try sids_json.append(allocator, '[');
+            if (rec.skill_ids.len > 0) {
+                var it = std.mem.splitScalar(u8, rec.skill_ids, ',');
+                var first_sid = true;
+                while (it.next()) |sid| {
+                    if (!first_sid) try sids_json.append(allocator, ',');
+                    first_sid = false;
+                    try sids_json.append(allocator, '"');
+                    try sids_json.appendSlice(allocator, sid);
+                    try sids_json.append(allocator, '"');
+                }
+            }
+            try sids_json.append(allocator, ']');
+
+            const pkt = try std.fmt.allocPrint(allocator,
+                "{{\"prev_stream\":\"{s}\",\"stream\":\"{s}\",\"state\":\"{s}\",\"sig\":\"{s}\",\"sequence\":{d},\"skill_ids\":{s}}}",
+                .{ prev_h, stream_h, state_h, sig_h, rec.seq, sids_json.items },
+            );
+            defer allocator.free(pkt);
+            try pkts_buf.appendSlice(allocator, pkt);
+        }
+        try pkts_buf.append(allocator, ']');
+
+        const count_and_rest = try std.fmt.allocPrint(allocator,
+            "{d},\"packets\":{s}}}",
+            .{ count, pkts_buf.items },
+        );
+        defer allocator.free(count_and_rest);
+
+        try buf.appendSlice(allocator, count_and_rest);
+        return buf.toOwnedSlice(allocator);
     }
 
     /// SHA-256(sig[0] ‖ sig[1] ‖ … ‖ sig[N-1]).
@@ -714,4 +866,85 @@ test "settleBundle: amount longer than 31 bytes returns AmountTooLong" {
         .recipient = [_]u8{0} ** 64,
     };
     try std.testing.expectError(error.AmountTooLong, logger.settleBundle(allocator, params));
+}
+
+test "evidence_log: records one entry per emission" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), logger.evidence_log.items.len);
+
+    const e1 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e1);
+    const e2 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e2);
+    const e3 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e3);
+
+    try std.testing.expectEqual(@as(usize, 3), logger.evidence_log.items.len);
+    try std.testing.expectEqual(@as(u64, 1), logger.evidence_log.items[0].seq);
+    try std.testing.expectEqual(@as(u64, 2), logger.evidence_log.items[1].seq);
+    try std.testing.expectEqual(@as(u64, 3), logger.evidence_log.items[2].seq);
+}
+
+test "getEvidenceRange: returns only packets within [from, to]" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    // Emit 5 packets.
+    for (0..5) |_| {
+        const e = try logger.getEvidenceBundleJson(allocator);
+        allocator.free(e);
+    }
+
+    // Query [2, 4] — should return packets with seq 2, 3, 4.
+    const range = try logger.getEvidenceRange(allocator, 2, 4);
+    defer allocator.free(range);
+
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"count\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"sequence\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"sequence\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"sequence\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"sequence\":1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"sequence\":5") == null);
+}
+
+test "getEvidenceRange: empty result for out-of-range query" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const e1 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e1);
+
+    const range = try logger.getEvidenceRange(allocator, 100, 200);
+    defer allocator.free(range);
+
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"count\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"packets\":[]") != null);
+}
+
+test "getEvidenceRange: skill_ids propagated into range response" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    // seq=1 with no skill, seq=2 with skill "alpha".
+    const e1 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e1);
+    try logger.noteSkillId("alpha");
+    const e2 = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(e2);
+
+    const range = try logger.getEvidenceRange(allocator, 1, 2);
+    defer allocator.free(range);
+
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"alpha\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, range, "\"count\":2") != null);
 }

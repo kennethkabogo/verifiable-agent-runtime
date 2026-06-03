@@ -13,6 +13,7 @@
 ///   POST /hibernate                                          → 200 {"sealed_state":"<hex>"}  (gateway exits cleanly after response)
 ///   POST /terminate                                          → 200 {"evidence":{…},"bundle_seal":"BUNDLE_SEAL:…"}  (final proof, no resume blob, then exits)
 ///   GET  /evidence                                           → 200 {"stream":"…","state":"…","sig":"…","executions":[…]}
+///   GET  /evidence?from=<seq>&to=<seq>                       → 200 {"from":N,"to":N,"count":K,"packets":[…]}
 ///   GET  /attestation                                        → 200 {"pcr0":"…","pcr1":"…","pcr2":"…","public_key":"…","doc":"…"}
 ///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
 ///   GET  /verify-and-attest                                  → 200 {"decision":{…},"evidence":{…},"attestation":{…}}
@@ -294,8 +295,11 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleHibernate(server, stream, req);
     if (post and mem.eql(u8, req.path, "/terminate"))
         return handleTerminate(server, stream, req);
-    if (get and mem.eql(u8, req.path, "/evidence"))
+    if (get and mem.startsWith(u8, req.path, "/evidence")) {
+        if (mem.indexOfScalar(u8, req.path, '?') != null)
+            return handleEvidenceRange(server, stream, req);
         return handleEvidence(server, stream, req);
+    }
     if (get and mem.eql(u8, req.path, "/attestation"))
         return handleAttestation(server, stream, req);
     if (get and mem.eql(u8, req.path, "/session"))
@@ -433,6 +437,36 @@ fn handleEvidence(server: *GatewayServer, stream: net.Stream, req: ParsedRequest
     const body = try server.logger.getEvidenceBundleJson(server.allocator);
     defer server.allocator.free(body);
     try writeResponse(stream, 200, body);
+}
+
+fn handleEvidenceRange(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    const q_pos = mem.indexOfScalar(u8, req.path, '?') orelse
+        return writeError(stream, 400, "missing query parameters");
+    const query = req.path[q_pos + 1 ..];
+
+    const from_seq = parseQueryParam(query, "from") orelse
+        return writeError(stream, 400, "missing or invalid \"from\" parameter");
+    const to_seq = parseQueryParam(query, "to") orelse
+        return writeError(stream, 400, "missing or invalid \"to\" parameter");
+    if (from_seq > to_seq)
+        return writeError(stream, 400, "\"from\" must be <= \"to\"");
+
+    const body = try server.logger.getEvidenceRange(server.allocator, from_seq, to_seq);
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
+}
+
+/// Parses a single named parameter from an application/x-www-form-urlencoded
+/// query string (e.g. "from=3&to=7"). Returns null if the name is absent or
+/// the value cannot be parsed as a base-10 u64.
+fn parseQueryParam(query: []const u8, name: []const u8) ?u64 {
+    var it = mem.splitScalar(u8, query, '&');
+    while (it.next()) |pair| {
+        const eq = mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (mem.eql(u8, pair[0..eq], name))
+            return std.fmt.parseInt(u64, pair[eq + 1 ..], 10) catch null;
+    }
+    return null;
 }
 
 fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
