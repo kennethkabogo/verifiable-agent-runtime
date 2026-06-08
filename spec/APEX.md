@@ -435,6 +435,7 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 | Short CBOR slice | Verifiers MUST bounds-check all CBOR bstr reads; a truncated document MUST fail, not yield a short slice |
 | ECDSA signature truncation | Settlement signatures MUST be validated for correct length before r/s extraction |
 | Input-channel attestation (known gap) | APEX attests the output side of process attestation — what the agent produced. Input-channel attestation (verifying that inputs were not synthetically replayed) is out of scope for v2.x and is a known gap for adversarial input replay on owned hardware. |
+| Stale sealed-state replay under partition (known gap) | If an attacker forces a crash during a network partition (S_D→S_F in the session lifecycle), a stale sealed checkpoint from before the partition may be presented on RESUME. The KMS will unseal it (the PCR measurement is valid), and the chain will resume from stale state — silently dropping evidence emitted after the last checkpoint but before the partition. APEX v2.3.0 does not mitigate this. A full mitigation requires the KMS or a trusted counter service to reject any RESUME whose sealed sequence number was already seen (anti-replay on the checkpoint nonce). Known gap for v2.x. |
 
 ---
 
