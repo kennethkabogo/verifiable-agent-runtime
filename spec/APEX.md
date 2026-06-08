@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.3.0
+## Specification v2.4.0
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -198,6 +198,7 @@ Unknown action types MUST cause verification to fail. Implementers MUST NOT sile
 | `0x06` | SESSION_START | First packet of a session |
 | `0x07` | SESSION_RESUME | First packet of a resumed segment |
 | `0x08` | SNAPSHOT | Snapshot-mode emission (no payload) |
+| `0x09` | TEMPORAL_PROOF | Sequential work function proof at a hibernate boundary |
 
 ### 5.5 Signature Scope
 
@@ -240,6 +241,41 @@ L1[n] = SHA-256(L1[n-1] ‖ stdout_bytes)
 ```
 
 stderr is captured and hashed but NOT committed to the L1 chain.
+
+### 5.7 TEMPORAL_PROOF Packet Payload
+
+A `TEMPORAL_PROOF` packet (`0x09`) carries an Argon2id sequential work function output
+that bounds the elapsed wall-clock time at each hibernate boundary.
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| ArgonOutput | `[32]u8` | Argon2id output over `LastEvidenceL1Hash ‖ SessionID ‖ Sequence` |
+| m | `u32` LE | Argon2id memory parameter (KiB). MUST be ≥ 65536. |
+| t | `u32` LE | Argon2id time parameter (iterations). MUST be ≥ 3. |
+| p | `u8` | Argon2id parallelism. MUST equal 1. Values ≠ 1 are non-conformant and MUST be rejected. |
+
+**Argon2id input derivation.** The verifier derives the Argon2id input from chain state — it
+is not stored in the packet:
+
+```
+argon_input = LastEvidenceL1Hash ‖ SessionID ‖ Sequence (u64 LE)
+```
+
+where `LastEvidenceL1Hash` is the L1Hash of the immediately preceding EVIDENCE packet and
+`Sequence` is the sequence number of the TEMPORAL_PROOF packet itself.
+
+**Parameter floor rationale.** `m ≥ 65536` and `t ≥ 3` match the RFC 9106 interactive
+profile minimum. `p = 1` is fixed (not a floor) because parallelism defeats the sequential
+property: the temporal proof is only meaningful if the computation cannot be accelerated by
+adding cores. A TEMPORAL_PROOF with `p ≠ 1` MUST be rejected by the verifier at Step 11.
+
+**Performance note.** Implementers SHOULD benchmark Argon2id at the floor parameters
+(`m=65536, t=3, p=1`) inside their TEE platform before finalising deployment params.
+On AWS Nitro Enclave vCPUs, expected latency at the floor is under 200 ms; this SHOULD
+be confirmed empirically and documented as a known bound for downstream integrators.
+If measured latency exceeds 200 ms at the floor, the Argon2id params MAY be adjusted
+downward toward an implementation-specific minimum, but such bundles MUST be flagged
+as non-standard-floor in a future registry extension.
 
 ---
 
@@ -341,6 +377,29 @@ If the bundle contains more than one segment, for each boundary between segment 
 3. Assert sequence numbers are strictly monotonically increasing across the boundary: `first_packet(segment[N+1]).Sequence == last_packet(segment[N]).Sequence + 1`. No reset is permitted.
 4. WARN if the timestamp gap between `last_packet(segment[N])` and `first_packet(segment[N+1])` exceeds the configured threshold (implementation default: 3600 seconds). Do not FAIL — a crash recovery gap is expected and legitimate. The WARN surfaces the gap for audit without invalidating an otherwise intact chain.
 
+### Step 11 — Verify TEMPORAL_PROOF packets at segment boundaries (multi-segment bundles only)
+
+For each boundary between segment N and segment N+1, let `tp_seq = last_evidence_packet(segment[N]).Sequence + 1`.
+
+**Rule A — TEMPORAL_PROOF present at `tp_seq`:**
+
+1. Assert `packet[tp_seq].ActionType == TEMPORAL_PROOF` (`0x09`).
+2. Assert `packet[tp_seq].p == 1`. If `p ≠ 1`, FAIL — non-conformant parallelism.
+3. Assert `packet[tp_seq].m ≥ 65536` and `packet[tp_seq].t ≥ 3`. If below floor, FAIL.
+4. Derive `argon_input = last_evidence_packet(segment[N]).L1Hash ‖ SessionID ‖ tp_seq (u64 LE)`.
+5. Re-run `Argon2id(argon_input, m=packet[tp_seq].m, t=packet[tp_seq].t, p=1)`.
+6. Assert the output matches `packet[tp_seq].ArgonOutput`. If not, FAIL.
+7. If the sealed state for this boundary includes `TemporalProofHash`:
+   - Assert `TemporalProofHash == SHA-256(full wire bytes of packet[tp_seq])`. If not, FAIL.
+8. If the sealed state does NOT include `TemporalProofHash`:
+   - FAIL — the sealed state claims no temporal proof exists, but one is present in the chain.
+
+**Rule B — no TEMPORAL_PROOF at `tp_seq`:**
+
+1. If the sealed state includes `TemporalProofHash`: FAIL — hash references a proof that is not in the chain.
+2. If the sealed state does NOT include `TemporalProofHash`: the hibernate boundary is temporally unattested. Continue verification; WARN with `TEMPORALLY_UNATTESTED`.
+3. For sessions containing a `SETTLEMENT_INIT` packet (`0x04`): treat Rule B as a FAIL rather than a WARN. Settlement verifiers MUST require temporal attestation at all hibernate boundaries.
+
 ---
 
 ## 9. Hibernate / Resume Protocol
@@ -373,6 +432,31 @@ A verifier processing a resumed session MUST:
 1. Accept that SessionPub changes across segments for the same SessionID.
 2. Verify each segment's signatures against that segment's SessionPub.
 3. Apply Step 10 at each segment boundary (§8 Step 10).
+4. Apply Step 11 at each segment boundary (§8 Step 11).
+
+### 9.5 TEMPORAL_PROOF Emission at Hibernate Boundaries
+
+The enclave MUST emit a `TEMPORAL_PROOF` packet (`0x09`) immediately before writing the
+sealed checkpoint at each hibernate boundary. The packet occupies sequence `LastSeq + 1`
+(the position immediately after the last committed EVIDENCE packet and immediately before
+the sealed checkpoint write). The SESSION_RESUME packet of the next segment MUST have
+`PrevL1Hash == L1Hash(TEMPORAL_PROOF[LastSeq+1])` — the temporal proof is a normal link
+in the chain; no additional anchoring is required.
+
+**Emission order (normative):**
+
+```
+EVIDENCE[N]          emit and sign
+TEMPORAL_PROOF[N+1]  emit and sign (Argon2id over L1Hash[N] ‖ SessionID ‖ N+1)
+sealed checkpoint    write (sealed payload includes TemporalProofHash referencing TEMPORAL_PROOF[N+1])
+[process hibernates]
+SESSION_RESUME[N+2]  PrevL1Hash = L1Hash(TEMPORAL_PROOF[N+1])
+```
+
+The sealed checkpoint write MUST NOT precede the TEMPORAL_PROOF emission. A crash
+between EVIDENCE[N] and TEMPORAL_PROOF[N+1] leaves the checkpoint from the prior cycle
+(EVIDENCE[N-1]) as the recoverable state; the TEMPORAL_PROOF for the N cycle is not
+recoverable and the N cycle hibernate is treated as temporally unattested on RESUME.
 
 ---
 
@@ -399,6 +483,7 @@ The plaintext inside the AES-GCM ciphertext contains the minimum state required 
 | SegmentIndex | `u32` LE | Index of the next segment to be created on resume |
 | LastSeq | `u64` LE | Sequence number of the last committed EVIDENCE packet |
 | LastEvidenceL1Hash | `[32]u8` | L1Hash of the last committed EVIDENCE packet; becomes `PrevL1Hash` of the first packet in the resumed segment |
+| TemporalProofHash | `[32]u8` (optional) | SHA-256 of the full wire bytes of the `TEMPORAL_PROOF` packet at sequence `LastSeq+1`. Present if and only if the enclave emitted a conformant `TEMPORAL_PROOF` packet before this checkpoint. |
 
 The Ed25519 signing keypair MUST NOT be included in the sealed payload. Each resumed segment generates a fresh keypair bound to a new attestation quote.
 
@@ -435,7 +520,7 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 | Short CBOR slice | Verifiers MUST bounds-check all CBOR bstr reads; a truncated document MUST fail, not yield a short slice |
 | ECDSA signature truncation | Settlement signatures MUST be validated for correct length before r/s extraction |
 | Input-channel attestation (known gap) | APEX attests the output side of process attestation — what the agent produced. Input-channel attestation (verifying that inputs were not synthetically replayed) is out of scope for v2.x and is a known gap for adversarial input replay on owned hardware. |
-| Stale sealed-state replay under partition (known gap) | If an attacker forces a crash during a network partition (S_D→S_F in the session lifecycle), a stale sealed checkpoint from before the partition may be presented on RESUME. The KMS will unseal it (the PCR measurement is valid), and the chain will resume from stale state — silently dropping evidence emitted after the last checkpoint but before the partition. APEX v2.3.0 does not mitigate this. A full mitigation requires the KMS or a trusted counter service to reject any RESUME whose sealed sequence number was already seen (anti-replay on the checkpoint nonce). Known gap for v2.x. |
+| Stale sealed-state replay under partition | An attacker forces a crash during a network partition (S_D→S_F in the session lifecycle), then replays a stale sealed checkpoint on RESUME. The KMS will unseal it (the PCR measurement is valid). Mitigation: the `TEMPORAL_PROOF` packet (`0x09`) at each hibernate boundary bounds the replay window to the Argon2id wall-clock cost — an attacker cannot replay a stale checkpoint faster than the memory-hard function allows. **Conformance caveat:** mitigation requires `p = 1` enforcement at Step 11. A non-conformant implementation that accepts `p > 1` reduces the sequential work bound proportionally. Full KMS-layer anti-replay (rejecting any RESUME whose sealed sequence number was already seen) remains a defence-in-depth complement and a v3.x candidate. |
 
 ---
 
@@ -891,6 +976,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.4.0 | ActionType `0x09 TEMPORAL_PROOF` added (§5.4); §5.7 TEMPORAL_PROOF packet payload schema (ArgonOutput, m, t, p); normative parameter floor m≥65536, t≥3, p=1 fixed; §9.5 TEMPORAL_PROOF emission ordering at hibernate boundaries; §10.2 sealed payload extended with optional `TemporalProofHash`; §8 Step 11 checkpoint-local verifier rules (Rule A/B, settlement escalation); §12 stale sealed-state replay moved from known gap to mitigated with conformance caveat; §17 Conformance updated |
 | 2.3.0 | §9 Hibernate/Resume expanded to four subsections covering crash recovery (§9.2), SESSION_RESUME first-packet requirement (§9.3), and verifier rules (§9.4); §10 Sealed State expanded with sealed payload field table (§10.2) and checkpoint timing (§10.3); §8 Step 10 added for multi-segment boundary verification; §17 Conformance updated; input-channel attestation gap documented in §12 |
 | 2.2.0 | §15 Settlement Block Test Vectors — two-packet session, TerminalDigest over multiple signatures, 88-byte APXT settlement signature scope; §13 roadmap marked complete |
 | 2.1.0 | §14 Test Vectors — fully-worked single-packet session with known synthetic inputs |
@@ -907,14 +993,16 @@ inputs plus the §15.2 additional inputs:
 
 An implementation is **APEX-compliant** if it:
 
-1. Produces bundles that pass all Steps 1–10 of the verification algorithm (§8)
+1. Produces bundles that pass all Steps 1–11 of the verification algorithm (§8)
 2. Rejects unknown ActionType values rather than passing them through
 3. Performs CBOR map walk (not byte scan) for PCR extraction
 4. Does not persist the Ed25519 signing keypair across hibernate/resume cycles
 5. Gates settlement on a verified TerminalDigest
 6. Writes a sealed checkpoint after each EVIDENCE emission (§10.3) and emits SESSION_RESUME as the first packet of every resumed segment (§9.3)
+7. Emits a `TEMPORAL_PROOF` packet (`0x09`) immediately before each sealed checkpoint write at hibernate boundaries, with `p = 1`, `m ≥ 65536`, and `t ≥ 3` (§9.5)
+8. Includes `TemporalProofHash` in the sealed payload whenever a conformant `TEMPORAL_PROOF` was emitted for that checkpoint (§10.2)
 
-A verifier is **APEX-compliant** if it implements all Steps 1–10 and correctly handles multi-segment sessions per §9.4.
+A verifier is **APEX-compliant** if it implements all Steps 1–11 and correctly handles multi-segment sessions per §9.4 and §9.5.
 
 ---
 
