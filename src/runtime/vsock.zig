@@ -12,7 +12,9 @@ pub const VsockHandler = struct {
 
     // AWS Nitro vsock CIDs
     pub const VMADDR_CID_ANY: u32 = 0xFFFFFFFF;
-    pub const VMADDR_CID_HOST: u32 = 2;
+    // In AWS Nitro Enclaves the parent instance always has CID 3, not the
+    // traditional VMADDR_CID_HOST=2 used in non-Nitro VMCI/vsock setups.
+    pub const VMADDR_CID_HOST: u32 = 3;
 
     /// Connects to the host. In simulation mode (Mac/Dev), uses TCP.
     pub fn connect(allocator: std.mem.Allocator, cid: u32, port: u32) !VsockHandler {
