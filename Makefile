@@ -28,7 +28,7 @@ ENCLAVE_CPUS   ?= 2
 EIF_PATH       ?= var.eif
 
 # ──────────────────────────────────────────────────────────────────────────────
-.PHONY: all build build-eif create-ecr push-ecr run stop logs pcr0 install-proxy test clean
+.PHONY: all build build-eif create-ecr push-ecr run run-debug stop logs pcr0 run-bridge install-proxy test clean
 
 all: build
 
@@ -36,9 +36,10 @@ all: build
 build:
 	zig build -Doptimize=ReleaseSafe
 
-# 2. Build EIF (requires Docker + nitro-cli on the build host)
+# 2. Build EIF (build Zig binaries natively, then package into minimal Docker image)
 build-eif:
-	docker build -t var-enclave:$(IMAGE_TAG) .
+	zig build -Doptimize=ReleaseSafe
+	docker build -f Dockerfile.nitro -t var-enclave:$(IMAGE_TAG) .
 	nitro-cli build-enclave \
 	  --docker-uri   var-enclave:$(IMAGE_TAG) \
 	  --output-file  $(EIF_PATH)
@@ -71,6 +72,15 @@ run:
 	  --cpu-count    $(ENCLAVE_CPUS) \
 	  --eif-path     $(EIF_PATH)
 
+# 4b. Launch with debug console (development only — disables attestation)
+run-debug:
+	nitro-cli run-enclave \
+	  --enclave-cid  $(ENCLAVE_CID) \
+	  --memory       $(ENCLAVE_MEMORY) \
+	  --cpu-count    $(ENCLAVE_CPUS) \
+	  --eif-path     $(EIF_PATH) \
+	  --debug-mode
+
 # 5. Terminate the running enclave (first one returned by describe-enclaves)
 stop:
 	nitro-cli terminate-enclave \
@@ -85,7 +95,14 @@ logs:
 pcr0:
 	@nitro-cli describe-eif --eif-path $(EIF_PATH) | jq -r '.Measurements.PCR0'
 
-# 8. Install the KMS proxy service on the parent EC2 instance (requires sudo)
+# 8a. Run the vsock bridge (TCP 127.0.0.1:8765 → vsock CID 16:8765)
+run-bridge:
+	python3 src/host/vsock_bridge.py \
+	  --tcp-port  8765 \
+	  --vsock-cid $(ENCLAVE_CID) \
+	  --vsock-port 8765
+
+# 8b. Install the KMS proxy service on the parent EC2 instance (requires sudo)
 install-proxy:
 	sudo mkdir -p /opt/var
 	sudo cp src/host/proxy.py src/host/requirements.txt /opt/var/

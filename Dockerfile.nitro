@@ -1,0 +1,10 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY zig-out/bin/VAR         /usr/local/bin/VAR
+COPY zig-out/bin/VAR-gateway /usr/local/bin/VAR-gateway
+
+ENTRYPOINT ["/usr/local/bin/VAR-gateway"]

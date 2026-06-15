@@ -121,6 +121,19 @@ pub const GatewayServer = struct {
             self.config.host, self.config.port, n_workers,
         });
 
+        // Spawn vsock listener so the host EC2 instance can reach the gateway
+        // via AF_VSOCK (same port).  No-op on non-Linux or kernels without vsock.
+        const vsock_port = std.fmt.parseInt(
+            u32,
+            std.posix.getenv("VAR_VSOCK_PORT") orelse "8765",
+            10,
+        ) catch 8765;
+        if (std.Thread.spawn(.{}, serveVsock, .{ self, &pool, vsock_port })) |t| {
+            t.detach();
+        } else |err| {
+            std.log.warn("[VAR-gateway] vsock thread unavailable ({})", .{err});
+        }
+
         while (true) {
             const conn = server.accept() catch |err| {
                 if (g_shutdown.load(.monotonic)) return;
@@ -135,6 +148,36 @@ pub const GatewayServer = struct {
         }
     }
 };
+
+fn serveVsock(server: *GatewayServer, pool: *std.Thread.Pool, port: u32) void {
+    if (comptime @import("builtin").os.tag != .linux) return;
+    const vsock = @import("vsock.zig");
+    var vs = vsock.VsockServer.listen(port) catch |err| {
+        std.log.warn("[VAR-gateway] vsock listen failed ({})", .{err});
+        return;
+    };
+    defer vs.close();
+    if (!vs.is_vsock) {
+        std.log.warn("[VAR-gateway] AF_VSOCK not available; vsock listener skipped", .{});
+        return;
+    }
+    std.log.info("[VAR-gateway] vsock listener on port {d}", .{port});
+    while (!g_shutdown.load(.monotonic)) {
+        const handler = vs.accept() catch |err| {
+            if (g_shutdown.load(.monotonic)) return;
+            std.log.err("[VAR-gateway] vsock accept: {}", .{err});
+            continue;
+        };
+        const conn = net.Server.Connection{
+            .stream = handler.stream,
+            .address = net.Address.parseIp4("127.0.0.1", 0) catch unreachable,
+        };
+        pool.spawn(handleConnection, .{ server, conn }) catch |err| {
+            std.log.err("[VAR-gateway] vsock pool spawn: {}", .{err});
+            handler.stream.close();
+        };
+    }
+}
 
 // ── Request parsing ────────────────────────────────────────────────────────
 
