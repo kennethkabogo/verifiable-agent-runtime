@@ -2,21 +2,28 @@
 """
 vsock_bridge: forward TCP connections from the host into the enclave via vsock.
 
-Listens on TCP 127.0.0.1:<tcp-port> and for each connection opens a vsock
-socket to the enclave (CID=<vsock-cid>, port=<vsock-port>), then pipes bytes
-bidirectionally.  This lets you reach the VAR-gateway HTTP API from the EC2
-parent instance (or via SSH tunnel from your Mac).
+⚠️  DEV / OPERATOR TOOL — NOT FOR PRODUCTION DEPLOYMENT ⚠️
+This bridge exposes the full VAR-gateway HTTP API (including /vault/secret,
+/exec, /hibernate) to any local process on the parent EC2 instance without
+additional authentication.  It must not run unattended in production.
+
+Set VAR_BRIDGE_DEV=1 to acknowledge this and start the bridge.
+
+Production path: implement mTLS or a bearer token derived from attestation
+inside the gateway (route() → verify token before dispatching to sensitive
+handlers), then replace this bridge with one that validates the credential.
 
 Usage:
-    python3 vsock_bridge.py [--tcp-port 8765] [--vsock-cid 16] [--vsock-port 8765]
-    python3 vsock_bridge.py --help
+    VAR_BRIDGE_DEV=1 python3 vsock_bridge.py [--tcp-port 8765] [--vsock-cid 16] [--vsock-port 8765]
 
 SSH tunnel from Mac:
     ssh -i ~/.ssh/var-nitro.pem -L 8765:127.0.0.1:8765 ec2-user@3.238.108.15 -N
     curl http://127.0.0.1:8765/health
 """
 import argparse
+import os
 import socket
+import sys
 import threading
 
 
@@ -57,6 +64,15 @@ def _handle(client: socket.socket, vsock_cid: int, vsock_port: int) -> None:
 
 
 def main() -> None:
+    if not os.environ.get("VAR_BRIDGE_DEV"):
+        print(
+            "ERROR: vsock_bridge is a dev/operator tool that exposes the enclave\n"
+            "HTTP API to all local processes without authentication.\n"
+            "Set VAR_BRIDGE_DEV=1 to acknowledge and proceed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(description="Bridge TCP→vsock for VAR enclave")
     parser.add_argument("--tcp-port", type=int, default=8765, metavar="PORT")
     parser.add_argument("--vsock-cid", type=int, default=16, metavar="CID")
