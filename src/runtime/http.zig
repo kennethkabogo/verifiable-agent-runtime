@@ -22,6 +22,7 @@
 ///   POST /settle         {"escrow_id":"<32hex>","amount":"…","currency":"…","recipient":"<128hex>"}
 ///                                                            → 200 {"settlement":"SETTLEMENT:…"}
 ///   GET  /health                                             → 200 {"status":"healthy"}
+///   GET  /benchmark                                          → 200 {"params":{"m":65536,"t":3,"p":1},"n":7,"mean_ms":…,"p50_ms":…,"p95_ms":…,"min_ms":…,"max_ms":…}
 ///
 const std = @import("std");
 const mem = std.mem;
@@ -358,6 +359,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleSettle(server, stream, req);
     if (get and mem.eql(u8, req.path, "/health"))
         return writeResponse(stream, 200, "{\"status\":\"healthy\"}");
+    if (get and mem.eql(u8, req.path, "/benchmark"))
+        return handleBenchmark(server, stream);
 
     return writeError(stream, 404, "Not Found");
 }
@@ -783,6 +786,62 @@ fn handleSettle(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) 
 }
 
 // ── JSON helpers ───────────────────────────────────────────────────────────
+
+// Argon2id floor params from APEX §5.7
+const BENCH_M: u32 = 65536;
+const BENCH_T: u32 = 3;
+const BENCH_P: u32 = 1;
+const BENCH_N: usize = 7;
+
+fn handleBenchmark(server: *GatewayServer, stream: net.Stream) !void {
+    const argon2 = std.crypto.pwhash.argon2;
+    const params = argon2.Params{ .t = BENCH_T, .m = BENCH_M, .p = BENCH_P };
+
+    var times_ns: [BENCH_N]u64 = undefined;
+    var rng = std.Random.DefaultPrng.init(@truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    const random = rng.random();
+
+    var dk: [32]u8 = undefined;
+    var password: [16]u8 = undefined;
+    var salt: [16]u8 = undefined;
+
+    for (0..BENCH_N) |i| {
+        random.bytes(&password);
+        random.bytes(&salt);
+        const t0 = std.time.nanoTimestamp();
+        argon2.kdf(server.allocator, &dk, &password, &salt, params, .argon2id) catch |err| {
+            std.log.err("[VAR-gateway] argon2id kdf failed: {}", .{err});
+            return writeError(stream, 500, "argon2id failed");
+        };
+        const t1 = std.time.nanoTimestamp();
+        times_ns[i] = @intCast(t1 - t0);
+        std.crypto.secureZero(u8, &dk);
+    }
+
+    var sorted = times_ns;
+    std.mem.sort(u64, &sorted, {}, std.sort.asc(u64));
+
+    var sum: u128 = 0;
+    for (times_ns) |t| sum += t;
+    const mean_ns: f64 = @as(f64, @floatFromInt(sum)) / BENCH_N;
+    const p50_ns: f64 = @floatFromInt(sorted[BENCH_N / 2]);
+    const p95_ns: f64 = @floatFromInt(sorted[BENCH_N * 95 / 100]);
+    const min_ns: f64 = @floatFromInt(sorted[0]);
+    const max_ns: f64 = @floatFromInt(sorted[BENCH_N - 1]);
+
+    const body = try std.fmt.allocPrint(server.allocator,
+        \\{{"params":{{"m":{d},"t":{d},"p":{d}}},"n":{d},"mean_ms":{d:.2},"p50_ms":{d:.2},"p95_ms":{d:.2},"min_ms":{d:.2},"max_ms":{d:.2}}}
+    , .{
+        BENCH_M, BENCH_T, BENCH_P, BENCH_N,
+        mean_ns / 1_000_000.0,
+        p50_ns  / 1_000_000.0,
+        p95_ns  / 1_000_000.0,
+        min_ns  / 1_000_000.0,
+        max_ns  / 1_000_000.0,
+    });
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
+}
 
 /// Extracts the string value for `key` from a flat JSON object.
 /// Returns a heap-allocated copy; caller must free.  Returns null on any error.
