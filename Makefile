@@ -95,9 +95,9 @@ logs:
 pcr0:
 	@nitro-cli describe-eif --eif-path $(EIF_PATH) | jq -r '.Measurements.PCR0'
 
-# 8a. Run the vsock bridge (TCP 127.0.0.1:8765 → vsock CID 16:8765)
+# 8a. Run the vsock bridge — DEV/OPERATOR ONLY (see vsock_bridge.py header)
 run-bridge:
-	python3 src/host/vsock_bridge.py \
+	VAR_BRIDGE_DEV=1 python3 src/host/vsock_bridge.py \
 	  --tcp-port  8765 \
 	  --vsock-cid $(ENCLAVE_CID) \
 	  --vsock-port 8765
