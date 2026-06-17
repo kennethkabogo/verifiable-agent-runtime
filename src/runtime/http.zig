@@ -553,9 +553,20 @@ fn writeSSEPacket(stream: net.Stream, json: []const u8) bool {
 
 fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
     _ = req;
-    // Capture and seal all runtime state into an encrypted blob.
+
+    // Emit TEMPORAL_PROOF before capturing state — the sealed checkpoint must
+    // not precede the proof emission (§9.5 ordering).  On error, the session
+    // state is unchanged and the caller can retry.
+    const tp = try server.logger.emitTemporalProof(server.allocator);
+    defer server.allocator.free(tp.line);
+
+    // Capture and seal all runtime state.  The TEMPORAL_PROOF has already
+    // advanced sequence and prev_stream_hash; capture() will snapshot that state.
     var captured = try sealed_state.capture(server.allocator, server.vault, server.logger);
     defer captured.deinit();
+
+    // Bind the TemporalProofHash into the sealed payload (§10.2).
+    captured.temporal_proof_hash = tp.hash;
 
     const blob = try sealed_state.seal(server.allocator, &captured);
     defer server.allocator.free(blob);
@@ -565,20 +576,18 @@ fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedReques
 
     const body = try std.fmt.allocPrint(
         server.allocator,
-        "{{\"sealed_state\":\"{s}\"}}",
-        .{hex_blob},
+        "{{\"sealed_state\":\"{s}\",\"temporal_proof\":\"{s}\"}}",
+        .{ hex_blob, tp.line },
     );
     defer server.allocator.free(body);
 
     // Send the response and flush before signalling shutdown.
     try writeResponse(stream, 200, body);
     // Half-close the send side so the TCP stack flushes the response buffer to
-    // the client before SIGTERM terminates the process.  Without this, the kernel
-    // may discard buffered data when the socket is closed during process teardown.
+    // the client before SIGTERM terminates the process.
     std.posix.shutdown(stream.handle, .send) catch {};
-    std.log.info("[VAR-gateway] Hibernating ({d}-byte sealed blob). Sending SIGTERM.", .{blob.len});
+    std.log.info("[VAR-gateway] Hibernating ({d}-byte sealed blob). TEMPORAL_PROOF at seq={d}.", .{ blob.len, server.logger.sequence });
 
-    // Set the shutdown flag and interrupt the blocking accept() in serve().
     requestShutdown();
     std.posix.kill(std.c.getpid(), std.posix.SIG.TERM) catch {};
 }

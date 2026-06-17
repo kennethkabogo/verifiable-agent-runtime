@@ -74,11 +74,12 @@ const VsockHandler = @import("vsock.zig").VsockHandler;
 // ---------------------------------------------------------------------------
 
 const MAGIC = [4]u8{ 'V', 'A', 'R', 'S' };
-const FORMAT_VERSION: u8 = 0x02;
+const FORMAT_VERSION: u8 = 0x03;
 
 /// Minimum plaintext size: magic(4) + version(1) + session_id(16) +
 /// stream_hash(32) + prev_hash(32) + sequence(8) + bootstrap_nonce(32) +
-/// vault_count(4) + exec_count(4) = 133
+/// vault_count(4) + exec_count(4) + temporal_proof_present(1) = 134
+/// v0.02 blobs are 133 bytes minimum; the deserializer accepts both versions.
 const MIN_PLAINTEXT: usize = 133;
 
 /// Minimum and maximum byte lengths for the wrapped DEK field.
@@ -109,6 +110,9 @@ pub const CapturedState = struct {
     bootstrap_nonce: [32]u8,
     vault_entries: []VaultEntry,
     exec_entries: []ExecEntry,
+    /// SHA-256 of the full wire bytes of the TEMPORAL_PROOF packet at
+    /// sequence LastSeq+1, or null if no conformant proof was emitted (§10.2).
+    temporal_proof_hash: ?[32]u8 = null,
 
     pub const VaultEntry = struct {
         key: []const u8,
@@ -339,14 +343,15 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
 // ---------------------------------------------------------------------------
 
 fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
-    // Pre-compute total size.
-    var size: usize = MIN_PLAINTEXT;
+    // Pre-compute total size (MIN_PLAINTEXT already includes the 1-byte presence flag).
+    var size: usize = MIN_PLAINTEXT + 1; // +1: presence flag is always written in v0.03
     for (state.vault_entries) |e| {
         size += 2 + e.key.len + 2 + e.value.len;
     }
     for (state.exec_entries) |e| {
         size += 2 + e.cmd.len + 32 + 32 + 1 + 8;
     }
+    if (state.temporal_proof_hash != null) size += 32;
 
     const buf = try allocator.alloc(u8, size);
     var pos: usize = 0;
@@ -380,6 +385,14 @@ fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
         std.mem.writeInt(u64, buf[pos..][0..8], e.seq, .little);                  pos += 8;
     }
 
+    // TemporalProofHash presence flag + optional hash (§10.2, v0.03 extension).
+    if (state.temporal_proof_hash) |h| {
+        buf[pos] = 0x01; pos += 1;
+        @memcpy(buf[pos..][0..32], &h); pos += 32;
+    } else {
+        buf[pos] = 0x00; pos += 1;
+    }
+
     std.debug.assert(pos == size);
     return buf;
 }
@@ -391,7 +404,9 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
 
     if (!std.mem.eql(u8, buf[pos..][0..4], &MAGIC)) return error.InvalidMagic;
     pos += 4;
-    if (buf[pos] != FORMAT_VERSION) return error.UnsupportedVersion;
+    // Accept v0.02 (no TemporalProofHash field) and v0.03 (with field).
+    const fmt_ver = buf[pos];
+    if (fmt_ver != 0x02 and fmt_ver != FORMAT_VERSION) return error.UnsupportedVersion;
     pos += 1;
 
     var session_id: [16]u8 = undefined;
@@ -486,6 +501,20 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         exec_init = i + 1;
     }
 
+    // TemporalProofHash (§10.2): present only in v0.03 blobs.
+    const temporal_proof_hash: ?[32]u8 = if (fmt_ver == 0x03) blk: {
+        if (pos >= buf.len) return error.TruncatedState;
+        const has_hash = buf[pos]; pos += 1;
+        if (has_hash == 0x01) {
+            if (pos + 32 > buf.len) return error.TruncatedState;
+            var h: [32]u8 = undefined;
+            @memcpy(&h, buf[pos..][0..32]);
+            pos += 32;
+            break :blk h;
+        }
+        break :blk null;
+    } else null;
+
     return CapturedState{
         .allocator = allocator,
         .session_id = session_id,
@@ -495,6 +524,7 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         .bootstrap_nonce = bootstrap_nonce,
         .vault_entries = vault_entries,
         .exec_entries = exec_entries,
+        .temporal_proof_hash = temporal_proof_hash,
     };
 }
 
