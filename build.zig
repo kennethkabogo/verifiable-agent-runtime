@@ -208,6 +208,18 @@ pub fn build(b: *std.Build) void {
     }
     const run_gateway_tests = b.addRunArtifact(gateway_tests);
 
+    // Argon2id benchmark — small standalone binary used to measure kdf latency
+    // inside the Nitro enclave. No libcrypto or ghostty dependency; pure Zig std.
+    const bench_exe = b.addExecutable(.{
+        .name = "var-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench/argon2id_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(bench_exe);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.

@@ -28,7 +28,7 @@ ENCLAVE_CPUS   ?= 2
 EIF_PATH       ?= var.eif
 
 # ──────────────────────────────────────────────────────────────────────────────
-.PHONY: all build build-eif create-ecr push-ecr run run-debug stop logs pcr0 run-bridge install-proxy test clean
+.PHONY: all build build-eif create-ecr push-ecr run run-debug stop logs pcr0 run-bridge bench-enclave install-proxy test clean
 
 all: build
 
@@ -102,7 +102,11 @@ run-bridge:
 	  --vsock-cid $(ENCLAVE_CID) \
 	  --vsock-port 8765
 
-# 8b. Install the KMS proxy service on the parent EC2 instance (requires sudo)
+# 8b. Run the Argon2id benchmark inside the enclave via vsock bridge (bridge must be running)
+bench-enclave:
+	curl -s http://127.0.0.1:8765/benchmark | python3 -m json.tool
+
+# 8c. Install the KMS proxy service on the parent EC2 instance (requires sudo)
 install-proxy:
 	sudo mkdir -p /opt/var
 	sudo cp src/host/proxy.py src/host/requirements.txt /opt/var/

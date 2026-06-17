@@ -6,5 +6,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY zig-out/bin/VAR         /usr/local/bin/VAR
 COPY zig-out/bin/VAR-gateway /usr/local/bin/VAR-gateway
+COPY zig-out/bin/var-bench   /usr/local/bin/var-bench
 
 ENTRYPOINT ["/usr/local/bin/VAR-gateway"]
