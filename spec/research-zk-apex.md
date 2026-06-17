@@ -265,173 +265,17 @@ ECA >99.5% with <25% per-checkpoint overhead on SGX2. Sealed recovery under
 200 ms. These numbers validate the feasibility of the approach before APEX has
 its own benchmark data. Cite them; extend them to the Nitro platform.
 
-## C2PA Integration Opportunity
+## Temporal Attestation — Paper Contribution
 
-C2PA (Coalition for Content Provenance and Authenticity) is the dominant
-standard for attesting the origin and edit history of media content. As of
-v2.1, C2PA is **purely software-attested** — X.509/PKI, certificate-based
-identity, no TEE binding, no attestation quotes, no PCR measurements. The
-trust root is a certificate authority, not hardware.
-
-Camera implementations (Leica M11-P, SL3-S; Sony Alpha; Nikon; Fujifilm) embed
-C2PA signing into camera firmware using secure elements or protected key storage.
-This is **hardware-bound but not hardware-attested** — a critical distinction:
-
-- **Hardware-bound:** The key lives on the device and cannot be extracted. A
-  verifier knows "this signature came from a key provisioned to this device by
-  this manufacturer." Trust assumptions: the manufacturer, the provisioning
-  process, and the secure element firmware.
-- **Hardware-attested:** The execution environment is measured and the
-  measurement is part of the signature. A verifier knows not just that the key
-  was on the device but exactly what binary ran to produce the signature. No
-  PCR measurements, no attestation quotes, and no remotely verifiable binary
-  identity exist in any current C2PA implementation.
-
-**The gap APEX fills:**
-
-APEX's NSM attestation document includes PCR0/1/2 — measurements of the enclave
-image, kernel, and application. A verifier knows exactly what binary ran to
-produce the signature, not merely that a key was provisioned to a device.
-
-The honest composition claim (peer-review safe):
-
-> *C2PA today: "this content was produced by a key provisioned to this device
-> by this manufacturer."*
-> *APEX: "this execution trace was produced by this exact binary running in
-> this enclave, measured by hardware."*
-> *Together: APEX provides hardware-attested execution provenance for the agent
-> layer; C2PA provides hardware-bound content provenance for the input layer.
-> Together they reduce but do not eliminate software trust assumptions in the
-> end-to-end chain.*
-
-This framing survives peer review. "End-to-end hardware attestation with no
-software trust assumptions" does not — C2PA's CA-rooted identity and firmware
-trust are still in the chain.
-
-Condrey's paper explicitly flags C2PA integration as future work: "compatible
-with downstream C2PA workflows where verified process attestation could inform
-content provenance metadata." He is a C2PA contributing member. The integration
-he described as future work is a natural collaboration target — and a concrete
-publication contribution that bridges the TEE process attestation literature and
-the C2PA standardization community.
-
-**Practical shape of the integration:**
-
-An APEX session that generates content (an AI agent writing a report, producing
-an image description, executing a financial decision) can emit:
-
-1. An APEX evidence bundle — TEE-attested execution trace, Ed25519 hash chain
-2. A C2PA manifest — signed by the TEE session key, referencing the APEX
-   BundleHash as a provenance assertion
-
-The C2PA manifest's claim generator credential is the TEE session certificate.
-This makes the agent-layer signing hardware-attested rather than
-software-attested. The input-layer (camera, sensor) remains hardware-bound
-under existing C2PA semantics. A paper formalizing this distinction and the
-composite trust model is the contribution.
-
-## Temporal Attestation Protocol Design
-
-### Proposed packet type: `0x09 TEMPORAL_PROOF`
-
-Emitted **before** the sealed checkpoint write at every hibernate boundary.
-Placement in the chain:
-
-```text
-EVIDENCE[N]          →  checkpoint written (sealed payload: LastSeq=N, LastEvidenceL1Hash=H_N)
-TEMPORAL_PROOF[N+1]  →  payload: Argon2id(H_N ‖ session_id ‖ N+1, m, t, p=1); params in header
-[process hibernates]
-SESSION_RESUME[N+2]  →  PrevL1Hash = L1Hash(TEMPORAL_PROOF[N+1]); normal chain continuation
-```
-
-The Argon2id input `H_N ‖ session_id ‖ N+1` is consistent by construction with the
-sealed payload: `H_N` is already `LastEvidenceL1Hash` in §10.2. Both the temporal proof
-and the sealed state commit to the same chain position.
-
-### §10.2 extension: `TemporalProofHash`
-
-New optional field in the sealed payload:
-
-| Field | Type | Description |
-| :--- | :--- | :--- |
-| TemporalProofHash | `[32]u8` (optional) | SHA-256 of the full wire bytes of the TEMPORAL_PROOF packet immediately preceding this checkpoint |
-
-**Canonical definition:** SHA-256 of full packet bytes (not of the Ed25519 signature
-bytes alone). Auditors can compute it from the wire representation without re-deriving
-the 161-byte signature scope.
-
-### Normative verifier rules (checkpoint-local)
-
-The presence check is checkpoint-local, not session-global. "Scan the chain for any
-`0x09`" would create an edge case: a session that enables temporal proofs mid-session
-(after an upgrade) would incorrectly flag RESUME checkpoints written before the first
-`0x09` packet as policy violations.
-
-The correct rule collapses version detection and specific binding into a single lookup:
-
-> For a given RESUME, look for a `TEMPORAL_PROOF` packet at exactly sequence `LastSeq+1`
-> (the position immediately preceding the checkpoint). That is the specific packet that
-> should have been emitted for this checkpoint — no chain scan required.
-
-**Rule A — packet present at `LastSeq+1`:**
-
-- `TemporalProofHash` in the sealed payload is REQUIRED. Missing → chain invalid.
-- Verifier MUST match: `SHA-256(full wire bytes of TEMPORAL_PROOF[LastSeq+1]) == TemporalProofHash`.
-- Verifier MUST re-run `Argon2id(H_{LastSeq} ‖ session_id ‖ LastSeq+1, m, t, p)` with the
-  packet's stated params and confirm the output matches the packet payload.
-
-**Rule B — no packet at `LastSeq+1`:**
-
-- `TemporalProofHash` absent: chain valid, hibernate is temporally unattested. Verifier
-  SHOULD surface as lower-assurance.
-- `TemporalProofHash` present: chain invalid (hash claims a proof that is not in the chain).
-- For sessions containing a `SETTLEMENT_INIT` packet, Rule B SHOULD be treated as a
-  policy violation by the settlement verifier.
-
-### Argon2id parameter governance
-
-Params `(m, t, p)` appear in the `TEMPORAL_PROOF` packet header. Without a normative
-floor, an implementation can set `m=64, t=1, p=1` and produce a technically valid but
-meaningless temporal proof.
-
-**Normative constraints (fixed in spec, not delegated to Bundle Header):**
-
-- `m ≥ 65536` (64 MiB) — RFC 9106 interactive profile minimum
-- `t ≥ 3` — RFC 9106 interactive profile minimum
-- `p = 1` — **fixed, not a floor.** Parallelism defeats the sequential property. A
-  TEMPORAL_PROOF with `p > 1` is non-conformant and MUST be rejected.
-- Implementations MAY increase `m` or `t`; they MUST NOT set `p > 1`.
-
-**Why not a Bundle Header policy table?** A Bundle Header field that declares the
-minimum params accepted is an attack surface — an adversary who influences session setup
-could write a low floor. The spec owns the floor; the session cannot lower it.
-
-### Relationship to the stale sealed-state replay gap (§12)
-
-The adversarial S_D → S_F transition requires no cryptographic break: force a crash
-during network partition, replay stale sealed state on RESUME. TSA doesn't close this gap
-because the attacker controls the timing of the TSA call. SWF does: the proof is the cost.
-An attacker replaying a stale checkpoint at T2 must re-run Argon2id from scratch — they
-cannot produce a valid TEMPORAL_PROOF for the replayed state faster than the memory-hard
-function allows. This bounds the replay window to the Argon2id wall-clock cost, which is
-parameterizable.
-
-### Settlement vs. stale-replay use cases
-
-These are not competing designs; they cover different points in the lifecycle:
-
-- **TSA for SETTLEMENT_INIT:** Trust assumption, auditable, fits payment counterparty
-  expectations. One network call, surgically placed before settlement. This is
-  engineering, not a novel research contribution.
-- **SWF at hibernate/resume boundaries:** Hardness assumption, closes the stale sealed-
-  state replay gap. This is the research contribution — prior work (Condrey et al.) places
-  Argon2id at checkpoint boundaries for human authorship sessions; APEX places it at
-  hibernation boundaries for autonomous agent sessions. Different principal, different
-  threat model, same structural solution.
-
-For the formal paper: cite the SWF component only. The TSA timestamp is implementation
-practice; the SWF placement at sealed-state transitions is what distinguishes APEX's
-temporal attestation from prior work.
+The research contribution for the formal paper is the SWF placement, not the
+full protocol design. Prior work (Condrey et al.) places Argon2id at checkpoint
+boundaries for human authorship sessions; APEX places it at hibernation
+boundaries for autonomous agent sessions — different principal, different threat
+model, same structural solution. The TSA timestamp (SETTLEMENT_INIT) is
+engineering practice; the SWF at sealed-state transitions is what distinguishes
+APEX temporally from prior work and belongs in the paper. Full protocol design
+notes (packet format, verifier rules, parameter governance) live in
+[research-roadmap.md](research-roadmap.md).
 
 ## Timeline
 
@@ -439,7 +283,6 @@ temporal attestation from prior work.
   against naive O(n·sig) verifier. Goal: proof-of-concept numbers.
 - **Formal model:** CTMC for APEX session lifecycle (ECA/MTBEG framing).
   Target: align with Markantonakis conversation, February 2027.
-- **C2PA integration draft:** Concrete protocol for APEX-attested C2PA manifests.
-  Natural collaboration with Condrey given his C2PA role and the explicit
-  future-work flag in arXiv:2603.00178.
 - **Combined paper:** Full two-layer thesis (CTMC + ZK) targeting S&P 2028 cycle.
+  Non-ZK tracks (C2PA integration, ECR) tracked in
+  [research-roadmap.md](research-roadmap.md).
