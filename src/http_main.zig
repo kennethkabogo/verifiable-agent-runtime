@@ -109,9 +109,14 @@ pub fn main() !void {
     const port_str = std.posix.getenv("VAR_PORT") orelse "8765";
     const port = std.fmt.parseInt(u16, port_str, 10) catch 8765;
 
-    // 6. Harden the process: scrub env vars, install Landlock + caps-drop +
-    //    seccomp-BPF.  All environment reads are complete above; socket bind
-    //    happens inside serve() using only allowlisted syscalls.
+    // 6a. Capture KMS config and warm NSM cache before the sandbox scrubs the
+    //     environment and before seccomp blocks openat(257).  sealDek() reads
+    //     from these cached values instead of the environment at request time.
+    sealed_state.initSealConfig(allocator);
+
+    // 6b. Harden the process: scrub env vars, install Landlock + caps-drop +
+    //     seccomp-BPF.  All environment reads are complete above; socket bind
+    //     happens inside serve() using only allowlisted syscalls.
     sandbox.hardenProcess();
 
     // 7. Start HTTP gateway — blocks forever serving skills.

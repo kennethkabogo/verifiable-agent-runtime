@@ -8,4 +8,6 @@ COPY zig-out/bin/VAR         /usr/local/bin/VAR
 COPY zig-out/bin/VAR-gateway /usr/local/bin/VAR-gateway
 COPY zig-out/bin/var-bench   /usr/local/bin/var-bench
 
+ENV VAR_KMS_KEY_ARN=arn:aws:kms:us-east-1:752439474140:key/572dc9aa-73c3-45a6-9cf4-4233ebbf26b8
+
 ENTRYPOINT ["/usr/local/bin/VAR-gateway"]

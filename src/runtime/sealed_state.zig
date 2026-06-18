@@ -545,16 +545,35 @@ const MOCK_WRAP_KEY = [32]u8{
 /// Override with the VAR_KMS_PROXY_PORT environment variable.
 const KMS_PROXY_PORT_DEFAULT: u16 = 8443;
 
-/// Memoized NSM availability — probed once on first call, cached for the
-/// lifetime of the process.  Calling openFileAbsolute on every seal/unseal
-/// operation creates a TOCTOU window: if the NSM device is transiently
-/// unavailable exactly during a seal or unseal call, the code falls back to
-/// simulation mode (MOCK_WRAP_KEY XOR), reducing DEK protection from
-/// KMS PCR-bound policy to a publicly-known constant.  Caching the result
-/// ensures that the production/simulation decision is made once at startup
-/// and never silently downgraded mid-session.
+/// KMS configuration captured before hardenProcess() scrubs the environment
+/// and before seccomp blocks openat.  Populated by initSealConfig(); zero-
+/// values mean "simulation mode" so the module is safe to use without calling
+/// initSealConfig() in unit-test / simulation contexts.
 var g_nsm_available: ?bool = null;
 var g_nsm_mutex: std.Thread.Mutex = .{};
+var g_kms_key_arn: ?[]const u8 = null;
+var g_kms_proxy_port: u16 = KMS_PROXY_PORT_DEFAULT;
+
+/// Must be called once before hardenProcess() — i.e., before seccomp blocks
+/// openat (257) and before scrubEnvironment() zeroes VAR_KMS_KEY_ARN.
+///
+/// Warms the NSM availability cache and captures the KMS key ARN and proxy
+/// port so that sealDek() can operate without any filesystem or env reads
+/// after the sandbox is installed.  Safe to call multiple times (idempotent
+/// after the first successful call).
+pub fn initSealConfig(allocator: std.mem.Allocator) void {
+    _ = hasNsmDevice(); // warm g_nsm_available via openat — safe before seccomp
+    if (std.posix.getenv("VAR_KMS_KEY_ARN")) |arn| {
+        if (arn.len > 0 and g_kms_key_arn == null) {
+            if (allocator.dupe(u8, arn)) |copy| {
+                g_kms_key_arn = copy;
+            } else |_| {}
+        }
+    }
+    if (std.posix.getenv("VAR_KMS_PROXY_PORT")) |s| {
+        g_kms_proxy_port = std.fmt.parseInt(u16, s, 10) catch KMS_PROXY_PORT_DEFAULT;
+    }
+}
 
 fn hasNsmDevice() bool {
     g_nsm_mutex.lock();
@@ -689,10 +708,9 @@ fn kmsEncrypt(
     return ct;
 }
 
-/// Returns the KMS proxy port from the environment, or the default.
+/// Returns the KMS proxy port captured by initSealConfig(), or the default.
 fn kmsProxyPort() u16 {
-    const s = std.posix.getenv("VAR_KMS_PROXY_PORT") orelse return KMS_PROXY_PORT_DEFAULT;
-    return std.fmt.parseInt(u16, s, 10) catch KMS_PROXY_PORT_DEFAULT;
+    return g_kms_proxy_port;
 }
 
 /// Wraps (seals) a 32-byte AES-256 DEK.
@@ -701,7 +719,8 @@ fn kmsProxyPort() u16 {
 /// Caller owns the returned slice.
 fn sealDek(allocator: std.mem.Allocator, dek: [32]u8) ![]u8 {
     if (hasNsmDevice()) {
-        const key_arn = std.posix.getenv("VAR_KMS_KEY_ARN") orelse return error.KmsKeyArnNotSet;
+        // Use the ARN captured before hardenProcess() scrubbed the environment.
+        const key_arn = g_kms_key_arn orelse return error.KmsKeyArnNotSet;
         return kmsEncrypt(allocator, key_arn, kmsProxyPort(), &dek);
     }
     // Simulation: one-time-pad style XOR with the mock wrapping key.

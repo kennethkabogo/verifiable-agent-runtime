@@ -587,6 +587,9 @@ fn handleHibernate(server: *GatewayServer, stream: net.Stream, req: ParsedReques
     // the client before SIGTERM terminates the process.
     std.posix.shutdown(stream.handle, .send) catch {};
     std.log.info("[VAR-gateway] Hibernating ({d}-byte sealed blob). TEMPORAL_PROOF at seq={d}.", .{ blob.len, server.logger.sequence });
+    // Give the vsock bridge time to drain the response to the TCP client
+    // before SIGTERM closes the vsock socket from underneath it.
+    std.Thread.sleep(300 * std.time.ns_per_ms);
 
     requestShutdown();
     std.posix.kill(std.c.getpid(), std.posix.SIG.TERM) catch {};
@@ -617,6 +620,7 @@ fn handleTerminate(server: *GatewayServer, stream: net.Stream, req: ParsedReques
     // Flush before signalling shutdown — same rationale as /hibernate.
     std.posix.shutdown(stream.handle, .send) catch {};
     std.log.info("[VAR-gateway] Terminating with final proof. Sending SIGTERM.", .{});
+    std.Thread.sleep(300 * std.time.ns_per_ms);
 
     requestShutdown();
     std.posix.kill(std.c.getpid(), std.posix.SIG.TERM) catch {};
