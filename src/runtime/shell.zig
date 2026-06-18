@@ -3,6 +3,26 @@ const VerifiableTerminal = @import("vt.zig").VerifiableTerminal;
 const exec = @import("exec.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const argon2 = std.crypto.pwhash.argon2;
+
+// ── TEMPORAL_PROOF constants (§5.7) ───────────────────────────────────────────
+const TEMPORAL_PROOF_M: u32 = 65536; // 64 MiB — RFC 9106 interactive floor
+const TEMPORAL_PROOF_T: u32 = 3;     // iterations — RFC 9106 interactive floor
+const TEMPORAL_PROOF_P: u32 = 1;     // parallelism fixed at 1 (sequential property)
+
+// Fixed 16-byte protocol salt distinguishes TEMPORAL_PROOF Argon2id invocations
+// from all other uses of Argon2id in the runtime.
+const TEMPORAL_PROOF_SALT: [16]u8 = .{
+    'A', 'P', 'E', 'X', '_', 'S', 'W', 'F', 'v', '1', 0, 0, 0, 0, 0, 0,
+};
+
+/// Returned by SecureLogger.emitTemporalProof. Caller must free `line`.
+pub const TemporalProofResult = struct {
+    /// Full wire-format packet line. Caller must free.
+    line: []u8,
+    /// SHA-256 of `line` — stored as TemporalProofHash in the sealed payload (§10.2).
+    hash: [32]u8,
+};
 
 /// Compact record of one evidence emission, stored for range queries.
 /// skill_ids is a comma-separated owned string ("foo,bar" or "" when empty).
@@ -645,6 +665,125 @@ pub const SecureLogger = struct {
         var digest: [32]u8 = undefined;
         hasher.final(&digest);
         return digest;
+    }
+
+    /// Signs a TEMPORAL_PROOF packet (§5.7).
+    ///
+    /// Signature scope (137 bytes):
+    ///   Magic "VART"  (4)
+    ///   FormatVer     (1)   0x01
+    ///   Sequence      (8)   u64 LE
+    ///   PrevL1Hash    (32)
+    ///   L1Hash        (32)
+    ///   Proof         (32)  Argon2id output
+    ///   M             (4)   u32 LE
+    ///   T             (4)   u32 LE
+    ///   P             (4)   u32 LE
+    ///   SessionID     (16)
+    fn signTemporalProof(
+        self: *SecureLogger,
+        prev_l1hash: [32]u8,
+        l1hash: [32]u8,
+        proof: [32]u8,
+        sequence: u64,
+    ) !Ed25519.Signature {
+        var msg: [137]u8 = undefined;
+        var pos: usize = 0;
+
+        @memcpy(msg[pos..][0..4], &[_]u8{ 'V', 'A', 'R', 'T' });               pos += 4;
+        msg[pos] = 0x01;                                                          pos += 1;
+        std.mem.writeInt(u64, msg[pos..][0..8], sequence, .little);              pos += 8;
+        @memcpy(msg[pos..][0..32], &prev_l1hash);                                pos += 32;
+        @memcpy(msg[pos..][0..32], &l1hash);                                     pos += 32;
+        @memcpy(msg[pos..][0..32], &proof);                                      pos += 32;
+        std.mem.writeInt(u32, msg[pos..][0..4], TEMPORAL_PROOF_M, .little);     pos += 4;
+        std.mem.writeInt(u32, msg[pos..][0..4], TEMPORAL_PROOF_T, .little);     pos += 4;
+        std.mem.writeInt(u32, msg[pos..][0..4], TEMPORAL_PROOF_P, .little);     pos += 4;
+        @memcpy(msg[pos..][0..16], &self.session_id);                            pos += 16;
+
+        std.debug.assert(pos == 137);
+        return self.keypair.sign(&msg, null);
+    }
+
+    /// Emits a TEMPORAL_PROOF packet (0x09) at the current chain position (§9.5).
+    ///
+    /// Must be called immediately before sealed_state.capture() — the sealed
+    /// checkpoint must NOT precede the TEMPORAL_PROOF emission (§9.5 ordering).
+    ///
+    /// The Argon2id computation (~240 ms at floor params on c5.xlarge) runs
+    /// outside the mutex so it does not block concurrent readers.  The chain
+    /// commit (sequence increment, hash advance, sig_log append) happens under
+    /// the mutex after the computation completes.
+    ///
+    /// Caller must free result.line.
+    pub fn emitTemporalProof(self: *SecureLogger, allocator: std.mem.Allocator) !TemporalProofResult {
+        // Snapshot chain state for Argon2id input under a brief lock.
+        var last_l1hash: [32]u8 = undefined;
+        var session_id_snap: [16]u8 = undefined;
+        var next_seq: u64 = 0;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            last_l1hash    = self.prev_stream_hash;
+            session_id_snap = self.session_id;
+            next_seq       = try std.math.add(u64, self.sequence, 1);
+        }
+
+        // Build Argon2id input: LastEvidenceL1Hash ‖ SessionID ‖ Sequence (u64 LE)
+        var argon_input: [56]u8 = undefined;
+        @memcpy(argon_input[0..32], &last_l1hash);
+        @memcpy(argon_input[32..48], &session_id_snap);
+        std.mem.writeInt(u64, argon_input[48..][0..8], next_seq, .little);
+        defer std.crypto.secureZero(u8, &argon_input);
+
+        // Run Argon2id outside the mutex.
+        const params = argon2.Params{ .t = TEMPORAL_PROOF_T, .m = TEMPORAL_PROOF_M, .p = TEMPORAL_PROOF_P };
+        var argon_output: [32]u8 = undefined;
+        try argon2.kdf(allocator, &argon_output, &argon_input, &TEMPORAL_PROOF_SALT, params, .argon2id);
+        defer std.crypto.secureZero(u8, &argon_output);
+
+        // Commit the proof to the chain under the mutex.
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Guard against concurrent evidence emission between snapshot and commit.
+        const committed_seq = try std.math.add(u64, self.sequence, 1);
+        if (committed_seq != next_seq) return error.TemporalProofSequenceMismatch;
+
+        const prev_hash = self.prev_stream_hash;
+
+        // New L1Hash: SHA-256(current_stream_hash ‖ argon_output)
+        var new_stream_hash: [32]u8 = undefined;
+        var h = Sha256.init(.{});
+        h.update(&self.stream_hash);
+        h.update(&argon_output);
+        h.final(&new_stream_hash);
+
+        const sig      = try self.signTemporalProof(prev_hash, new_stream_hash, argon_output, committed_seq);
+        const sig_bytes = sig.toBytes();
+
+        const prev_h   = try hex(allocator, &prev_hash);       defer allocator.free(prev_h);
+        const stream_h = try hex(allocator, &new_stream_hash); defer allocator.free(stream_h);
+        const proof_h  = try hex(allocator, &argon_output);    defer allocator.free(proof_h);
+        const sig_h    = try hex(allocator, &sig_bytes);       defer allocator.free(sig_h);
+
+        const line = try std.fmt.allocPrint(allocator,
+            "TEMPORAL_PROOF:prev_stream={s}:stream={s}:proof={s}:m={d}:t={d}:p={d}:sig={s}:seq={d}",
+            .{ prev_h, stream_h, proof_h, TEMPORAL_PROOF_M, TEMPORAL_PROOF_T, TEMPORAL_PROOF_P, sig_h, committed_seq },
+        );
+        errdefer allocator.free(line);
+
+        var tp_hash: [32]u8 = undefined;
+        Sha256.hash(line, &tp_hash, .{});
+
+        // Commit: sig_log, sequence, and both hash fields advance.
+        try self.sig_log.append(self.allocator, sig_bytes);
+        self.sequence         = committed_seq;
+        self.prev_stream_hash = new_stream_hash;
+        self.stream_hash      = new_stream_hash;
+        self.stream_cond.broadcast();
+
+        return TemporalProofResult{ .line = line, .hash = tp_hash };
     }
 
     /// Emits a Bundle Seal line (spec §7).

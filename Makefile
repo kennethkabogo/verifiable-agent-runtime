@@ -79,7 +79,8 @@ run-debug:
 	  --memory       $(ENCLAVE_MEMORY) \
 	  --cpu-count    $(ENCLAVE_CPUS) \
 	  --eif-path     $(EIF_PATH) \
-	  --debug-mode
+	  --debug-mode \
+	  --attach-console
 
 # 5. Terminate the running enclave (first one returned by describe-enclaves)
 stop:

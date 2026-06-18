@@ -2,6 +2,15 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "RootFullAccess",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::752439474140:root"
+      },
+      "Action": "kms:*",
+      "Resource": "*"
+    },
+    {
       "Sid": "KeyAdministrationReadOnly",
       "Effect": "Allow",
       "Principal": {
@@ -63,9 +72,9 @@
       "Resource": "*",
       "Condition": {
         "StringEqualsIgnoreCase": {
-          "kms:RecipientAttestation:PCR0": "7a9dc6e68a9c1400b52d177a9c5cba129b01dfcf6222b7dd377e6d5eb7fb166f15e819a4fcc547a485047954fe8e2510",
+          "kms:RecipientAttestation:PCR0": "d58593aa43487c2debf832e52ca35bbc798b3915f0d2c17a9bcded23dec8277f0db6457433a1da8cd2c844dfb0fdaa55",
           "kms:RecipientAttestation:PCR1": "4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493",
-          "kms:RecipientAttestation:PCR2": "91eea707766d0651ca4943621f4ac0acf527b546a3c0f246a6eb766dde66b0320eefefa62e592f61a81c529a03ab86c4"
+          "kms:RecipientAttestation:PCR2": "590686307b69586034e1b624177ba76f73a42a96e92623e218ca7a5d989a03fec1e6d51ce1770663b1e209b73770a36b"
         }
       }
     }

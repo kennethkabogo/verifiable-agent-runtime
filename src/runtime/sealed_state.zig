@@ -74,11 +74,12 @@ const VsockHandler = @import("vsock.zig").VsockHandler;
 // ---------------------------------------------------------------------------
 
 const MAGIC = [4]u8{ 'V', 'A', 'R', 'S' };
-const FORMAT_VERSION: u8 = 0x02;
+const FORMAT_VERSION: u8 = 0x03;
 
 /// Minimum plaintext size: magic(4) + version(1) + session_id(16) +
 /// stream_hash(32) + prev_hash(32) + sequence(8) + bootstrap_nonce(32) +
-/// vault_count(4) + exec_count(4) = 133
+/// vault_count(4) + exec_count(4) + temporal_proof_present(1) = 134
+/// v0.02 blobs are 133 bytes minimum; the deserializer accepts both versions.
 const MIN_PLAINTEXT: usize = 133;
 
 /// Minimum and maximum byte lengths for the wrapped DEK field.
@@ -109,6 +110,9 @@ pub const CapturedState = struct {
     bootstrap_nonce: [32]u8,
     vault_entries: []VaultEntry,
     exec_entries: []ExecEntry,
+    /// SHA-256 of the full wire bytes of the TEMPORAL_PROOF packet at
+    /// sequence LastSeq+1, or null if no conformant proof was emitted (§10.2).
+    temporal_proof_hash: ?[32]u8 = null,
 
     pub const VaultEntry = struct {
         key: []const u8,
@@ -339,14 +343,15 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
 // ---------------------------------------------------------------------------
 
 fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
-    // Pre-compute total size.
-    var size: usize = MIN_PLAINTEXT;
+    // Pre-compute total size (MIN_PLAINTEXT already includes the 1-byte presence flag).
+    var size: usize = MIN_PLAINTEXT + 1; // +1: presence flag is always written in v0.03
     for (state.vault_entries) |e| {
         size += 2 + e.key.len + 2 + e.value.len;
     }
     for (state.exec_entries) |e| {
         size += 2 + e.cmd.len + 32 + 32 + 1 + 8;
     }
+    if (state.temporal_proof_hash != null) size += 32;
 
     const buf = try allocator.alloc(u8, size);
     var pos: usize = 0;
@@ -380,6 +385,14 @@ fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
         std.mem.writeInt(u64, buf[pos..][0..8], e.seq, .little);                  pos += 8;
     }
 
+    // TemporalProofHash presence flag + optional hash (§10.2, v0.03 extension).
+    if (state.temporal_proof_hash) |h| {
+        buf[pos] = 0x01; pos += 1;
+        @memcpy(buf[pos..][0..32], &h); pos += 32;
+    } else {
+        buf[pos] = 0x00; pos += 1;
+    }
+
     std.debug.assert(pos == size);
     return buf;
 }
@@ -391,7 +404,9 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
 
     if (!std.mem.eql(u8, buf[pos..][0..4], &MAGIC)) return error.InvalidMagic;
     pos += 4;
-    if (buf[pos] != FORMAT_VERSION) return error.UnsupportedVersion;
+    // Accept v0.02 (no TemporalProofHash field) and v0.03 (with field).
+    const fmt_ver = buf[pos];
+    if (fmt_ver != 0x02 and fmt_ver != FORMAT_VERSION) return error.UnsupportedVersion;
     pos += 1;
 
     var session_id: [16]u8 = undefined;
@@ -486,6 +501,20 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         exec_init = i + 1;
     }
 
+    // TemporalProofHash (§10.2): present only in v0.03 blobs.
+    const temporal_proof_hash: ?[32]u8 = if (fmt_ver == 0x03) blk: {
+        if (pos >= buf.len) return error.TruncatedState;
+        const has_hash = buf[pos]; pos += 1;
+        if (has_hash == 0x01) {
+            if (pos + 32 > buf.len) return error.TruncatedState;
+            var h: [32]u8 = undefined;
+            @memcpy(&h, buf[pos..][0..32]);
+            pos += 32;
+            break :blk h;
+        }
+        break :blk null;
+    } else null;
+
     return CapturedState{
         .allocator = allocator,
         .session_id = session_id,
@@ -495,6 +524,7 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         .bootstrap_nonce = bootstrap_nonce,
         .vault_entries = vault_entries,
         .exec_entries = exec_entries,
+        .temporal_proof_hash = temporal_proof_hash,
     };
 }
 
@@ -515,16 +545,35 @@ const MOCK_WRAP_KEY = [32]u8{
 /// Override with the VAR_KMS_PROXY_PORT environment variable.
 const KMS_PROXY_PORT_DEFAULT: u16 = 8443;
 
-/// Memoized NSM availability — probed once on first call, cached for the
-/// lifetime of the process.  Calling openFileAbsolute on every seal/unseal
-/// operation creates a TOCTOU window: if the NSM device is transiently
-/// unavailable exactly during a seal or unseal call, the code falls back to
-/// simulation mode (MOCK_WRAP_KEY XOR), reducing DEK protection from
-/// KMS PCR-bound policy to a publicly-known constant.  Caching the result
-/// ensures that the production/simulation decision is made once at startup
-/// and never silently downgraded mid-session.
+/// KMS configuration captured before hardenProcess() scrubs the environment
+/// and before seccomp blocks openat.  Populated by initSealConfig(); zero-
+/// values mean "simulation mode" so the module is safe to use without calling
+/// initSealConfig() in unit-test / simulation contexts.
 var g_nsm_available: ?bool = null;
 var g_nsm_mutex: std.Thread.Mutex = .{};
+var g_kms_key_arn: ?[]const u8 = null;
+var g_kms_proxy_port: u16 = KMS_PROXY_PORT_DEFAULT;
+
+/// Must be called once before hardenProcess() — i.e., before seccomp blocks
+/// openat (257) and before scrubEnvironment() zeroes VAR_KMS_KEY_ARN.
+///
+/// Warms the NSM availability cache and captures the KMS key ARN and proxy
+/// port so that sealDek() can operate without any filesystem or env reads
+/// after the sandbox is installed.  Safe to call multiple times (idempotent
+/// after the first successful call).
+pub fn initSealConfig(allocator: std.mem.Allocator) void {
+    _ = hasNsmDevice(); // warm g_nsm_available via openat — safe before seccomp
+    if (std.posix.getenv("VAR_KMS_KEY_ARN")) |arn| {
+        if (arn.len > 0 and g_kms_key_arn == null) {
+            if (allocator.dupe(u8, arn)) |copy| {
+                g_kms_key_arn = copy;
+            } else |_| {}
+        }
+    }
+    if (std.posix.getenv("VAR_KMS_PROXY_PORT")) |s| {
+        g_kms_proxy_port = std.fmt.parseInt(u16, s, 10) catch KMS_PROXY_PORT_DEFAULT;
+    }
+}
 
 fn hasNsmDevice() bool {
     g_nsm_mutex.lock();
@@ -659,10 +708,9 @@ fn kmsEncrypt(
     return ct;
 }
 
-/// Returns the KMS proxy port from the environment, or the default.
+/// Returns the KMS proxy port captured by initSealConfig(), or the default.
 fn kmsProxyPort() u16 {
-    const s = std.posix.getenv("VAR_KMS_PROXY_PORT") orelse return KMS_PROXY_PORT_DEFAULT;
-    return std.fmt.parseInt(u16, s, 10) catch KMS_PROXY_PORT_DEFAULT;
+    return g_kms_proxy_port;
 }
 
 /// Wraps (seals) a 32-byte AES-256 DEK.
@@ -671,7 +719,8 @@ fn kmsProxyPort() u16 {
 /// Caller owns the returned slice.
 fn sealDek(allocator: std.mem.Allocator, dek: [32]u8) ![]u8 {
     if (hasNsmDevice()) {
-        const key_arn = std.posix.getenv("VAR_KMS_KEY_ARN") orelse return error.KmsKeyArnNotSet;
+        // Use the ARN captured before hardenProcess() scrubbed the environment.
+        const key_arn = g_kms_key_arn orelse return error.KmsKeyArnNotSet;
         return kmsEncrypt(allocator, key_arn, kmsProxyPort(), &dek);
     }
     // Simulation: one-time-pad style XOR with the mock wrapping key.

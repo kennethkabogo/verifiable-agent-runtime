@@ -48,7 +48,7 @@ Group=var-proxy
 WorkingDirectory=/opt/var
 ExecStart=/usr/bin/python3 /opt/var/proxy.py \
     --vsock \
-    --port ${VAR_KMS_PROXY_PORT:-8443}
+    --port 8443
 
 # Restart policy: back off on repeated failures so we don't spam KMS/IMDS.
 Restart=on-failure
