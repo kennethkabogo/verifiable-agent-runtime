@@ -784,20 +784,22 @@ fn kmsDecryptWithRecipient(
     const resp_body = try kmsHttpPost(allocator, proxy_port, "TrentService.Decrypt", req_body);
     defer allocator.free(resp_body);
 
-    // 4. Extract CiphertextForRecipient (256-byte RSA-2048 block, base64-encoded).
+    // 4. Extract CiphertextForRecipient (DER-encoded CMS EnvelopedData, base64).
     const b64_wrapped = (try jsonExtractString(allocator, resp_body, "CiphertextForRecipient")) orelse
         return error.KmsNoCiphertextForRecipient;
     defer allocator.free(b64_wrapped);
 
     const dec = std.base64.standard.Decoder;
     const wrapped_len = try dec.calcSizeForSlice(b64_wrapped);
-    if (wrapped_len != 256) return error.KmsUnexpectedWrappedDekLength;
-    var wrapped: [256]u8 = undefined;
-    try dec.decode(&wrapped, b64_wrapped);
-    defer std.crypto.secureZero(u8, &wrapped);
+    const wrapped = try allocator.alloc(u8, wrapped_len);
+    defer {
+        std.crypto.secureZero(u8, wrapped);
+        allocator.free(wrapped);
+    }
+    try dec.decode(wrapped, b64_wrapped);
 
-    // 5. RSA-OAEP-SHA256 unwrap → 32-byte plaintext DEK.
-    return rsa.unwrapDek(&kp, &wrapped);
+    // 5. CMS EnvelopedData unwrap → 32-byte plaintext DEK.
+    return rsa.decryptCmsEnvelopedData(&kp, wrapped);
 }
 
 /// Unwraps a sealed DEK produced by sealDek().
