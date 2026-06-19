@@ -77,22 +77,6 @@
           "kms:RecipientAttestation:PCR2": "c5fd349f483e79357955df7a15a4d8b80780b7af8da354ddc45fcae0979dc1bcb215f6ca4956273d0a6bbca34fbfa7df"
         }
       }
-    },
-    {
-      "Sid": "AllowDecryptDebugResumeEnclave",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::752439474140:role/var-enclave-host"
-      },
-      "Action": "kms:Decrypt",
-      "Resource": "*",
-      "Condition": {
-        "StringEqualsIgnoreCase": {
-          "kms:RecipientAttestation:PCR0": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-          "kms:RecipientAttestation:PCR1": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-          "kms:RecipientAttestation:PCR2": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        }
-      }
     }
   ]
 }
