@@ -95,7 +95,11 @@ pub fn main() !void {
             protocol.quote.deinit(allocator);
             protocol.quote = new_quote;
 
-            std.log.info("[VAR-gateway] Resumed session (seq {d}).", .{captured.sequence});
+            // Emit SESSION_RESUME as the first packet of the resumed segment (§9.3).
+            // PrevL1Hash = L1Hash(TEMPORAL_PROOF) from the sealed checkpoint.
+            const resume_packet = try logger.emitSessionResume(allocator);
+            defer allocator.free(resume_packet);
+            std.log.info("[VAR-gateway] Resumed session (seq {d}): {s}", .{ captured.sequence, resume_packet });
         }
     }
 
