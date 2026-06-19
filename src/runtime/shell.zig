@@ -786,6 +786,76 @@ pub const SecureLogger = struct {
         return TemporalProofResult{ .line = line, .hash = tp_hash };
     }
 
+    /// Signs a SESSION_RESUME boundary marker (§9.3).
+    ///
+    /// Signature scope (93 bytes):
+    ///   Magic "VARS"  (4)
+    ///   FormatVer     (1)   0x01
+    ///   Sequence      (8)   u64 LE
+    ///   PrevL1Hash   (32)
+    ///   L1Hash       (32)
+    ///   SessionID    (16)
+    fn signSessionResume(
+        self: *SecureLogger,
+        prev_l1hash: [32]u8,
+        l1hash: [32]u8,
+        sequence: u64,
+    ) !Ed25519.Signature {
+        var msg: [93]u8 = undefined;
+        var pos: usize = 0;
+
+        @memcpy(msg[pos..][0..4], &[_]u8{ 'V', 'A', 'R', 'S' });   pos += 4;
+        msg[pos] = 0x01;                                              pos += 1;
+        std.mem.writeInt(u64, msg[pos..][0..8], sequence, .little);  pos += 8;
+        @memcpy(msg[pos..][0..32], &prev_l1hash);                    pos += 32;
+        @memcpy(msg[pos..][0..32], &l1hash);                         pos += 32;
+        @memcpy(msg[pos..][0..16], &self.session_id);                pos += 16;
+
+        std.debug.assert(pos == 93);
+        return self.keypair.sign(&msg, null);
+    }
+
+    /// Emits a SESSION_RESUME packet (0x07) as the first packet of a resumed
+    /// segment (§9.3). Must be called immediately after restoreLogger() and
+    /// before any other chain-advancing operation.
+    ///
+    /// Wire format:
+    ///   SESSION_RESUME:prev_stream=<hex>:stream=<hex>:session=<hex>:seq=<N>:sig=<hex>
+    ///
+    /// Caller must free the returned slice.
+    pub fn emitSessionResume(self: *SecureLogger, allocator: std.mem.Allocator) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const next_seq = try std.math.add(u64, self.sequence, 1);
+        const prev_hash = self.prev_stream_hash;
+        const l1hash = self.stream_hash;
+
+        const sig = try self.signSessionResume(prev_hash, l1hash, next_seq);
+        const sig_bytes = sig.toBytes();
+
+        const prev_h = try hex(allocator, &prev_hash);     defer allocator.free(prev_h);
+        const l1h    = try hex(allocator, &l1hash);         defer allocator.free(l1h);
+        const sid_h  = try hex(allocator, &self.session_id); defer allocator.free(sid_h);
+        const sig_h  = try hex(allocator, &sig_bytes);     defer allocator.free(sig_h);
+
+        const line = try std.fmt.allocPrint(allocator,
+            "SESSION_RESUME:prev_stream={s}:stream={s}:session={s}:seq={d}:sig={s}",
+            .{ prev_h, l1h, sid_h, next_seq, sig_h },
+        );
+        errdefer allocator.free(line);
+
+        try self.sig_log.append(self.allocator, sig_bytes);
+        self.sequence = next_seq;
+        // prev_stream_hash tracks the last committed L1Hash; at resume time
+        // stream_hash and prev_stream_hash are identical (both from TEMPORAL_PROOF),
+        // so this assignment is a no-op but makes the invariant explicit.
+        self.prev_stream_hash = l1hash;
+        self.stream_cond.broadcast();
+
+        return line;
+    }
+
     /// Emits a Bundle Seal line (spec §7).
     ///
     ///   BUNDLE_SEAL:magic=APXZ:terminal_digest=<hex>:bundle_hash=<hex>:seal_sig=<hex>
@@ -1222,4 +1292,66 @@ test "pollEvidenceSince: wakes on emission from another thread" {
 
     try std.testing.expectEqual(@as(usize, 1), new_cursor);
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
+}
+
+test "emitSessionResume: advances sequence and emits correct wire format" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    const bootstrap_nonce = [_]u8{0xAB} ** 32;
+    const session_id = [_]u8{0xCD} ** 16;
+    var logger = try SecureLogger.init(allocator, bootstrap_nonce, session_id, kp);
+    defer logger.deinit();
+
+    // Emit one evidence packet to advance the chain (seq=1).
+    const ev = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(ev);
+    try std.testing.expectEqual(@as(u64, 1), logger.sequence);
+
+    const stream_before = logger.stream_hash;
+
+    // Emit SESSION_RESUME (seq=2).
+    const line = try logger.emitSessionResume(allocator);
+    defer allocator.free(line);
+
+    // Sequence must advance.
+    try std.testing.expectEqual(@as(u64, 2), logger.sequence);
+    // sig_log must have two entries (evidence + session_resume).
+    try std.testing.expectEqual(@as(usize, 2), logger.sig_log.items.len);
+    // Stream hash is unchanged — SESSION_RESUME folds no data.
+    try std.testing.expectEqualSlices(u8, &stream_before, &logger.stream_hash);
+
+    // Wire format checks.
+    try std.testing.expect(std.mem.startsWith(u8, line, "SESSION_RESUME:"));
+    try std.testing.expect(std.mem.indexOf(u8, line, "prev_stream=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "stream=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "session=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, ":seq=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "sig=") != null);
+}
+
+test "emitSessionResume: prev_stream matches stream of prior TEMPORAL_PROOF" {
+    const allocator = std.testing.allocator;
+    const kp = try Ed25519.KeyPair.create(null);
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    // seq=1: EVIDENCE
+    const ev = try logger.getEvidenceBundleJson(allocator);
+    allocator.free(ev);
+
+    // seq=2: TEMPORAL_PROOF
+    const tp = try logger.emitTemporalProof(allocator);
+    defer allocator.free(tp.line);
+    const tp_stream = logger.stream_hash;
+
+    // seq=3: SESSION_RESUME — PrevL1Hash must equal L1Hash(TEMPORAL_PROOF)
+    const line = try logger.emitSessionResume(allocator);
+    defer allocator.free(line);
+
+    // Format the expected prev_stream hex and check it appears in the line.
+    const expected = try std.fmt.allocPrint(allocator, "prev_stream={s}", .{
+        std.fmt.fmtSliceHexLower(&tp_stream),
+    });
+    defer allocator.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, line, expected) != null);
 }
