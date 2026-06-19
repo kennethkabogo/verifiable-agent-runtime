@@ -23,6 +23,8 @@ const c = @cImport({
     @cInclude("openssl/evp.h");
     @cInclude("openssl/rsa.h");
     @cInclude("openssl/x509.h");
+    @cInclude("openssl/cms.h");
+    @cInclude("openssl/bio.h");
 });
 
 /// Ephemeral RSA-2048 keypair for one unseal operation.
@@ -87,42 +89,34 @@ pub fn generateKeyPair(allocator: std.mem.Allocator) !RsaKeyPair {
     };
 }
 
-/// Decrypt a CiphertextForRecipient blob and return the 32-byte plaintext DEK.
+/// Decrypt a CiphertextForRecipient blob returned by AWS KMS Decrypt with Recipient.
 ///
-/// KMS returns CiphertextForRecipient as a 256-byte RSAES-OAEP-SHA256 block
-/// (the RSA-2048 block size) encrypting the raw plaintext DEK bytes.
-/// OAEP uses SHA-256 for both the hash and the MGF1 mask-generation function,
-/// matching the KeyEncryptionAlgorithm: "RSAES_OAEP_SHA_256" field we send.
-pub fn unwrapDek(key_pair: *const RsaKeyPair, ciphertext: []const u8) ![32]u8 {
-    if (ciphertext.len != 256) return error.UnexpectedCiphertextLength;
-
+/// AWS KMS does NOT return a raw 256-byte RSA-2048 ciphertext.  It returns a
+/// DER-encoded CMS EnvelopedData structure (PKCS#7, ~467 bytes) that wraps the
+/// RSA-OAEP-SHA256-encrypted DEK inside standard CMS headers.  This function
+/// parses that structure with d2i_CMS_ContentInfo and decrypts it with
+/// CMS_decrypt using the ephemeral private key.
+pub fn decryptCmsEnvelopedData(key_pair: *const RsaKeyPair, der: []const u8) ![32]u8 {
     const pkey: *c.EVP_PKEY = @ptrFromInt(key_pair._pkey_int);
 
-    const ctx = c.EVP_PKEY_CTX_new(pkey, null) orelse
-        return error.EvpDecryptCtxFailed;
-    defer c.EVP_PKEY_CTX_free(ctx);
+    // d2i_CMS_ContentInfo advances der_ptr past consumed bytes; use a local copy.
+    var der_ptr: [*c]const u8 = der.ptr;
+    const cms = c.d2i_CMS_ContentInfo(null, &der_ptr, @intCast(der.len)) orelse
+        return error.CmsParseFailed;
+    defer c.CMS_ContentInfo_free(cms);
 
-    if (c.EVP_PKEY_decrypt_init(ctx) <= 0) return error.EvpDecryptInitFailed;
-    if (c.EVP_PKEY_CTX_set_rsa_padding(ctx, c.RSA_PKCS1_OAEP_PADDING) <= 0)
-        return error.EvpPaddingFailed;
-    if (c.EVP_PKEY_CTX_set_rsa_oaep_md(ctx, c.EVP_sha256()) <= 0)
-        return error.EvpOaepMdFailed;
-    if (c.EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, c.EVP_sha256()) <= 0)
-        return error.EvpMgfMdFailed;
+    const out_bio = c.BIO_new(c.BIO_s_mem()) orelse
+        return error.BioAllocFailed;
+    defer _ = c.BIO_free(out_bio);
 
-    // First call with null output pointer to determine plaintext length.
-    var out_len: usize = 0;
-    if (c.EVP_PKEY_decrypt(ctx, null, &out_len, ciphertext.ptr, ciphertext.len) <= 0)
-        return error.EvpDecryptSizeFailed;
-
-    // The DEK must be exactly 32 bytes (AES-256).
-    if (out_len != 32) return error.UnexpectedDekLength;
+    // pkey = ephemeral RSA private key; cert = NULL skips certificate lookup;
+    // dcont = NULL because content is embedded; flags = 0.
+    if (c.CMS_decrypt(cms, pkey, null, null, out_bio, 0) <= 0)
+        return error.CmsDecryptFailed;
 
     var dek: [32]u8 = undefined;
-    defer std.crypto.secureZero(u8, &dek);
-    if (c.EVP_PKEY_decrypt(ctx, &dek, &out_len, ciphertext.ptr, ciphertext.len) <= 0)
-        return error.EvpDecryptFailed;
-    if (out_len != 32) return error.UnexpectedDekLength;
+    const n = c.BIO_read(out_bio, &dek, 32);
+    if (n != 32) return error.UnexpectedDekLength;
 
     return dek;
 }
