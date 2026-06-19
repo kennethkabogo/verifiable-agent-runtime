@@ -72,9 +72,25 @@
       "Resource": "*",
       "Condition": {
         "StringEqualsIgnoreCase": {
-          "kms:RecipientAttestation:PCR0": "d58593aa43487c2debf832e52ca35bbc798b3915f0d2c17a9bcded23dec8277f0db6457433a1da8cd2c844dfb0fdaa55",
+          "kms:RecipientAttestation:PCR0": "f808b003cb97cf0dfec2a8beb6a69960d51865b9b0d603b87e2bbfaca30a3b690f72c808d1284aef6166a199ee634eee",
           "kms:RecipientAttestation:PCR1": "4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493",
-          "kms:RecipientAttestation:PCR2": "590686307b69586034e1b624177ba76f73a42a96e92623e218ca7a5d989a03fec1e6d51ce1770663b1e209b73770a36b"
+          "kms:RecipientAttestation:PCR2": "c5fd349f483e79357955df7a15a4d8b80780b7af8da354ddc45fcae0979dc1bcb215f6ca4956273d0a6bbca34fbfa7df"
+        }
+      }
+    },
+    {
+      "Sid": "AllowDecryptDebugResumeEnclave",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::752439474140:role/var-enclave-host"
+      },
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIgnoreCase": {
+          "kms:RecipientAttestation:PCR0": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "kms:RecipientAttestation:PCR1": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "kms:RecipientAttestation:PCR2": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         }
       }
     }
