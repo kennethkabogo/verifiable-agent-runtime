@@ -74,12 +74,15 @@ const VsockHandler = @import("vsock.zig").VsockHandler;
 // ---------------------------------------------------------------------------
 
 const MAGIC = [4]u8{ 'V', 'A', 'R', 'S' };
-const FORMAT_VERSION: u8 = 0x03;
+const FORMAT_VERSION: u8 = 0x04;
 
-/// Minimum plaintext size: magic(4) + version(1) + session_id(16) +
-/// stream_hash(32) + prev_hash(32) + sequence(8) + bootstrap_nonce(32) +
-/// vault_count(4) + exec_count(4) + temporal_proof_present(1) = 134
-/// v0.02 blobs are 133 bytes minimum; the deserializer accepts both versions.
+/// Minimum plaintext size (v0.02, smallest accepted blob):
+///   magic(4) + version(1) + session_id(16) + stream_hash(32) +
+///   prev_hash(32) + sequence(8) + bootstrap_nonce(32) +
+///   vault_count(4) + exec_count(4) = 133
+/// v0.03 adds temporal_proof_present(1)          → 134 min
+/// v0.04 adds segment_index(4)                   → 138 min
+/// The deserializer accepts v0.02, v0.03, and v0.04.
 const MIN_PLAINTEXT: usize = 133;
 
 /// Minimum and maximum byte lengths for the wrapped DEK field.
@@ -113,6 +116,10 @@ pub const CapturedState = struct {
     /// SHA-256 of the full wire bytes of the TEMPORAL_PROOF packet at
     /// sequence LastSeq+1, or null if no conformant proof was emitted (§10.2).
     temporal_proof_hash: ?[32]u8 = null,
+    /// 0-based index of the next segment to be created on resume (§10.2).
+    /// Audit convenience field — not a security verification input.
+    /// Ordering is established by seq and the L1 hash chain.
+    segment_index: u32 = 0,
 
     pub const VaultEntry = struct {
         key: []const u8,
@@ -171,6 +178,7 @@ pub fn capture(
     var prev_stream_hash: [32]u8 = undefined;
     var sequence: u64 = 0;
     var bootstrap_nonce: [32]u8 = undefined;
+    var segment_index: u32 = 0;
 
     const exec_entries = blk: {
         logger.mutex.lock();
@@ -181,6 +189,7 @@ pub fn capture(
         prev_stream_hash = logger.prev_stream_hash;
         sequence         = logger.sequence;
         bootstrap_nonce  = logger.bootstrap_nonce;
+        segment_index    = logger.segment_index + 1; // next segment index (§10.2)
         const n = logger.executions.items.len;
         const buf = try allocator.alloc(CapturedState.ExecEntry, n);
         var init_count: usize = 0;
@@ -254,6 +263,7 @@ pub fn capture(
         .bootstrap_nonce = bootstrap_nonce,
         .vault_entries = vault_entries,
         .exec_entries = exec_entries,
+        .segment_index = segment_index,
     };
 }
 
@@ -318,6 +328,7 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
     logger.prev_stream_hash = state.prev_stream_hash;
     logger.sequence = state.sequence;
     logger.bootstrap_nonce = state.bootstrap_nonce;
+    logger.segment_index = state.segment_index; // current segment after resume
 
     // Restore the ordered execution audit log.
     // The logger was freshly created at startup, so executions will be empty;
@@ -344,7 +355,7 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
 
 fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     // Pre-compute total size (MIN_PLAINTEXT already includes the 1-byte presence flag).
-    var size: usize = MIN_PLAINTEXT + 1; // +1: presence flag is always written in v0.03
+    var size: usize = MIN_PLAINTEXT + 1 + 4; // +1: presence flag; +4: segment_index (v0.04)
     for (state.vault_entries) |e| {
         size += 2 + e.key.len + 2 + e.value.len;
     }
@@ -363,6 +374,7 @@ fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     @memcpy(buf[pos..][0..32], &state.prev_stream_hash);              pos += 32;
     std.mem.writeInt(u64, buf[pos..][0..8], state.sequence, .little);  pos += 8;
     @memcpy(buf[pos..][0..32], &state.bootstrap_nonce);               pos += 32;
+    std.mem.writeInt(u32, buf[pos..][0..4], state.segment_index, .little); pos += 4;
 
     std.mem.writeInt(u32, buf[pos..][0..4], @intCast(state.vault_entries.len), .little);
     pos += 4;
@@ -404,9 +416,10 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
 
     if (!std.mem.eql(u8, buf[pos..][0..4], &MAGIC)) return error.InvalidMagic;
     pos += 4;
-    // Accept v0.02 (no TemporalProofHash field) and v0.03 (with field).
+    // Accept v0.02 (no TemporalProofHash/SegmentIndex), v0.03 (TemporalProofHash only),
+    // and v0.04 (TemporalProofHash + SegmentIndex).
     const fmt_ver = buf[pos];
-    if (fmt_ver != 0x02 and fmt_ver != FORMAT_VERSION) return error.UnsupportedVersion;
+    if (fmt_ver != 0x02 and fmt_ver != 0x03 and fmt_ver != FORMAT_VERSION) return error.UnsupportedVersion;
     pos += 1;
 
     var session_id: [16]u8 = undefined;
@@ -427,6 +440,15 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
     var bootstrap_nonce: [32]u8 = undefined;
     @memcpy(&bootstrap_nonce, buf[pos..][0..32]);
     pos += 32;
+
+    // SegmentIndex (§10.2): present only in v0.04 blobs.
+    // v0.02/v0.03 blobs were sealed from segment 0, so next = 1.
+    const segment_index: u32 = if (fmt_ver == 0x04) blk: {
+        if (pos + 4 > buf.len) return error.TruncatedState;
+        const v = std.mem.readInt(u32, buf[pos..][0..4], .little);
+        pos += 4;
+        break :blk v;
+    } else 1;
 
     const vault_count = std.mem.readInt(u32, buf[pos..][0..4], .little);
     pos += 4;
@@ -501,8 +523,8 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         exec_init = i + 1;
     }
 
-    // TemporalProofHash (§10.2): present only in v0.03 blobs.
-    const temporal_proof_hash: ?[32]u8 = if (fmt_ver == 0x03) blk: {
+    // TemporalProofHash (§10.2): present in v0.03 and v0.04 blobs.
+    const temporal_proof_hash: ?[32]u8 = if (fmt_ver == 0x03 or fmt_ver == 0x04) blk: {
         if (pos >= buf.len) return error.TruncatedState;
         const has_hash = buf[pos]; pos += 1;
         if (has_hash == 0x01) {
@@ -525,6 +547,7 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         .vault_entries = vault_entries,
         .exec_entries = exec_entries,
         .temporal_proof_hash = temporal_proof_hash,
+        .segment_index = segment_index,
     };
 }
 
@@ -1011,4 +1034,35 @@ test "seal/unseal round-trip: bootstrap_nonce is preserved" {
     try std.testing.expectEqual([_]u8{0x11} ** 32, restored.stream_hash);
     try std.testing.expectEqual([_]u8{0x22} ** 32, restored.prev_stream_hash);
     try std.testing.expectEqual(@as(u64, 99), restored.sequence);
+    try std.testing.expectEqual(@as(u32, 0), restored.segment_index);
+}
+
+test "seal/unseal round-trip: segment_index advances on each capture" {
+    const allocator = std.testing.allocator;
+
+    var nonce: [32]u8 = undefined;
+    std.crypto.random.bytes(&nonce);
+    var sid: [16]u8 = undefined;
+    std.crypto.random.bytes(&sid);
+
+    // segment_index = 2 simulates a second resume (current segment is 2, next is 3).
+    const state = CapturedState{
+        .allocator = allocator,
+        .session_id = sid,
+        .stream_hash = [_]u8{0xAA} ** 32,
+        .prev_stream_hash = [_]u8{0xBB} ** 32,
+        .sequence = 5,
+        .bootstrap_nonce = nonce,
+        .vault_entries = &.{},
+        .exec_entries = &.{},
+        .segment_index = 3, // "next = 3" means we're in segment 2 and sealed for the third resume
+    };
+
+    const blob = try seal(allocator, &state);
+    defer allocator.free(blob);
+
+    var restored = try unseal(allocator, blob);
+    defer restored.deinit();
+
+    try std.testing.expectEqual(@as(u32, 3), restored.segment_index);
 }
