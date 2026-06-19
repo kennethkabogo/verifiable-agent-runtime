@@ -90,6 +90,11 @@ pub const SecureLogger = struct {
     /// Stored here so that sealed_state.capture() can persist it alongside the
     /// rest of the logger state and restore it on resume.
     bootstrap_nonce: [32]u8,
+    /// 0-based index of the current segment (original = 0, first resume = 1, …).
+    /// Not a security verification input — ordering is established by seq and
+    /// the L1 hash chain.  Persisted in the sealed payload so verifiers and
+    /// audit tooling can label segments without counting resume boundaries.
+    segment_index: u32 = 0,
     /// Ordered log of every subprocess execution this session.
     /// Each runAndLog call appends one entry; nothing is ever removed.
     /// Verifiers iterate the full list to confirm that no command was hidden

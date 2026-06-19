@@ -513,6 +513,8 @@ The plaintext inside the AES-GCM ciphertext contains the minimum state required 
 
 The Ed25519 signing keypair MUST NOT be included in the sealed payload. Each resumed segment generates a fresh keypair bound to a new attestation quote.
 
+**`SegmentIndex` is an audit convenience field, not a security verification input.** A verifier MUST NOT rely on `SegmentIndex` alone to establish ordering or detect gaps; the L1 hash chain (`LastEvidenceL1Hash` → `PrevL1Hash` of the first resumed packet) and `seq` are the normative ordering mechanism. `SegmentIndex` allows human audit tooling to label and count segments without traversing the full hash chain. A conformant verifier MUST accept a sealed payload whose `SegmentIndex` is monotonically increasing across checkpoints but MAY treat a non-monotonic value as a warning rather than a hard rejection, since the hash chain is sufficient to detect any actual evidence-ordering attack.
+
 ### 10.3 Checkpoint Timing
 
 The enclave MUST write a sealed checkpoint synchronously after each successful EVIDENCE emission, before returning acknowledgment to the agent. A crash between two evidence windows loses at most the in-flight window opened since the last checkpoint.

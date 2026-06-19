@@ -96,6 +96,14 @@ pub fn generateKeyPair(allocator: std.mem.Allocator) !RsaKeyPair {
 /// RSA-OAEP-SHA256-encrypted DEK inside standard CMS headers.  This function
 /// parses that structure with d2i_CMS_ContentInfo and decrypts it with
 /// CMS_decrypt using the ephemeral private key.
+///
+/// Why CMS rather than raw RSA bytes: AWS KMS uses the CMS EnvelopedData
+/// format (RFC 5652 §6) for the Recipient flow regardless of the
+/// KeyEncryptionAlgorithm.  The ~155-byte overhead beyond the 256-byte RSA
+/// block is the PKCS#7 OID, AlgorithmIdentifier, and RecipientInfo headers.
+/// This is not documented clearly in the KMS API reference; the evidence is
+/// the response body size (~778 bytes = ~155 JSON + ~623 base64 = ~467 binary)
+/// and the leading 0x30 / 06 09 2a 86 48 86 f7 0d 01 07 06 DER bytes.
 pub fn decryptCmsEnvelopedData(key_pair: *const RsaKeyPair, der: []const u8) ![32]u8 {
     const pkey: *c.EVP_PKEY = @ptrFromInt(key_pair._pkey_int);
 
