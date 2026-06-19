@@ -19,6 +19,78 @@ const AttestationQuote = @import("runtime/attestation.zig").AttestationQuote;
 const http = @import("runtime/http.zig");
 const sealed_state = @import("runtime/sealed_state.zig");
 const sandbox = @import("runtime/sandbox.zig");
+const VsockHandler = @import("runtime/vsock.zig").VsockHandler;
+
+/// Fetch the sealed resume state blob from the KMS proxy at startup.
+///
+/// The proxy serves resume state via VARService.GetResumeState on the same
+/// vsock port as KMS (default 8443).  This lets the enclave resume without
+/// baking VAR_RESUME_STATE into the Docker image — which would change PCR0
+/// and cause the KMS key policy to reject the attestation document.
+///
+/// Returns an allocated byte slice (caller must secureZero + free) or null if:
+///   • the proxy is not running (connection refused)
+///   • the proxy has no resume state (empty SealedState field)
+///   • any parse or decode error occurs
+/// Null means "start fresh" — not an error.
+fn fetchProxyResumeState(allocator: std.mem.Allocator) ?[]u8 {
+    const port_str = std.posix.getenv("VAR_KMS_PROXY_PORT") orelse "8443";
+    const port = std.fmt.parseInt(u16, port_str, 10) catch 8443;
+
+    var conn = VsockHandler.connect(allocator, VsockHandler.VMADDR_CID_HOST, port) catch return null;
+    defer conn.close();
+
+    const body = "{}";
+    const request = std.fmt.allocPrint(
+        allocator,
+        "POST / HTTP/1.0\r\n" ++
+            "Content-Type: application/x-amz-json-1.1\r\n" ++
+            "X-Amz-Target: VARService.GetResumeState\r\n" ++
+            "Content-Length: {d}\r\n" ++
+            "\r\n" ++
+            "{s}",
+        .{ body.len, body },
+    ) catch return null;
+    defer allocator.free(request);
+
+    _ = conn.send(request) catch return null;
+
+    var resp_buf = allocator.alloc(u8, 32768) catch return null;
+    defer allocator.free(resp_buf);
+    var total: usize = 0;
+    while (total < resp_buf.len) {
+        const n = conn.receive(resp_buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+
+    if (total < 12) return null;
+    if (!std.mem.startsWith(u8, resp_buf[0..total], "HTTP/1.") or resp_buf[9] != '2') return null;
+
+    const sep = std.mem.indexOf(u8, resp_buf[0..total], "\r\n\r\n") orelse return null;
+    const resp_body = resp_buf[sep + 4 .. total];
+
+    // Minimal JSON extract for "SealedState": "<base64>" — no allocations needed.
+    const key = "\"SealedState\"";
+    const key_pos = std.mem.indexOf(u8, resp_body, key) orelse return null;
+    var rest = resp_body[key_pos + key.len ..];
+    rest = std.mem.trimLeft(u8, rest, " \t\r\n:");
+    if (rest.len == 0 or rest[0] != '"') return null;
+    rest = rest[1..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    const b64 = rest[0..end];
+    if (b64.len == 0) return null;
+
+    const dec = std.base64.standard.Decoder;
+    const out_len = dec.calcSizeForSlice(b64) catch return null;
+    const out = allocator.alloc(u8, out_len) catch return null;
+    dec.decode(out, b64) catch {
+        std.crypto.secureZero(u8, out);
+        allocator.free(out);
+        return null;
+    };
+    return out;
+}
 
 /// Signal handler: requests a clean shutdown so the serve loop exits on the
 /// next accept() interruption, allowing `defer vault.deinit()` to wipe secrets.
@@ -56,51 +128,62 @@ pub fn main() !void {
     var logger = try SecureLogger.init(allocator, protocol.bootstrap_nonce, protocol.session_id, protocol.keypair);
     defer logger.deinit();
 
-    // 3. If VAR_RESUME_STATE is set, unseal the hibernated state and restore the
-    //    vault + logger before advertising the session to clients.  The signing
-    //    keypair is NOT restored — the fresh keypair generated above is used for
-    //    this session segment (keypair-per-segment model, spec §5.3).
-    //    After restore we patch the protocol fields so the bundle header emitted
-    //    by GET /session carries the original session_id and bootstrap_nonce.
-    if (std.posix.getenv("VAR_RESUME_STATE")) |hex_state| {
-        if (hex_state.len > 0 and hex_state.len % 2 == 0) {
-            const blob = try allocator.alloc(u8, hex_state.len / 2);
-            defer { std.crypto.secureZero(u8, blob); allocator.free(blob); }
-            _ = try std.fmt.hexToBytes(blob, hex_state);
+    // 3. If resume state is available, unseal the hibernated state and restore
+    //    the vault + logger before advertising the session to clients.
+    //
+    //    Production path: fetch sealed blob from the KMS proxy at startup via
+    //    VARService.GetResumeState (does not require changing the EIF/PCR0).
+    //    Dev/simulation fallback: VAR_RESUME_STATE hex env var.
+    //
+    //    The signing keypair is NOT restored — the fresh keypair generated above
+    //    is used for this segment (keypair-per-segment model, spec §5.3).
+    const proxy_blob: ?[]u8 = fetchProxyResumeState(allocator);
+    defer if (proxy_blob) |b| { std.crypto.secureZero(u8, b); allocator.free(b); };
 
-            var captured = sealed_state.unseal(allocator, blob) catch |err| {
-                std.log.err("[VAR-gateway] VAR_RESUME_STATE unseal failed: {}", .{err});
-                return error.ResumeFailed;
-            };
-            defer captured.deinit();
+    const env_blob: ?[]u8 = blk: {
+        if (proxy_blob != null) break :blk null; // proxy takes precedence
+        const hex = std.posix.getenv("VAR_RESUME_STATE") orelse break :blk null;
+        if (hex.len == 0 or hex.len % 2 != 0) break :blk null;
+        const b = allocator.alloc(u8, hex.len / 2) catch break :blk null;
+        _ = std.fmt.hexToBytes(b, hex) catch {
+            std.crypto.secureZero(u8, b);
+            allocator.free(b);
+            break :blk null;
+        };
+        break :blk b;
+    };
+    defer if (env_blob) |b| { std.crypto.secureZero(u8, b); allocator.free(b); };
 
-            try sealed_state.restoreVault(&captured, &vault);
-            try sealed_state.restoreLogger(&captured, &logger);
+    if (proxy_blob orelse env_blob) |blob| {
+        var captured = sealed_state.unseal(allocator, blob) catch |err| {
+            std.log.err("[VAR-gateway] Resume state unseal failed: {}", .{err});
+            return error.ResumeFailed;
+        };
+        defer captured.deinit();
 
-            // Patch protocol so the bundle header uses the original session identity.
-            protocol.session_id = captured.session_id;
-            protocol.bootstrap_nonce = captured.bootstrap_nonce;
+        try sealed_state.restoreVault(&captured, &vault);
+        try sealed_state.restoreLogger(&captured, &logger);
 
-            // Regenerate the attestation quote with the restored session_id as the
-            // NSM nonce field.  This ensures the resumed segment's attest_doc also
-            // witnesses the canonical session identity (not the ephemeral fresh
-            // session_id that was generated during init() above).
-            // The keypair stays fresh (per-segment model); bootstrap_nonce is
-            // NOT recomputed — it is preserved from the sealed state.
-            const new_quote = try AttestationQuote.generate(
-                allocator,
-                protocol.keypair.public_key.toBytes(),
-                captured.session_id,
-            );
-            protocol.quote.deinit(allocator);
-            protocol.quote = new_quote;
+        // Patch protocol so the bundle header uses the original session identity.
+        protocol.session_id = captured.session_id;
+        protocol.bootstrap_nonce = captured.bootstrap_nonce;
 
-            // Emit SESSION_RESUME as the first packet of the resumed segment (§9.3).
-            // PrevL1Hash = L1Hash(TEMPORAL_PROOF) from the sealed checkpoint.
-            const resume_packet = try logger.emitSessionResume(allocator);
-            defer allocator.free(resume_packet);
-            std.log.info("[VAR-gateway] Resumed session (seq {d}): {s}", .{ captured.sequence, resume_packet });
-        }
+        // Regenerate the attestation quote with the restored session_id as the
+        // NSM nonce field so the resumed segment's attest_doc witnesses the
+        // canonical session identity.  Keypair stays fresh; bootstrap_nonce is
+        // preserved from the sealed state (not recomputed).
+        const new_quote = try AttestationQuote.generate(
+            allocator,
+            protocol.keypair.public_key.toBytes(),
+            captured.session_id,
+        );
+        protocol.quote.deinit(allocator);
+        protocol.quote = new_quote;
+
+        // Emit SESSION_RESUME as the first packet of the resumed segment (§9.3).
+        const resume_packet = try logger.emitSessionResume(allocator);
+        defer allocator.free(resume_packet);
+        std.log.info("[VAR-gateway] Resumed session (seq {d}): {s}", .{ captured.sequence, resume_packet });
     }
 
     // 4. Emit the session root-of-trust header so operators can record it.

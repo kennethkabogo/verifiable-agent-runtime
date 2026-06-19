@@ -50,6 +50,12 @@ DEFAULT_PORT = 8443
 # base64-encoded inside a JSON body (~4 KiB) plus HTTP headers.
 MAX_REQUEST_BYTES = 64 * 1024  # 64 KiB
 
+# Sealed state blob from a previous hibernate, loaded at startup via
+# --resume-state-file.  Served to the enclave on the first
+# VARService.GetResumeState request so the EIF/PCR0 does not need to change
+# between sessions.
+_resume_state: bytes = b""
+
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -169,9 +175,17 @@ def _handle_decrypt(kms, body_bytes: bytes) -> bytes:
     return json.dumps(result).encode()
 
 
+def _handle_get_resume_state(_kms, _body_bytes: bytes) -> bytes:
+    result = {
+        "SealedState": base64.b64encode(_resume_state).decode() if _resume_state else ""
+    }
+    return json.dumps(result).encode()
+
+
 _HANDLERS = {
     "TrentService.Encrypt": _handle_encrypt,
     "TrentService.Decrypt": _handle_decrypt,
+    "VARService.GetResumeState": _handle_get_resume_state,
 }
 
 
@@ -250,6 +264,12 @@ def main():
         "--region", default=os.environ.get("AWS_DEFAULT_REGION"),
         help="AWS region for KMS (default: from credential chain)",
     )
+    parser.add_argument(
+        "--resume-state-file", metavar="PATH",
+        help="path to a file containing the raw sealed-state blob from a previous "
+             "POST /hibernate; served to the enclave at startup via "
+             "VARService.GetResumeState so PCR0 stays stable across resumes",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -257,6 +277,12 @@ def main():
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    if args.resume_state_file:
+        global _resume_state
+        with open(args.resume_state_file, "rb") as f:
+            _resume_state = f.read()
+        LOG.info("resume state loaded from %s (%d bytes)", args.resume_state_file, len(_resume_state))
 
     kms_kwargs = {}
     if args.region:
