@@ -675,7 +675,7 @@ pub const SecureLogger = struct {
     /// Signs a TEMPORAL_PROOF packet (§5.7).
     ///
     /// Signature scope (137 bytes):
-    ///   Magic "VART"  (4)
+    ///   Magic "APXP"  (4)
     ///   FormatVer     (1)   0x01
     ///   Sequence      (8)   u64 LE
     ///   PrevL1Hash    (32)
@@ -695,7 +695,7 @@ pub const SecureLogger = struct {
         var msg: [137]u8 = undefined;
         var pos: usize = 0;
 
-        @memcpy(msg[pos..][0..4], &[_]u8{ 'V', 'A', 'R', 'T' });               pos += 4;
+        @memcpy(msg[pos..][0..4], &[_]u8{ 'A', 'P', 'X', 'P' });               pos += 4;
         msg[pos] = 0x01;                                                          pos += 1;
         std.mem.writeInt(u64, msg[pos..][0..8], sequence, .little);              pos += 8;
         @memcpy(msg[pos..][0..32], &prev_l1hash);                                pos += 32;
