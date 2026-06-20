@@ -280,9 +280,12 @@ def main():
 
     if args.resume_state_file:
         global _resume_state
-        with open(args.resume_state_file, "rb") as f:
-            _resume_state = f.read()
-        LOG.info("resume state loaded from %s (%d bytes)", args.resume_state_file, len(_resume_state))
+        try:
+            with open(args.resume_state_file, "rb") as f:
+                _resume_state = f.read()
+            LOG.info("resume state loaded from %s (%d bytes)", args.resume_state_file, len(_resume_state))
+        except FileNotFoundError:
+            LOG.info("no resume state at %s, starting fresh", args.resume_state_file)
 
     kms_kwargs = {}
     if args.region:

@@ -1,0 +1,83 @@
+# /etc/systemd/system/var-enclave.service
+#
+# Systemd unit for the VAR Nitro enclave.
+#
+# Installation on the Nitro parent instance:
+#
+#   1. Copy scripts and unit file:
+#        sudo cp /home/ec2-user/VAR/src/host/run-enclave.sh      /opt/var/
+#        sudo cp /home/ec2-user/VAR/src/host/hibernate-enclave.sh /opt/var/
+#        sudo chmod +x /opt/var/run-enclave.sh /opt/var/hibernate-enclave.sh
+#        sudo cp /home/ec2-user/VAR/src/host/var-enclave.service /etc/systemd/system/
+#
+#   2. Install var-kms-proxy.service first (it must be running before the enclave):
+#        sudo cp /home/ec2-user/VAR/src/host/var-kms-proxy.service /etc/systemd/system/
+#
+#   3. Reload and enable:
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now var-kms-proxy
+#        sudo systemctl enable --now var-enclave
+#
+#   4. Check logs:
+#        sudo journalctl -u var-enclave -f
+#        sudo journalctl -u var-kms-proxy -f
+#
+# Lifecycle:
+#   start  → run-enclave.sh launches the EIF and blocks until the enclave dies
+#   stop   → hibernate-enclave.sh sends POST /hibernate over vsock, saves
+#             sealed state to /var/lib/var/resume.bin, then terminates the enclave
+#   crash  → Restart=on-failure relaunches run-enclave.sh; if resume.bin exists
+#             the enclave fetches it from the proxy on startup (VARService.GetResumeState)
+#             and restores the session without rebuilding the EIF or changing PCR0
+
+[Unit]
+Description=VAR Verifiable Agent Runtime enclave
+Documentation=https://github.com/kennethkabogo/verifiable-agent-runtime
+After=network-online.target var-kms-proxy.service
+Requires=var-kms-proxy.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/var
+
+# Give the proxy a moment to finish binding the vsock socket before the enclave
+# boots and immediately calls VARService.GetResumeState.
+ExecStartPre=/bin/sleep 2
+
+ExecStart=/opt/var/run-enclave.sh
+ExecStop=/opt/var/hibernate-enclave.sh
+
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=120s
+StartLimitBurst=3
+
+# Enclave parameters — override via systemctl edit var-enclave
+Environment=EIF_PATH=/opt/var/var.eif
+Environment=ENCLAVE_CID=16
+Environment=ENCLAVE_MEMORY=512
+Environment=ENCLAVE_CPUS=2
+Environment=ENCLAVE_PORT=8765
+Environment=RESUME_STATE_FILE=/var/lib/var/resume.bin
+
+# Allow up to 60 s for the enclave to reach a healthy state; on a fresh boot
+# this covers the KMS Decrypt round-trip for the DEK derivation.
+TimeoutStartSec=60s
+# Give the enclave 30 s to hibernate before we force-kill the monitor process.
+TimeoutStopSec=30s
+
+# /run/var is created by RuntimeDirectory (cleaned on stop).
+# /var/lib/var is created by StateDirectory (persists across reboots —
+# this is where resume.bin lives).
+RuntimeDirectory=var
+StateDirectory=var
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=var-enclave
+
+[Install]
+WantedBy=multi-user.target
