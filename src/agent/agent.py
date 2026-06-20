@@ -12,7 +12,7 @@ enclave and demonstrates the full end-to-end trust chain:
   5. Requests and prints the signed evidence bundle.
 
 Line-oriented protocol (all messages newline-terminated):
-  Enclave → Agent   BUNDLE_HEADER:magic=VARB:...
+  Enclave → Agent   BUNDLE_HEADER:magic=APXB:...
   Enclave → Agent   READY
   Agent   → Enclave SECRET:<key>:<value>
   Agent   → Enclave LOG:<message>
@@ -283,7 +283,7 @@ def provision_secret(sock: socket.socket, name: str, value: str,
 def parse_header(header: str) -> dict:
     """
     Extract key=value pairs from a header line like:
-      BUNDLE_HEADER:magic=VARB:version=01:session=<hex>:nonce=<hex>:QUOTE:...
+      BUNDLE_HEADER:magic=APXB:version=01:session=<hex>:nonce=<hex>:QUOTE:...
     """
     fields = {}
     for part in header.split(":"):
@@ -323,7 +323,7 @@ def resume_connect(state_file: str) -> tuple[socket.socket, dict]:
 
     header = readline(sock)
     fields = parse_header(header)
-    if fields.get("magic") != "VARB":
+    if fields.get("magic") != "APXB":
         print("[agent] ERROR: unexpected magic on resume — aborting.", file=sys.stderr)
         sock.close()
         raise RuntimeError("bad bundle header on resume")
@@ -409,7 +409,7 @@ def main() -> None:
     print(f"  Enc Public Key  : {enc_pub_hex[:16]}…" if enc_pub_hex else "  Enc Public Key  : (none — cleartext mode)")
     print(f"  Secret mode     : {'ECDH+AES-256-GCM' if encrypted_mode else 'cleartext (simulation)'}")
 
-    if fields.get("magic") != "VARB":
+    if fields.get("magic") != "APXB":
         print("[agent] ERROR: unexpected magic bytes — aborting.", file=sys.stderr)
         sock.close()
         return

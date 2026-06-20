@@ -28,7 +28,7 @@
 ///   [ciphertext     : M bytes]   AES-256-GCM ciphertext of the serialized state
 ///
 /// Serialized plaintext format (version 0x02):
-///   [magic           : 4 ]  "VARS"
+///   [magic           : 4 ]  "APXS"
 ///   [version         : 1 ]  0x02
 ///   [session_id      : 16]  UUID v4
 ///   [stream_hash     : 32]  current L1 hash chain tip (spec §2.1)
@@ -73,7 +73,7 @@ const VsockHandler = @import("vsock.zig").VsockHandler;
 // Wire-format constants
 // ---------------------------------------------------------------------------
 
-const MAGIC = [4]u8{ 'V', 'A', 'R', 'S' };
+const MAGIC = [4]u8{ 'A', 'P', 'X', 'S' };
 const FORMAT_VERSION: u8 = 0x04;
 
 /// Minimum plaintext size (v0.02, smallest accepted blob):

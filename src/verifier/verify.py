@@ -113,7 +113,7 @@ def _unhex(s: str, label: str, expected_len: Optional[int] = None) -> bytes:
 
 
 def parse_header(line: str) -> BundleHeader:
-    """Parse a BUNDLE_HEADER:magic=VARB:... line."""
+    """Parse a BUNDLE_HEADER:magic=APXB:... line."""
     fields: dict[str, str] = {}
     for part in line.split(":"):
         if "=" in part:
@@ -121,8 +121,8 @@ def parse_header(line: str) -> BundleHeader:
             fields[k] = v
 
     magic = fields.get("magic", "")
-    if magic != "VARB":
-        raise ValueError(f"unexpected magic: {magic!r} (expected 'VARB')")
+    if magic != "APXB":
+        raise ValueError(f"unexpected magic: {magic!r} (expected 'APXB')")
 
     session_id      = _unhex(fields["session"],         "session_id",      16)
     bootstrap_nonce = _unhex(fields["nonce"],           "bootstrap_nonce", 32)
@@ -222,7 +222,7 @@ def build_signed_message(
 ) -> bytes:
     """Reconstruct the 161-byte message the enclave signed (spec §3.1)."""
     msg = bytearray()
-    msg += b"VARE"                      # Magic           (4)
+    msg += b"APXE"                      # Magic           (4)
     msg += b"\x01"                      # FormatVer       (1)
     msg += struct.pack("<Q", seq)       # Sequence u64 LE (8)
     msg += prev_stream                  # PrevL1Hash      (32)
@@ -810,7 +810,7 @@ def main() -> int:
               python agent.py 2>&1 | grep -E 'BUNDLE_HEADER|EVIDENCE' | python verify.py -
 
               # Verify JSON evidence from the HTTP gateway:
-              python verify.py --header 'BUNDLE_HEADER:magic=VARB:...' --json ev.json
+              python verify.py --header 'BUNDLE_HEADER:magic=APXB:...' --json ev.json
 
               # Multi-segment (hibernate + resume):
               cat segment0.log segment1.log | python verify.py -

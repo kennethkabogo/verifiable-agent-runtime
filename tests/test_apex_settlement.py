@@ -67,27 +67,27 @@ CURRENCY  = b"USDC    "                                         # 8 bytes: space
 
 L1_2_HEX             = "cd84b951c893096829a4c78ac9d3efc65f4dc9b3c3896df0653ea887d50142fe"
 SIG_2_HEX            = (
-    "937b3e0585745ce592b903c6b7fb0132d5b9658a7eae218ae8019353dd59b200"
-    "6d8f84f7b2bb756940c7708308c8268315d1d09196f7bf2e68a5be9815d44904"
+    "1a5cefd8b7b320d582e6d763187b05b1ec499108f1d8d7357bc24a5c7b5e179"
+    "82d460e8a6c7990e4458812f9ece7d2e18a3608b9a48d09b52b2f8fab47fcb402"
 )
-TERMINAL_DIGEST_2_HEX = "88e004ad67bf28c7a00d6c097ba8a6a09a11508af30b816dff692429b3c33c3d"
-BUNDLE_HASH_2_HEX     = "e05dd6abae2ee095b5895632845c55ecf44e91bb6c166b83899eb10381f4990c"
+TERMINAL_DIGEST_2_HEX = "b4d8cd5d6a7ecbe3ce8898bf111031fa70b3fd5426f9119cfa114d374236cc85"
+BUNDLE_HASH_2_HEX     = "eda0949b09a795f5b0f8974079252e32210f5d9c21e30d9939842d7edfded5e7"
 SEAL_SIG_2_HEX        = (
-    "fa384faab2d5d6fb2cd5df6a094cf800f6298ecfab4c3bdfbac2e58c687d651b"
-    "8ff604df2f92b0f6e5c019189f8f18cb2e7058a878e05ce7496735ab10e3c00e"
+    "7a56c7866c0c20a74aafbd3dd675d299292bdebbad195067f8d362df2e149f3c"
+    "a893808b4bd88ffb33eeb09d152e45132f839d5658dc56ec10b5aa3afb89e10c"
 )
 SETTLE_SIG_HEX        = (
-    "101f4cf36ec03be2ed7289b4acc664ed2353053a7f336f0094572a6dbb644b91"
-    "980f7646defb52b4530a8855b4b780d9551375effa9f38b5a251aa861c43880b"
+    "e105775ff46ee34b88165415dd2bcb131b5ca0a7b9ff08644aef3103f646bb6"
+    "d7a2b44e389e57caa07ad187c4b49ed898bdc1e376216ca271959c9b9dfe21a09"
 )
 
 # §14 TerminalDigest for divergence tests
-TERMINAL_DIGEST_14_HEX = "33c143a8fd36b26f375339c66ab10aab0f457e5a5678790c38cdf2fac08f9978"
+TERMINAL_DIGEST_14_HEX = "e413a0e508a058ecd6238aa23176fc3624c85be8d5cb559f3b8b3e0ea5897258"
 # §14 BundleHash / SealSig for divergence tests
-BUNDLE_HASH_14_HEX = "ddb62dbda59c6ea21ea7d6227d00e0d267dd8b1b3d35ad6a88c5fbfe4612399a"
+BUNDLE_HASH_14_HEX = "a8de27e18199d9f823f7de3ddc4c3acb93a8380fccfe3ab4b0224d1850aa649b"
 SEAL_SIG_14_HEX    = (
-    "8e0b8126cdf3f6453ecdbcbfe2656693b0d386b9a76dffe23875e95d487ce4b1"
-    "51ba37b9e0df690c44a23b388e1e50661ac7b1531b9a963907b737f2eb3b120d"
+    "78c98301f221dde4cc569a9ddffeceaba60080491437c27aad94ca9efd2ae288"
+    "d055b4e7ed26880ea978bdf485ab393dafbe79c2a32f874a0f7b71c1b8029806"
 )
 
 # ---------------------------------------------------------------------------
@@ -107,7 +107,7 @@ def _build_scope(
     session_id: bytes,
 ) -> bytes:
     msg = bytearray(161)
-    msg[0:4]   = b"VARE"
+    msg[0:4]   = b"APXE"
     msg[4]     = 0x01
     struct.pack_into("<Q", msg, 5, seq)
     msg[13:45]   = prev_l1
@@ -144,7 +144,7 @@ _SIG_1         = _KEY.sign(_SCOPE_1)
 _SCOPE_2       = _build_scope(SEQ_2, _L1_1, _L1_2, _L2_HASH, PAYLOAD_2, SESSION_ID)
 _SIG_2         = _KEY.sign(_SCOPE_2)
 _TERMINAL_DIGEST_2 = _sha256(_SIG_1 + _SIG_2)
-_BUNDLE_HASH_2 = _sha256(b"VARB" + SESSION_ID + _NONCE + _PUB + _TERMINAL_DIGEST_2)
+_BUNDLE_HASH_2 = _sha256(b"APXB" + SESSION_ID + _NONCE + _PUB + _TERMINAL_DIGEST_2)
 _SEAL_SIG_2    = _KEY.sign(_BUNDLE_HASH_2)
 
 _SETTLE_SCOPE  = ESCROW_ID + AMOUNT + CURRENCY + _TERMINAL_DIGEST_2
@@ -184,7 +184,7 @@ class TestScope2Layout:
         assert len(_SCOPE_2) == 161
 
     def test_scope2_magic_is_vare(self):
-        assert _SCOPE_2[0:4] == b"VARE"
+        assert _SCOPE_2[0:4] == b"APXE"
 
     def test_scope2_sequence_is_2(self):
         assert struct.unpack("<Q", _SCOPE_2[5:13])[0] == 2
@@ -249,9 +249,9 @@ class TestTerminalDigest2:
 class TestBundleHash2:
 
     def test_bundle_hash_formula(self):
-        """BundleHash = SHA-256("VARB" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest)."""
+        """BundleHash = SHA-256("APXB" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest)."""
         expected = _sha256(
-            b"VARB"
+            b"APXB"
             + SESSION_ID
             + _NONCE
             + _PUB
@@ -423,7 +423,7 @@ class TestCheckSettlementBlock:
     def test_extract_settlement_returns_none_when_absent(self):
         """extract_settlement() returns None when no SETTLEMENT: line is present."""
         lines = [
-            "BUNDLE_HEADER:magic=VARB:session=" + "00" * 16 + ":nonce=" + "00" * 32 +
+            "BUNDLE_HEADER:magic=APXB:session=" + "00" * 16 + ":nonce=" + "00" * 32 +
             ":enc_pub=" + "00" * 32 + ":pk=" + "00" * 32 + ":doc=\n",
             "EVIDENCE:prev_stream=" + "aa" * 32 + ":stream=" + "bb" * 32 +
             ":state=" + "cc" * 32 + ":sig=" + "dd" * 64 + ":seq=1\n",

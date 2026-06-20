@@ -258,7 +258,7 @@ def build_evidence_message(
     """
     Build the 161-byte message the enclave signs (spec §3.1 + §3.2 snapshot mode).
 
-      Magic        ( 4)  b"VARE"
+      Magic        ( 4)  b"APXE"
       FormatVer    ( 1)  0x01
       Sequence     ( 8)  u64 little-endian
       PrevL1Hash   (32)  H_stream at the previous evidence emission
@@ -271,7 +271,7 @@ def build_evidence_message(
     Total: 4+1+8+32+32+32+4+32+16 = 161 bytes
     """
     return (
-        b"VARE"
+        b"APXE"
         + bytes([0x01])
         + struct.pack("<Q", sequence)
         + bytes.fromhex(prev_stream_hex)
@@ -328,7 +328,7 @@ def main(json_mode: bool = False) -> bool:
 
     # ── 3. Bundle header fields ────────────────────────────────────────────
     section("2. Bundle header  (GET /session)")
-    all_ok &= check("magic == VARB",   magic == "VARB",   f"got {magic!r}")
+    all_ok &= check("magic == APXB",   magic == "APXB",   f"got {magic!r}")
     all_ok &= check("version == 01",   version == "01",   f"got {version!r}")
     all_ok &= check("session_id present",
                     bool(session_id_hex),
