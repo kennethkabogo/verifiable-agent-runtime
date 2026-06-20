@@ -48,7 +48,8 @@ Group=var-proxy
 WorkingDirectory=/opt/var
 ExecStart=/usr/bin/python3 /opt/var/proxy.py \
     --vsock \
-    --port 8443
+    --port 8443 \
+    --resume-state-file /var/lib/var/resume.bin
 
 # Restart policy: back off on repeated failures so we don't spam KMS/IMDS.
 Restart=on-failure

@@ -107,17 +107,22 @@ run-bridge:
 bench-enclave:
 	curl -s http://127.0.0.1:8765/benchmark | python3 -m json.tool
 
-# 8c. Install the KMS proxy service on the parent EC2 instance (requires sudo)
+# 8c. Install the KMS proxy + enclave services on the parent EC2 instance (requires sudo)
 install-proxy:
 	sudo mkdir -p /opt/var
 	sudo cp src/host/proxy.py src/host/requirements.txt /opt/var/
+	sudo cp src/host/run-enclave.sh src/host/hibernate-enclave.sh /opt/var/
+	sudo chmod +x /opt/var/run-enclave.sh /opt/var/hibernate-enclave.sh
 	sudo pip3 install --quiet -r /opt/var/requirements.txt
 	sudo useradd --system --no-create-home var-proxy 2>/dev/null || true
 	sudo cp src/host/var-kms-proxy.service /etc/systemd/system/
+	sudo cp src/host/var-enclave.service   /etc/systemd/system/
 	sudo systemctl daemon-reload
 	sudo systemctl enable --now var-kms-proxy
-	@echo "var-kms-proxy installed and started."
-	@echo "Set VAR_KMS_KEY_ARN in /etc/systemd/system/var-kms-proxy.service.d/override.conf"
+	sudo systemctl enable var-enclave
+	@echo "var-kms-proxy started; var-enclave enabled (start manually after placing var.eif)."
+	@echo "  sudo cp var.eif /opt/var/"
+	@echo "  sudo systemctl start var-enclave"
 
 # 9. Run all tests (Zig unit tests + Python pytest suites)
 test:
