@@ -161,7 +161,7 @@ def _build_signed_message(evidence: dict, session_id_hex: str) -> bytes:
     session_id = bytes.fromhex(session_id_hex)
 
     msg = bytearray()
-    msg += b"VARE"                                          # magic (4)
+    msg += b"APXE"                                          # magic (4)
     msg += b"\x01"                                          # format version (1)
     msg += struct.pack("<Q", evidence["sequence"])          # sequence u64 LE (8)
     msg += bytes.fromhex(evidence["prev_stream"])           # PrevL1Hash (32)

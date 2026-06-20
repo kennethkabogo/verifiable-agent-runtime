@@ -7,10 +7,10 @@ Fixture shape:
   → SESSION_RESUME[4] → SETTLEMENT_FINAL[5]
 
 Packet specs implemented here:
-  SESSION_START  (0x06): 161-byte "VARE" scope, empty payload
-  EVIDENCE       (0x01): 161-byte "VARE" scope, payload = "hello"
-  TEMPORAL_PROOF (0x09): 137-byte "VART" scope, Argon2id SWF
-  SESSION_RESUME (0x07):  93-byte "VARS" scope, no payload/L2
+  SESSION_START  (0x06): 161-byte "APXE" scope, empty payload
+  EVIDENCE       (0x01): 161-byte "APXE" scope, payload = "hello"
+  TEMPORAL_PROOF (0x09): 137-byte "APXP" scope, Argon2id SWF
+  SESSION_RESUME (0x07):  93-byte "APXS" scope, no payload/L2
   SETTLEMENT_FINAL(0x05): §6 APXT settlement block (TerminalDigest over sigs 1-4)
 
 Segment 1 uses keypair A (seed = 0x00 * 32).
@@ -77,10 +77,10 @@ L1 = [bootstrap_nonce]  # L1[0] = BootstrapNonce
 SHA256_EMPTY = sha256(b"")
 
 def scope_vare(seq, prev_l1, l1, l2, payload_bytes):
-    """161-byte VARE scope for SESSION_START and EVIDENCE packets."""
+    """161-byte APXE scope for SESSION_START and EVIDENCE packets."""
     payload_hash = sha256(payload_bytes) if payload_bytes else SHA256_EMPTY
     payload_len  = len(payload_bytes)
-    msg  = b"VARE"
+    msg  = b"APXE"
     msg += b"\x01"                                    # FormatVer
     msg += struct.pack("<Q", seq)                     # Sequence u64 LE
     msg += prev_l1                                    # PrevL1Hash
@@ -89,12 +89,12 @@ def scope_vare(seq, prev_l1, l1, l2, payload_bytes):
     msg += struct.pack("<I", payload_len)             # PayloadLen u32 LE
     msg += payload_hash                               # SHA-256(Payload)
     msg += SESSION_ID                                 # SessionID
-    assert len(msg) == 161, f"VARE scope length {len(msg)}"
+    assert len(msg) == 161, f"APXE scope length {len(msg)}"
     return msg
 
-def scope_vart(seq, prev_l1, l1, argon_out):
-    """137-byte VART scope for TEMPORAL_PROOF."""
-    msg  = b"VART"
+def scope_apxp(seq, prev_l1, l1, argon_out):
+    """137-byte APXP scope for TEMPORAL_PROOF."""
+    msg  = b"APXP"
     msg += b"\x01"
     msg += struct.pack("<Q", seq)
     msg += prev_l1
@@ -104,18 +104,18 @@ def scope_vart(seq, prev_l1, l1, argon_out):
     msg += struct.pack("<I", ARGON_T)
     msg += struct.pack("<I", ARGON_P)
     msg += SESSION_ID
-    assert len(msg) == 137, f"VART scope length {len(msg)}"
+    assert len(msg) == 137, f"APXP scope length {len(msg)}"
     return msg
 
 def scope_vars(seq, prev_l1, l1):
-    """93-byte VARS scope for SESSION_RESUME."""
-    msg  = b"VARS"
+    """93-byte APXS scope for SESSION_RESUME."""
+    msg  = b"APXS"
     msg += b"\x01"
     msg += struct.pack("<Q", seq)
     msg += prev_l1
     msg += l1
     msg += SESSION_ID
-    assert len(msg) == 93, f"VARS scope length {len(msg)}"
+    assert len(msg) == 93, f"APXS scope length {len(msg)}"
     return msg
 
 # ── L2 state hash (same as §14: 80×24 terminal, empty cell grid) ──────────────
@@ -163,7 +163,7 @@ argon_out   = argon2.low_level.hash_secret_raw(
 # PrevL1Hash for TEMPORAL_PROOF = prev_stream_hash = L1[2] (after EVIDENCE commit)
 prev_tp = L1[2]
 L1.append(sha256(L1[2], argon_out))       # L1[3]
-scope3  = scope_vart(3, prev_tp, L1[3], argon_out)
+scope3  = scope_apxp(3, prev_tp, L1[3], argon_out)
 sig3    = kp_a.sign(scope3)
 
 # TemporalProofHash = SHA-256(wire_line) — we'll note this separately
@@ -190,7 +190,7 @@ terminal_digest = sha256(sig1, sig2, sig3, sig4)
 # ── Bundle Seal ───────────────────────────────────────────────────────────────
 # BundleHash uses keypair B's public key (segment 2 is the final segment)
 
-bundle_hash = sha256(b"VARB", SESSION_ID, bootstrap_nonce, pub_b, terminal_digest)
+bundle_hash = sha256(b"APXB", SESSION_ID, bootstrap_nonce, pub_b, terminal_digest)
 seal_sig    = kp_b.sign(bundle_hash)
 
 # ── SETTLEMENT_FINAL (seq=5 is ordinal, not a chain sequence) ─────────────────
@@ -281,7 +281,7 @@ print(f"  TerminalDigest: {hex_(terminal_digest)}")
 print()
 
 print("-- Bundle Seal (signed by keypair B) --")
-print(f"  BundleHash = SHA-256('VARB' ‖ SessionID ‖ BootstrapNonce ‖ PubB ‖ TerminalDigest)")
+print(f"  BundleHash = SHA-256('APXB' ‖ SessionID ‖ BootstrapNonce ‖ PubB ‖ TerminalDigest)")
 print(f"  BundleHash: {hex_(bundle_hash)}")
 print(f"  SealSig:    {hex_(seal_sig)}")
 print()

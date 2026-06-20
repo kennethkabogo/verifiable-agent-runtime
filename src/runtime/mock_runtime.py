@@ -3,7 +3,7 @@ import sys
 import time
 
 PORT = 5005
-MAGIC = "VARB"
+MAGIC = "APXB"
 SESSION_ID = "01234567-89ab-cdef-0123-456789abcdef"
 BOOTSTRAP_NONCE = "deadbeef" * 4
 

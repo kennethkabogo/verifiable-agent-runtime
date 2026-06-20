@@ -112,7 +112,7 @@ def _mock_get(s):
             return {"status": "healthy"}
         if path == "/session":
             return {
-                "magic": "VARB",
+                "magic": "APXB",
                 "version": "01",
                 "session_id": s["session_id_hex"],
                 "bootstrap_nonce": s["bootstrap_nonce_hex"],
@@ -171,7 +171,7 @@ class TestBuildEvidenceMessage:
         assert len(session["msg"]) == 161
 
     def test_magic(self, session):
-        assert session["msg"][0:4] == b"VARE"
+        assert session["msg"][0:4] == b"APXE"
 
     def test_format_version(self, session):
         assert session["msg"][4] == 0x01

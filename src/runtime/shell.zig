@@ -245,7 +245,7 @@ pub const SecureLogger = struct {
     /// Signs an evidence snapshot following spec §3.1.
     ///
     /// Message layout (161 bytes):
-    ///   Magic        (4)   "VARE" = 0x56 0x41 0x52 0x45
+    ///   Magic        (4)   "APXE" = 0x41 0x50 0x58 0x45
     ///   FormatVer    (1)   0x01
     ///   Sequence     (8)   u64, little-endian
     ///   PrevL1Hash   (32)  H_stream at the previous evidence emission
@@ -276,8 +276,8 @@ pub const SecureLogger = struct {
         var msg: [161]u8 = undefined;
         var pos: usize = 0;
 
-        // Magic "VARE"
-        @memcpy(msg[pos..][0..4], &[_]u8{ 0x56, 0x41, 0x52, 0x45 });
+        // Magic "APXE"
+        @memcpy(msg[pos..][0..4], &[_]u8{ 0x41, 0x50, 0x58, 0x45 });
         pos += 4;
         // FormatVer
         msg[pos] = 0x01;
@@ -675,7 +675,7 @@ pub const SecureLogger = struct {
     /// Signs a TEMPORAL_PROOF packet (§5.7).
     ///
     /// Signature scope (137 bytes):
-    ///   Magic "VART"  (4)
+    ///   Magic "APXP"  (4)
     ///   FormatVer     (1)   0x01
     ///   Sequence      (8)   u64 LE
     ///   PrevL1Hash    (32)
@@ -695,7 +695,7 @@ pub const SecureLogger = struct {
         var msg: [137]u8 = undefined;
         var pos: usize = 0;
 
-        @memcpy(msg[pos..][0..4], &[_]u8{ 'V', 'A', 'R', 'T' });               pos += 4;
+        @memcpy(msg[pos..][0..4], &[_]u8{ 'A', 'P', 'X', 'P' });               pos += 4;
         msg[pos] = 0x01;                                                          pos += 1;
         std.mem.writeInt(u64, msg[pos..][0..8], sequence, .little);              pos += 8;
         @memcpy(msg[pos..][0..32], &prev_l1hash);                                pos += 32;
@@ -794,7 +794,7 @@ pub const SecureLogger = struct {
     /// Signs a SESSION_RESUME boundary marker (§9.3).
     ///
     /// Signature scope (93 bytes):
-    ///   Magic "VARS"  (4)
+    ///   Magic "APXS"  (4)
     ///   FormatVer     (1)   0x01
     ///   Sequence      (8)   u64 LE
     ///   PrevL1Hash   (32)
@@ -809,7 +809,7 @@ pub const SecureLogger = struct {
         var msg: [93]u8 = undefined;
         var pos: usize = 0;
 
-        @memcpy(msg[pos..][0..4], &[_]u8{ 'V', 'A', 'R', 'S' });   pos += 4;
+        @memcpy(msg[pos..][0..4], &[_]u8{ 'A', 'P', 'X', 'S' });   pos += 4;
         msg[pos] = 0x01;                                              pos += 1;
         std.mem.writeInt(u64, msg[pos..][0..8], sequence, .little);  pos += 8;
         @memcpy(msg[pos..][0..32], &prev_l1hash);                    pos += 32;
@@ -866,7 +866,7 @@ pub const SecureLogger = struct {
     ///   BUNDLE_SEAL:magic=APXZ:terminal_digest=<hex>:bundle_hash=<hex>:seal_sig=<hex>
     ///
     /// TerminalDigest = SHA-256(all packet signatures in order)
-    /// BundleHash     = SHA-256("VARB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest)
+    /// BundleHash     = SHA-256("APXB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest)
     /// SealSig        = Ed25519(session_keypair, BundleHash)
     pub fn sealBundle(self: *SecureLogger, allocator: std.mem.Allocator) ![]u8 {
         self.mutex.lock();
@@ -876,7 +876,7 @@ pub const SecureLogger = struct {
         const signing_pub = self.keypair.public_key.toBytes();
 
         var bh_hasher = Sha256.init(.{});
-        bh_hasher.update("VARB");
+        bh_hasher.update("APXB");
         bh_hasher.update(&self.session_id);
         bh_hasher.update(&self.bootstrap_nonce);
         bh_hasher.update(&signing_pub);

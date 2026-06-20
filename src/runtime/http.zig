@@ -16,7 +16,7 @@
 ///   GET  /evidence?from=<seq>&to=<seq>                       → 200 {"from":N,"to":N,"count":K,"packets":[…]}
 ///   GET  /evidence/stream                                    → 200 text/event-stream (one "data: {…}\n\n" per evidence emission)
 ///   GET  /attestation                                        → 200 {"pcr0":"…","pcr1":"…","pcr2":"…","public_key":"…","doc":"…"}
-///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"VARB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
+///   GET  /session                                            → 200 {"session_id":"…","bootstrap_nonce":"…","magic":"APXB","version":"01","bundle_header":"BUNDLE_HEADER:…"}
 ///   GET  /verify-and-attest                                  → 200 {"decision":{…},"evidence":{…},"attestation":{…}}
 ///   GET  /seal                                               → 200 {"bundle_seal":"BUNDLE_SEAL:…"}
 ///   POST /settle         {"escrow_id":"<32hex>","amount":"…","currency":"…","recipient":"<128hex>"}
@@ -672,14 +672,14 @@ fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
     // pass it directly to verify.py without reconstructing it themselves.
     const bundle_header = try std.fmt.allocPrint(
         server.allocator,
-        "BUNDLE_HEADER:magic=VARB:version=01:session={s}:nonce={s}:enc_pub={s}:QUOTE:pcr0={s}:pcr1={s}:pcr2={s}:pk={s}:doc={s}",
+        "BUNDLE_HEADER:magic=APXB:version=01:session={s}:nonce={s}:enc_pub={s}:QUOTE:pcr0={s}:pcr1={s}:pcr2={s}:pk={s}:doc={s}",
         .{ sid_h, nonce_h, enc_pub_h, pcr0_h, pcr1_h, pcr2_h, pk_h, doc_h },
     );
     defer server.allocator.free(bundle_header);
 
     const body = try std.fmt.allocPrint(
         server.allocator,
-        "{{\"session_id\":\"{s}\",\"bootstrap_nonce\":\"{s}\",\"magic\":\"VARB\",\"version\":\"01\",\"bundle_header\":\"{s}\"}}",
+        "{{\"session_id\":\"{s}\",\"bootstrap_nonce\":\"{s}\",\"magic\":\"APXB\",\"version\":\"01\",\"bundle_header\":\"{s}\"}}",
         .{ sid_h, nonce_h, bundle_header },
     );
     defer server.allocator.free(body);

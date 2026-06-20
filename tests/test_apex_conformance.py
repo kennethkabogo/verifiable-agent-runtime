@@ -58,14 +58,14 @@ BOOTSTRAP_NONCE_HEX = "b751e786086c23135123cf486ad463349febe308f9c54c58c04478a45
 L1_1_HEX            = "a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b"
 L2_HASH_HEX         = "d416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71"
 PACKET_SIG_HEX      = (
-    "36092fb379e6e33a6dccf33be6c9b617e0f9b2837195d0e6414ce00590383988"
-    "a208d9b37d065d1b1999ecb4872b26f4c8ce0bf3f4c91f90cb07b94c0c2b1f05"
+    "aacb74fddf9bd1c4d759a600e080f1fb3798793dfa18adb701236c823c487dd"
+    "df86a08920340f62d3b4f1e0e64873f36be633a1fa44bf2659ef3b4680d6c2200"
 )
-TERMINAL_DIGEST_HEX = "33c143a8fd36b26f375339c66ab10aab0f457e5a5678790c38cdf2fac08f9978"
-BUNDLE_HASH_HEX     = "ddb62dbda59c6ea21ea7d6227d00e0d267dd8b1b3d35ad6a88c5fbfe4612399a"
+TERMINAL_DIGEST_HEX = "e413a0e508a058ecd6238aa23176fc3624c85be8d5cb559f3b8b3e0ea5897258"
+BUNDLE_HASH_HEX     = "a8de27e18199d9f823f7de3ddc4c3acb93a8380fccfe3ab4b0224d1850aa649b"
 SEAL_SIG_HEX        = (
-    "8e0b8126cdf3f6453ecdbcbfe2656693b0d386b9a76dffe23875e95d487ce4b1"
-    "51ba37b9e0df690c44a23b388e1e50661ac7b1531b9a963907b737f2eb3b120d"
+    "78c98301f221dde4cc569a9ddffeceaba60080491437c27aad94ca9efd2ae288"
+    "d055b4e7ed26880ea978bdf485ab393dafbe79c2a32f874a0f7b71c1b8029806"
 )
 SIGNING_PUB_HEX     = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
 
@@ -85,9 +85,9 @@ def _build_stream_scope(
     payload: bytes,
     session_id: bytes,
 ) -> bytes:
-    """Build the 161-byte STREAM-mode signature scope (§14.6, magic VARE)."""
+    """Build the 161-byte STREAM-mode signature scope (§14.6, magic APXE)."""
     msg = bytearray(161)
-    msg[0:4]   = b"VARE"
+    msg[0:4]   = b"APXE"
     msg[4]     = 0x01
     struct.pack_into("<Q", msg, 5, seq)
     msg[13:45]   = prev_l1
@@ -118,7 +118,7 @@ _L2_HASH         = _sha256(_L2_META + _sha256(b""))
 _SIG_SCOPE       = _build_stream_scope(SEQ, _L1_0, _L1_1, _L2_HASH, PAYLOAD, SESSION_ID)
 _PACKET_SIG      = _SIGNING_KEY.sign(_SIG_SCOPE)
 _TERMINAL_DIGEST = _sha256(_PACKET_SIG)
-_BUNDLE_HASH     = _sha256(b"VARB" + SESSION_ID + _NONCE + _SIGNING_PUB + _TERMINAL_DIGEST)
+_BUNDLE_HASH     = _sha256(b"APXB" + SESSION_ID + _NONCE + _SIGNING_PUB + _TERMINAL_DIGEST)
 _SEAL_SIG        = _SIGNING_KEY.sign(_BUNDLE_HASH)
 
 
@@ -176,8 +176,8 @@ class TestCryptoVectors:
         assert len(_SIG_SCOPE) == 161
 
     def test_sig_scope_magic_is_vare(self):
-        """Bytes [0:4] of scope MUST be b\"VARE\" (reference-impl magic, §14.1)."""
-        assert _SIG_SCOPE[0:4] == b"VARE"
+        """Bytes [0:4] of scope MUST be b\"APXE\" (reference-impl magic, §14.1)."""
+        assert _SIG_SCOPE[0:4] == b"APXE"
 
     def test_sig_scope_prev_l1_at_offset_13(self):
         """PrevL1Hash occupies bytes [13:45] and equals BootstrapNonce for packet 1."""
@@ -205,9 +205,9 @@ class TestCryptoVectors:
         assert _TERMINAL_DIGEST.hex() == TERMINAL_DIGEST_HEX
 
     def test_bundle_hash_formula(self):
-        """BundleHash = SHA-256("VARB" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest)."""
+        """BundleHash = SHA-256("APXB" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest)."""
         expected = _sha256(
-            b"VARB"
+            b"APXB"
             + SESSION_ID
             + bytes.fromhex(BOOTSTRAP_NONCE_HEX)
             + bytes.fromhex(SIGNING_PUB_HEX)
@@ -232,7 +232,7 @@ import verify as _v  # noqa: E402
 def _sec14_header_line() -> str:
     """Build a BUNDLE_HEADER line using §14.2 session identity."""
     return (
-        f"BUNDLE_HEADER:magic=VARB:version=01"
+        f"BUNDLE_HEADER:magic=APXB:version=01"
         f":session={SESSION_ID.hex()}"
         f":nonce={_NONCE.hex()}"
         f":enc_pub={'00' * 32}"
@@ -260,7 +260,7 @@ class TestVerifierConformance:
 
     def test_build_signed_message_magic_is_vare(self):
         msg = _v.build_signed_message(SEQ, _L1_0, _L1_1, _L2_HASH, SESSION_ID)
-        assert msg[0:4] == b"VARE"
+        assert msg[0:4] == b"APXE"
 
     def test_build_signed_message_payload_len_is_zero(self):
         """Snapshot verifier always writes PayloadLen = 0 at bytes [109:113]."""
@@ -315,7 +315,7 @@ class TestVerifierConformance:
     def test_bootstrap_nonce_check_fails_with_wrong_nonce(self):
         """check_bootstrap_nonce() fails when the nonce is tampered."""
         tampered = (
-            f"BUNDLE_HEADER:magic=VARB:version=01"
+            f"BUNDLE_HEADER:magic=APXB:version=01"
             f":session={SESSION_ID.hex()}"
             f":nonce={'ff' * 32}"
             f":enc_pub={'00' * 32}"

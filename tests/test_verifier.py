@@ -54,7 +54,7 @@ def _make_header(
     enc_pub = b"\xab" * 32
     pcr0    = b"\xaa" * 48
     return (
-        f"BUNDLE_HEADER:magic=VARB:version=01"
+        f"BUNDLE_HEADER:magic=APXB:version=01"
         f":session={_hex(session_id)}"
         f":nonce={_hex(bootstrap_nonce)}"
         f":enc_pub={_hex(enc_pub)}"
@@ -119,7 +119,7 @@ class TestParseBundleHeader:
         pub = b"\x01" * 32
         line = _make_header(sid, nonce, doc, pub)
         hdr = verify.parse_header(line)
-        assert hdr.magic == "VARB"
+        assert hdr.magic == "APXB"
         assert hdr.session_id == sid
         assert hdr.bootstrap_nonce == nonce
         assert hdr.signing_pub == pub
@@ -132,7 +132,7 @@ class TestParseBundleHeader:
 
     def test_missing_field_raises(self):
         # No 'pk' field
-        line = "BUNDLE_HEADER:magic=VARB:session=" + "00" * 16 + ":nonce=" + "00" * 32 + ":doc="
+        line = "BUNDLE_HEADER:magic=APXB:session=" + "00" * 16 + ":nonce=" + "00" * 32 + ":doc="
         with pytest.raises(KeyError):
             verify.parse_header(line)
 
@@ -516,7 +516,7 @@ class TestSignedMessage:
 
         msg = verify.build_signed_message(seq, prev, stream, state, sid)
 
-        assert msg[0:4]   == b"VARE"
+        assert msg[0:4]   == b"APXE"
         assert msg[4]     == 0x01
         assert struct.unpack_from("<Q", msg, 5)[0] == seq
         assert msg[13:45]  == prev

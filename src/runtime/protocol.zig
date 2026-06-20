@@ -96,7 +96,7 @@ pub const ProtocolHandler = struct {
     /// Step 1: Enclave emits a Bundle Header — the root-of-trust anchor for the session.
     ///
     /// Bundle Header fields (per spec §1.1):
-    ///   Magic           "VARB"
+    ///   Magic           "APXB"
     ///   Version         0x01
     ///   Session ID      UUID v4  (16 bytes)
     ///   Bootstrap Nonce SHA-256(AttestationDoc || SessionID)  (32 bytes)
@@ -114,7 +114,7 @@ pub const ProtocolHandler = struct {
 
         return std.fmt.allocPrint(
             self.allocator,
-            "BUNDLE_HEADER:magic=VARB:version=01:session={s}:nonce={s}:enc_pub={s}:{s}",
+            "BUNDLE_HEADER:magic=APXB:version=01:session={s}:nonce={s}:enc_pub={s}:{s}",
             .{ sid_h, nonce_h, enc_pub_h, quote_str },
         );
     }
