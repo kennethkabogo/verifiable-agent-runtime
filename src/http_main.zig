@@ -73,7 +73,7 @@ fn fetchProxyResumeState(allocator: std.mem.Allocator) ?[]u8 {
     // Minimal JSON extract for "SealedState": "<base64>" — no allocations needed.
     const key = "\"SealedState\"";
     const key_pos = std.mem.indexOf(u8, resp_body, key) orelse return null;
-    var rest = resp_body[key_pos + key.len ..];
+    var rest: []const u8 = resp_body[key_pos + key.len ..];
     rest = std.mem.trimLeft(u8, rest, " \t\r\n:");
     if (rest.len == 0 or rest[0] != '"') return null;
     rest = rest[1..];
