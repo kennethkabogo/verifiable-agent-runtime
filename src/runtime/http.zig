@@ -59,6 +59,10 @@ pub const GatewayConfig = struct {
     /// can reach the gateway; the host proxy remains the sole external surface.
     host: []const u8 = "127.0.0.1",
     port: u16 = 8765,
+    /// Bearer token required in the Authorization header for all endpoints
+    /// except GET /health.  When null, auth is disabled (dev/simulation mode).
+    /// Set VAR_API_TOKEN in the enclave environment to enforce auth in production.
+    api_token: ?[]const u8 = null,
 };
 
 // ── Server ─────────────────────────────────────────────────────────────────
@@ -187,6 +191,8 @@ const ParsedRequest = struct {
     path: []const u8,
     /// Value of the X-Skill-Id header (slice into the read buffer).
     skill_id: []const u8,
+    /// Token extracted from "Authorization: Bearer <token>", or "" if absent.
+    auth_token: []const u8,
     /// Body slice (points into the read buffer; valid while buf is live).
     body: []const u8,
 };
@@ -208,6 +214,7 @@ fn parseRequest(buf: []u8, len: usize) ?ParsedRequest {
 
     // Parse headers we care about.
     var skill_id: []const u8 = "unknown";
+    var auth_token: []const u8 = "";
     var content_length: usize = 0;
     var lines = mem.splitSequence(u8, headers[line_end..], "\r\n");
     while (lines.next()) |line| {
@@ -218,6 +225,10 @@ fn parseRequest(buf: []u8, len: usize) ?ParsedRequest {
         if (mem.eql(u8, name, "X-Skill-Id")) skill_id = val;
         if (std.ascii.eqlIgnoreCase(name, "content-length"))
             content_length = std.fmt.parseInt(usize, val, 10) catch 0;
+        if (std.ascii.eqlIgnoreCase(name, "authorization")) {
+            const prefix = "Bearer ";
+            if (mem.startsWith(u8, val, prefix)) auth_token = val[prefix.len..];
+        }
     }
 
     const body_start = header_end + 4;
@@ -230,6 +241,7 @@ fn parseRequest(buf: []u8, len: usize) ?ParsedRequest {
         .method = method,
         .path = path,
         .skill_id = skill_id,
+        .auth_token = auth_token,
         .body = body,
     };
 }
@@ -329,6 +341,14 @@ fn handleConnection(server: *GatewayServer, conn: net.Server.Connection) void {
 fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
     const post = mem.eql(u8, req.method, "POST");
     const get = mem.eql(u8, req.method, "GET");
+
+    // GET /health is exempt — the host monitoring timer polls it without a token.
+    if (!(get and mem.eql(u8, req.path, "/health"))) {
+        if (server.config.api_token) |token| {
+            if (!mem.eql(u8, req.auth_token, token))
+                return writeError(stream, 401, "Unauthorized");
+        }
+    }
 
     if (post and mem.eql(u8, req.path, "/vault/secret"))
         return handleVaultSecret(server, stream, req);
@@ -918,6 +938,7 @@ fn writeResponse(stream: net.Stream, status: u16, body: []const u8) !void {
     const status_text: []const u8 = switch (status) {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         413 => "Request Entity Too Large",
         500 => "Internal Server Error",

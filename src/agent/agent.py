@@ -56,10 +56,19 @@ VSOCK_CID   = int(os.environ.get("VSOCK_CID", "16"))   # enclave CID on Nitro
 TCP_HOST    = os.environ.get("VAR_HOST", "127.0.0.1")
 PORT        = int(os.environ.get("VAR_PORT", "5005"))
 GATEWAY_URL = os.environ.get("VAR_GATEWAY_URL", "http://127.0.0.1:8765")
+VAR_API_TOKEN = os.environ.get("VAR_API_TOKEN", "")
 
 # ── Anthropic API ────────────────────────────────────────────────────────────
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL   = "claude-haiku-4-5-20251001"
+
+
+def _gateway_headers(content_type: str = "application/json") -> dict:
+    """Base headers for all gateway HTTP requests, including auth if configured."""
+    h = {"Content-Type": content_type}
+    if VAR_API_TOKEN:
+        h["Authorization"] = f"Bearer {VAR_API_TOKEN}"
+    return h
 
 
 # ── Transport ────────────────────────────────────────────────────────────────
@@ -232,7 +241,7 @@ def exec_command_http(gateway_url: str, cmd: list[str]) -> dict:
     req = urllib.request.Request(
         f"{gateway_url}/exec",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=_gateway_headers(),
         method="POST",
     )
     try:
@@ -254,7 +263,11 @@ def exec_command_http(gateway_url: str, cmd: list[str]) -> dict:
 
 def get_evidence_http(gateway_url: str) -> dict:
     """Fetch the signed evidence bundle from the HTTP gateway (GET /evidence)."""
-    req = urllib.request.Request(f"{gateway_url}/evidence", method="GET")
+    req = urllib.request.Request(
+        f"{gateway_url}/evidence",
+        headers=_gateway_headers(),
+        method="GET",
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
