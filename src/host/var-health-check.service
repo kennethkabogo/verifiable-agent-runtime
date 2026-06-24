@@ -1,0 +1,54 @@
+# /etc/systemd/system/var-health-check.service
+#
+# Oneshot service invoked by var-health-check.timer every 60 seconds.
+# Checks GET /health via AF_VSOCK and publishes VAR/EnclaveHealth to CloudWatch.
+#
+# Installation (run after install-proxy):
+#   sudo cp src/host/var-health-check.py /opt/var/
+#   sudo cp src/host/var-health-check.service /etc/systemd/system/
+#   sudo cp src/host/var-health-check.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now var-health-check.timer
+#
+# Check output:
+#   sudo journalctl -u var-health -f
+#
+# Configure CloudWatch alarm:
+#   make create-alarm  (fires after two consecutive UNHEALTHY readings)
+
+[Unit]
+Description=VAR enclave health check
+After=var-enclave.service
+Wants=var-enclave.service
+
+[Service]
+Type=oneshot
+
+User=var-proxy
+Group=var-proxy
+
+WorkingDirectory=/opt/var
+ExecStart=/usr/bin/python3 /opt/var/var-health-check.py \
+    --vsock \
+    --cid ${ENCLAVE_CID} \
+    --port ${ENCLAVE_PORT} \
+    --region ${AWS_DEFAULT_REGION}
+
+Environment=ENCLAVE_CID=16
+Environment=ENCLAVE_PORT=8765
+Environment=AWS_DEFAULT_REGION=us-east-1
+
+# Non-zero exit (unhealthy or CloudWatch error) is surfaced in journald but
+# does not restart — the timer fires again on the next interval regardless.
+SuccessExitStatus=0 1
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/ssl /usr/lib/python3 /usr/local/lib/python3
+RestrictAddressFamilies=AF_INET AF_INET6 AF_VSOCK
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=var-health

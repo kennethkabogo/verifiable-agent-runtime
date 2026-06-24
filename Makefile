@@ -1,17 +1,19 @@
 # VAR — Verifiable Agent Runtime
 # ──────────────────────────────────────────────────────────────────────────────
 # Targets
-#   build           zig build (produces zig-out/bin/VAR and zig-out/bin/VAR-gateway)
-#   build-eif       build Docker image and package into an Enclave Image File
-#   create-ecr      create the ECR repository (idempotent; run once before push-ecr)
-#   push-ecr        push the Docker image to ECR (requires AWS credentials)
-#   run             start the enclave (requires nitro-cli and an EIF)
-#   stop            terminate the running enclave
-#   logs            stream the enclave console
-#   pcr0            print the PCR0 measurement of the EIF (use after build-eif)
-#   install-proxy   install the KMS proxy on the host instance (sudo required)
-#   test            run Zig unit tests + Python pytest suites
-#   clean           remove build artefacts and the EIF
+#   build              zig build (produces zig-out/bin/VAR and zig-out/bin/VAR-gateway)
+#   build-eif          build Docker image and package into an Enclave Image File
+#   create-ecr         create the ECR repository (idempotent; run once before push-ecr)
+#   push-ecr           push the Docker image to ECR (requires AWS credentials)
+#   run                start the enclave (requires nitro-cli and an EIF)
+#   stop               terminate the running enclave
+#   logs               stream the enclave console
+#   pcr0               print the PCR0 measurement of the EIF (use after build-eif)
+#   install-proxy      install the KMS proxy on the host instance (sudo required)
+#   install-health-check  install the health-check timer on the host instance (sudo required)
+#   create-alarm       create the CloudWatch alarm for enclave health (run once)
+#   test               run Zig unit tests + Python pytest suites
+#   clean              remove build artefacts and the EIF
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configurable variables (override on the command line or in the environment)
@@ -28,7 +30,7 @@ ENCLAVE_CPUS   ?= 2
 EIF_PATH       ?= var.eif
 
 # ──────────────────────────────────────────────────────────────────────────────
-.PHONY: all build build-eif create-ecr push-ecr run run-debug stop logs pcr0 run-bridge bench-enclave install-proxy test clean
+.PHONY: all build build-eif create-ecr push-ecr run run-debug stop logs pcr0 run-bridge bench-enclave install-proxy install-health-check create-alarm test clean
 
 all: build
 
@@ -124,7 +126,37 @@ install-proxy:
 	@echo "  sudo cp var.eif /opt/var/"
 	@echo "  sudo systemctl start var-enclave"
 
-# 9. Run all tests (Zig unit tests + Python pytest suites)
+# 9a. Install the health-check timer on the parent EC2 instance (requires sudo)
+install-health-check:
+	sudo mkdir -p /opt/var
+	sudo cp src/host/var-health-check.py /opt/var/
+	sudo cp src/host/var-health-check.service /etc/systemd/system/
+	sudo cp src/host/var-health-check.timer   /etc/systemd/system/
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now var-health-check.timer
+	@echo "Health-check timer enabled. First check fires ~90 s after next boot."
+	@echo "  sudo journalctl -u var-health -f"
+	@echo "Run 'make create-alarm' to wire up the CloudWatch alarm."
+
+# 9b. Create the CloudWatch alarm (fires after two consecutive UNHEALTHY readings)
+#     Add --alarm-actions arn:aws:sns:... to page on-call.
+create-alarm:
+	aws cloudwatch put-metric-alarm \
+	  --alarm-name          var-enclave-health \
+	  --alarm-description   "VAR enclave unreachable or unhealthy" \
+	  --namespace           VAR \
+	  --metric-name         EnclaveHealth \
+	  --statistic           Minimum \
+	  --period              120 \
+	  --threshold           1 \
+	  --comparison-operator LessThanThreshold \
+	  --evaluation-periods  2 \
+	  --treat-missing-data  breaching \
+	  --region              $(AWS_DEFAULT_REGION)
+	@echo "Alarm 'var-enclave-health' created."
+	@echo "Add --alarm-actions <SNS_ARN> to page on-call on state change."
+
+# 10. Run all tests (Zig unit tests + Python pytest suites)
 test:
 	zig build test
 	pytest src/host/tests/ src/agent/tests/ tests/ -v

@@ -1,0 +1,18 @@
+# /etc/systemd/system/var-health-check.timer
+#
+# Fires var-health-check.service every 60 seconds.
+# The CloudWatch alarm (make create-alarm) triggers after two consecutive
+# UNHEALTHY readings — two minutes of silence before paging on-call.
+
+[Unit]
+Description=VAR enclave health check (60-second interval)
+Requires=var-enclave.service
+
+[Timer]
+# First check 90 s after boot to give the enclave time to reach READY.
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

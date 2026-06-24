@@ -191,10 +191,15 @@ pub fn main() !void {
     defer allocator.free(header);
     std.log.info("[VAR-gateway] Session root: {s}", .{header});
 
-    // 5. Resolve bind address from environment or use the default.
+    // 5. Resolve bind address and auth token from environment.
+    //    All env reads must happen before sandbox.hardenProcess() scrubs the env.
     const host = std.posix.getenv("VAR_HOST") orelse "127.0.0.1";
     const port_str = std.posix.getenv("VAR_PORT") orelse "8765";
     const port = std.fmt.parseInt(u16, port_str, 10) catch 8765;
+    const api_token = std.posix.getenv("VAR_API_TOKEN");
+    if (api_token == null) {
+        std.log.warn("[VAR-gateway] VAR_API_TOKEN not set — API auth disabled (dev mode)", .{});
+    }
 
     // 6a. Capture KMS config and warm NSM cache before the sandbox scrubs the
     //     environment and before seccomp blocks openat(257).  sealDek() reads
@@ -209,7 +214,7 @@ pub fn main() !void {
     // 7. Start HTTP gateway — blocks forever serving skills.
     var gw = http.GatewayServer.init(
         allocator,
-        .{ .host = host, .port = port },
+        .{ .host = host, .port = port, .api_token = api_token },
         &vault,
         &logger,
         &protocol.quote,
