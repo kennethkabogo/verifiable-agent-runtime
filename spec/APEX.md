@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.5.0
+## Specification v2.7.0
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -401,6 +401,36 @@ For each boundary between segment N and segment N+1, let `tp_seq = last_evidence
 1. If the sealed state includes `TemporalProofHash`: FAIL — hash references a proof that is not in the chain.
 2. If the sealed state does NOT include `TemporalProofHash`: the hibernate boundary is temporally unattested. Continue verification; WARN with `TEMPORALLY_UNATTESTED`.
 3. For sessions containing a `SETTLEMENT_INIT` packet (`0x04`): treat Rule B as a FAIL rather than a WARN. Settlement verifiers MUST require temporal attestation at all hibernate boundaries.
+
+### Step 12 — Compute the Evidence Coverage Ratio (ECR)
+
+The ECR is a summary metric reporting what fraction of a session's hibernate boundaries are temporally attested by a valid TEMPORAL_PROOF. It is a verifier output, not a wire field.
+
+**A verifier MUST NOT compute or report ECR until Steps 1–7 (including BundleSeal verification) are complete.** Partial or unverified bundles MUST NOT be scored.
+
+#### Definitions
+
+| Symbol | Meaning |
+| :--- | :--- |
+| K | Number of hibernate boundaries in the bundle. Equal to the number of SESSION_RESUME packets. Single-segment sessions have K = 0. |
+| K_tp | Number of boundaries where Step 11 Rule A passed (TEMPORAL_PROOF present and valid). |
+
+#### Computation
+
+1. If K = 0 (single-segment session): ECR = 1.0. No hibernate gaps exist to be unattested.
+2. If K > 0: `ECR = K_tp / K`, a real number in [0.0, 1.0].
+
+#### Interpretation
+
+| ECR | Meaning |
+| :--- | :--- |
+| 1.0 | All hibernate gaps have a valid TEMPORAL_PROOF. Every gap is bounded below by the Argon2id sequential work function (≥ 240 ms at the floor on the reference platform — §5.7). |
+| (0, 1) | Mixed attestation. `K_tp` boundaries are attested; `K − K_tp` are not. |
+| 0.0 | No hibernate boundaries have temporal attestation. |
+
+#### Settlement interaction
+
+A conformant settlement system MUST require ECR = 1.0 before releasing funds. This is the formal expression of the constraint already enforced per-boundary in Step 11 Rule B.3: if any boundary triggered Rule B.3 (settlement FAIL), the bundle cannot have reached Step 12 with a Settlement Block intact. ECR = 1.0 is therefore a necessary, verifiable precondition.
 
 ---
 
@@ -1176,6 +1206,22 @@ inputs and the §14.9.2 additional inputs:
 
 ---
 
+### §14.9.12 ECR Computation
+
+Applying Step 12 to the §14.9 bundle:
+
+| Symbol | Value | Derivation |
+| :--- | :--- | :--- |
+| K | 1 | One SESSION_RESUME packet (Seq = 4) → one hibernate boundary |
+| K_tp | 1 | Step 11 Rule A passes at Seq = 3 (TEMPORAL_PROOF present and valid) |
+| **ECR** | **1.0** | K_tp / K = 1 / 1 |
+
+For reference: the §14 base fixture is a single-segment session (K = 0), so ECR = **1.0** vacuously.
+
+A hypothetical two-segment bundle identical to §14.9 but with the TEMPORAL_PROOF packet absent (Rule B path) would yield K = 1, K_tp = 0, ECR = **0.0**, and the settlement step would FAIL per Rule B.3.
+
+---
+
 ## 15. Settlement Block Test Vectors
 
 ### §15.1 Scope
@@ -1351,6 +1397,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.7.0 | §8 Step 12 added: Evidence Coverage Ratio (ECR) — verifier-computed metric reporting the fraction of hibernate boundaries with a valid TEMPORAL_PROOF; MUST NOT be reported before BundleSeal verification; ECR = K_tp / K (K = 0 → 1.0); settlement precondition formalized; §14.9.12 ECR test vector (K=1, K_tp=1, ECR=1.0); §17 Conformance updated to Steps 1–12 |
 | 2.6.1 | TEMPORAL_PROOF (0x09) signature scope magic renamed VART→APXP; all §14.9 fixture vectors updated (Sig[3], TemporalProofHash, TerminalDigest, BundleHash, SealSig, SettlementSig); gen_fixture_14n.py updated to APXP; shell.zig scope comment updated |
 | 2.5.0 | §14.9 two-segment session test vectors added: SESSION_START (0x06) 161-byte APXE scope, TEMPORAL_PROOF (0x09) 137-byte APXP scope with Argon2id SWF, SESSION_RESUME (0x07) 93-byte APXS scope, four-packet TerminalDigest, two-keypair bundle seal; gen_fixture_14n.py generation script; §14.1 "Planned" stub replaced with §14.9 reference |
 | 2.4.1 | §5.7 performance note updated with measured Argon2id latency on AWS Nitro c5.xlarge: ~240 ms (mean 239.81 ms, p50 241.22 ms, p95 247.09 ms) at floor params m=65536 t=3 p=1; 250 ms practical upper bound documented; §14 TEMPORAL_PROOF fixture note updated (benchmark settled, fixture unblocked) |
@@ -1371,7 +1418,7 @@ inputs plus the §15.2 additional inputs:
 
 An implementation is **APEX-compliant** if it:
 
-1. Produces bundles that pass all Steps 1–11 of the verification algorithm (§8)
+1. Produces bundles that pass all Steps 1–12 of the verification algorithm (§8)
 2. Rejects unknown ActionType values rather than passing them through
 3. Performs CBOR map walk (not byte scan) for PCR extraction
 4. Does not persist the Ed25519 signing keypair across hibernate/resume cycles
@@ -1380,7 +1427,7 @@ An implementation is **APEX-compliant** if it:
 7. Emits a `TEMPORAL_PROOF` packet (`0x09`) immediately before each sealed checkpoint write at hibernate boundaries, with `p = 1`, `m ≥ 65536`, and `t ≥ 3` (§9.5)
 8. Includes `TemporalProofHash` in the sealed payload whenever a conformant `TEMPORAL_PROOF` was emitted for that checkpoint (§10.2)
 
-A verifier is **APEX-compliant** if it implements all Steps 1–11 and correctly handles multi-segment sessions per §9.4 and §9.5.
+A verifier is **APEX-compliant** if it implements all Steps 1–12 and correctly handles multi-segment sessions per §9.4 and §9.5.
 
 ---
 
