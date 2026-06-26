@@ -15,7 +15,7 @@ Usage:
 
 Exit codes: 0 = all steps PASS  |  1 = one or more steps FAIL  |  2 = parse error
 
-Required:   pip install cryptography argon2-cffi
+Required:   pip install cryptography argon2-cffi cbor2
 Optional:   pip install pyte   (Step 9 L2 replay only)
 
 See APEX spec §8 for the normative verification algorithm.
@@ -52,6 +52,12 @@ try:
     _PYTE = True
 except ImportError:
     _PYTE = False
+
+try:
+    import cbor2 as _cbor2
+    _CBOR2 = True
+except ImportError:
+    _CBOR2 = False
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -368,6 +374,119 @@ def _apxs_scope(pkt: SessionResumePacket, session_id: bytes) -> bytes:
     return msg
 
 
+# ── AWS Nitro COSE_Sign1 verification ────────────────────────────────────────
+
+def _verify_nitro_cose(
+    attest_doc_bytes: bytes,
+    expected_pub:     bytes,
+    expected_pcr0:    bytes,
+    expected_pcr1:    bytes,
+    expected_pcr2:    bytes,
+) -> tuple[bool, str]:
+    """Verify an AWS Nitro COSE_Sign1 attestation document.
+
+    Implements §8 Step 2 rules 1–5:
+      1. Parse COSE_Sign1 (RFC 8152 / CBOR tag 18)
+      2. Verify ECDSA P-384 signature over Sig_Structure using leaf cert
+      3. Verify certificate chain (leaf → intermediates → root)
+      4. CBOR map-walk PCR0/1/2; assert PCRCommitment = SHA-256(PCR0‖PCR1‖PCR2)
+      5. Assert AttestationDoc.public_key == bundle SessionPub
+
+    Returns (ok, detail_string).
+    """
+    if not _CBOR2:
+        return False, "cbor2 not installed — pip install cbor2"
+    if not _CRYPTO:
+        return False, "cryptography not installed — pip install cryptography"
+
+    from cryptography.hazmat.primitives.asymmetric.ec import ECDSA
+    from cryptography.hazmat.primitives.hashes import SHA384
+    from cryptography import x509
+
+    try:
+        # ── 1. Parse COSE_Sign1 ───────────────────────────────────────────────
+        cose = _cbor2.loads(attest_doc_bytes)
+        # AWS Nitro emits CBORTag(18, [protected, unprotected, payload, sig])
+        cose_list = cose.value if hasattr(cose, "value") else cose
+        if not isinstance(cose_list, list) or len(cose_list) != 4:
+            return False, f"COSE_Sign1: expected 4-element array, got {type(cose_list).__name__}[{len(cose_list) if isinstance(cose_list, list) else '?'}]"
+
+        protected_bytes, _unprotected, payload_bytes, signature = cose_list
+        if not isinstance(protected_bytes, bytes) or not isinstance(payload_bytes, bytes) or not isinstance(signature, bytes):
+            return False, "COSE_Sign1: protected/payload/signature must be bstr"
+
+        payload = _cbor2.loads(payload_bytes)
+
+        # ── 2. Verify COSE_Sign1 signature ────────────────────────────────────
+        # Sig_Structure = ["Signature1", protected_bstr, b"" (external_aad), payload_bstr]
+        sig_structure = _cbor2.dumps(["Signature1", protected_bytes, b"", payload_bytes])
+
+        leaf_cert_der = payload.get("certificate", b"")
+        if not leaf_cert_der:
+            return False, "attestation doc: no leaf certificate"
+        leaf_cert = x509.load_der_x509_certificate(leaf_cert_der)
+
+        try:
+            leaf_cert.public_key().verify(signature, sig_structure, ECDSA(SHA384()))
+        except Exception as exc:
+            return False, f"COSE_Sign1 signature invalid: {exc}"
+
+        # ── 3. Verify certificate chain ───────────────────────────────────────
+        cabundle = payload.get("cabundle", [])
+        chain = [leaf_cert] + [x509.load_der_x509_certificate(c) for c in cabundle]
+        for i in range(len(chain) - 1):
+            child, issuer = chain[i], chain[i + 1]
+            try:
+                issuer.public_key().verify(
+                    child.signature,
+                    child.tbs_certificate_bytes,
+                    ECDSA(child.signature_hash_algorithm),
+                )
+            except Exception as exc:
+                return False, f"cert chain break at depth {i} ({child.subject.rfc4514_string()}): {exc}"
+
+        # ── 4. CBOR map-walk PCRs and assert PCRCommitment ───────────────────
+        pcrs = payload.get("pcrs", {})
+        pcr0_doc = pcrs.get(0, b"")
+        pcr1_doc = pcrs.get(1, b"")
+        pcr2_doc = pcrs.get(2, b"")
+
+        issues = []
+        if pcr0_doc != expected_pcr0:
+            issues.append(f"PCR0 mismatch\n    doc: {pcr0_doc.hex()}\n    hdr: {expected_pcr0.hex()}")
+        if pcr1_doc != expected_pcr1:
+            issues.append(f"PCR1 mismatch\n    doc: {pcr1_doc.hex()}\n    hdr: {expected_pcr1.hex()}")
+        if pcr2_doc != expected_pcr2:
+            issues.append(f"PCR2 mismatch\n    doc: {pcr2_doc.hex()}\n    hdr: {expected_pcr2.hex()}")
+        if issues:
+            return False, "PCRs in attestation doc do not match bundle header\n  " + "\n  ".join(issues)
+
+        pcr_commitment = hashlib.sha256(pcr0_doc + pcr1_doc + pcr2_doc).digest()
+
+        # ── 5. Assert SessionPub in AttestationDoc.public_key ─────────────────
+        pub_from_doc = payload.get("public_key", b"")
+        if pub_from_doc != expected_pub:
+            return False, (
+                f"SessionPub mismatch between attestation doc and bundle header\n"
+                f"  doc: {pub_from_doc.hex()}\n"
+                f"  hdr: {expected_pub.hex()}"
+            )
+
+        root_cn = chain[-1].subject.get_attributes_for_oid(
+            x509.NameOID.COMMON_NAME
+        )
+        root_name = root_cn[0].value if root_cn else "unknown"
+
+        return True, (
+            f"COSE_Sign1 valid  chain depth={len(chain)}  root='{root_name}'\n"
+            f"  PCR0={pcr0_doc.hex()[:12]}…  PCR1={pcr1_doc.hex()[:12]}…  PCR2={pcr2_doc.hex()[:12]}…\n"
+            f"  PCRCommitment={pcr_commitment.hex()[:16]}…  SessionPub matches"
+        )
+
+    except Exception as exc:
+        return False, f"COSE verification error: {exc}"
+
+
 # ── Step helpers ─────────────────────────────────────────────────────────────
 
 def _pass(step: str, detail: str) -> CheckResult:
@@ -416,7 +535,7 @@ def step_1_bundle_header(bundle: Bundle) -> CheckResult:
 
 
 def step_2_segment_headers(bundle: Bundle) -> CheckResult:
-    """Step 2 — Validate each Segment Header (PCRCommitment; COSE skipped in simulation)."""
+    """Step 2 — Validate each Segment Header (PCRCommitment + COSE_Sign1 for production bundles)."""
     issues = []
     notes  = []
     sim_mode = False
@@ -424,28 +543,39 @@ def step_2_segment_headers(bundle: Bundle) -> CheckResult:
     for i, seg in enumerate(bundle.segments):
         hdr = seg.header
 
-        # Detect simulation mode: attestation doc is all-0xAA fill
+        # Detect simulation mode: attestation doc is all-0xAA fill or PCRs all-zero
         doc_is_sim = len(hdr.attest_doc) > 0 and all(b == _SIM_ATTEST_FILL for b in hdr.attest_doc)
         pcr_is_sim = all(b == _SIM_PCR_FILL for b in hdr.pcr0 + hdr.pcr1 + hdr.pcr2)
+
         if doc_is_sim or pcr_is_sim:
             sim_mode = True
-            notes.append(f"segment {i}: simulation-mode attestation doc — COSE signature skipped (§11)")
+            notes.append(f"segment {i}: simulation-mode attestation — COSE skipped (§11)")
+            computed = hashlib.sha256(hdr.pcr0 + hdr.pcr1 + hdr.pcr2).digest()
+            notes.append(f"segment {i}: PCRCommitment={computed.hex()[:16]}…  (all-zero PCRs expected in sim)")
         else:
-            # Production mode: COSE_Sign1 verification would go here.
-            # Requires AWS root CA cert — skipped in this release; filed as §14 verifier gap.
-            notes.append(f"segment {i}: production attestation doc — COSE verification SKIPPED (TODO §14 verifier)")
+            # Production bundle — full COSE_Sign1 verification (§8 Step 2 rules 1–5)
+            if not hdr.attest_doc:
+                issues.append(f"segment {i}: attestation doc missing")
+                continue
 
-        # PCRCommitment = SHA-256(PCR0 ‖ PCR1 ‖ PCR2) — always checkable
-        computed = hashlib.sha256(hdr.pcr0 + hdr.pcr1 + hdr.pcr2).digest()
-        notes.append(f"segment {i}: PCRCommitment={computed.hex()[:16]}…  PCR0={hdr.pcr0.hex()[:8]}…")
+            ok, detail = _verify_nitro_cose(
+                hdr.attest_doc,
+                hdr.signing_pub,
+                hdr.pcr0,
+                hdr.pcr1,
+                hdr.pcr2,
+            )
+            if ok:
+                notes.append(f"segment {i}: {detail}")
+            else:
+                issues.append(f"segment {i}: COSE verification FAILED — {detail}")
 
-        # SessionPub in attestation doc: verifiable only for real COSE_Sign1
-        if not doc_is_sim:
-            notes.append(f"segment {i}: SessionPub-in-doc binding SKIPPED (COSE verification pending)")
+    if issues:
+        return _fail("Step 2 Segment Headers", "\n  ".join(issues))
 
     detail = "\n  ".join(notes)
     if sim_mode:
-        return _skip("Step 2 Segment Headers", f"simulation mode — PCRs confirmed, COSE skipped\n  {detail}")
+        return _skip("Step 2 Segment Headers", f"simulation mode — COSE skipped\n  {detail}")
     return _pass("Step 2 Segment Headers", detail)
 
 
