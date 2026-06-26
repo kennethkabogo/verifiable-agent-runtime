@@ -94,11 +94,12 @@ APEX v3.x will close the input-channel gap via a customer-signed command commitm
 **Target design.** Before each command is executed, the customer signs the command payload with a key they hold and the operator does not. The enclave verifies this signature before executing the command and commits the verification result to the L1 chain. A bundle produced under this scheme proves not only what the agent did but that each action was authorized by the customer.
 
 **Implementation path.**
+
 - v2.x (current): Output attestation. Operator is trusted for input delivery; customer audits outputs.
 - v3.0: Input commitment. Customer-signed commands committed to L1; operator cannot inject or modify commands without detection.
 - v3.x: Blind execution option. Customer communicates directly with the enclave via an mTLS channel using a customer-held key; operator provides compute only and cannot read or modify inputs.
 
-**Timeline.** v3.0 design is in `spec/research-roadmap.md`. No implementation date committed. Customers requiring v3.0 guarantees for initial deployment should discuss requirements with VAR directly.
+**Timeline.** No date is committed — scope and priority are driven by customer requirements. Customers requiring v3.0 guarantees before initial deployment should contact VAR directly; the design above is the starting point for that conversation.
 
 ---
 
@@ -115,6 +116,6 @@ If you are auditing an APEX bundle on behalf of a customer:
 
 ## Contact
 
-Questions on this document or the APEX specification: kenneth@var.dev  
+Questions on this document or the APEX specification: <kenneth@var.dev>  
 APEX specification: [APEX.md](APEX.md)  
-Public repository: https://github.com/kennethkabogo/verifiable-agent-runtime
+Public repository: [github.com/kennethkabogo/verifiable-agent-runtime](https://github.com/kennethkabogo/verifiable-agent-runtime)
