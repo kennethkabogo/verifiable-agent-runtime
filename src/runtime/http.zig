@@ -461,7 +461,7 @@ fn handleCompute(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
     // Canonicalise inputs so the hash is whitespace-independent.
     // If "inputs" is absent we commit to the JSON null literal.
     const inputs_json: []u8 = if (obj.get("inputs")) |iv|
-        try std.json.stringifyAlloc(server.allocator, iv, .{})
+        try std.json.Stringify.valueAlloc(server.allocator, iv, .{})
     else
         try server.allocator.dupe(u8, "null");
     defer server.allocator.free(inputs_json);
