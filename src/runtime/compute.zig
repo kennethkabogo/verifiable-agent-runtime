@@ -46,10 +46,7 @@ pub fn run(
 
     // Default: output = hex(inputs_hash).
     // Deterministic and verifiable; replace by adding a named branch above.
-    const output = try std.fmt.allocPrint(
-        allocator,
-        "{}",
-        .{std.fmt.fmtSliceHexLower(&inputs_hash)},
-    );
+    const hex_buf = std.fmt.bytesToHex(inputs_hash, .lower);
+    const output = try allocator.dupe(u8, &hex_buf);
     return ComputeResult{ .output = output, .inputs_hash = inputs_hash };
 }
