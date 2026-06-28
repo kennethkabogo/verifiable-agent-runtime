@@ -1354,9 +1354,8 @@ test "emitSessionResume: prev_stream matches stream of prior TEMPORAL_PROOF" {
     defer allocator.free(line);
 
     // Format the expected prev_stream hex and check it appears in the line.
-    const expected = try std.fmt.allocPrint(allocator, "prev_stream={s}", .{
-        std.fmt.fmtSliceHexLower(&tp_stream),
-    });
+    const tp_stream_hex = std.fmt.bytesToHex(tp_stream, .lower);
+    const expected = try std.fmt.allocPrint(allocator, "prev_stream={s}", .{tp_stream_hex});
     defer allocator.free(expected);
     try std.testing.expect(std.mem.indexOf(u8, line, expected) != null);
 }

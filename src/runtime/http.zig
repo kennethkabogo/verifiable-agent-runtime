@@ -9,6 +9,7 @@
 ///
 ///   POST /vault/secret   {"key":"…","value":"…"}           → 200 {"status":"ok"}
 ///   POST /log            {"msg":"…"}  (+X-Skill-Id header)  → 200 {"status":"ok"}
+///   POST /compute        {"fn":"…","inputs":<json>}         → 200 {"fn":"…","inputs_hash":"…","output":"…","evidence":{…}}
 ///   POST /exec           {"cmd":["arg0","arg1",…]}          → 200 {"exit_code":0,"stdout_b64":"…","stderr_b64":"…","stdout_hash":"…","stderr_hash":"…"}
 ///   POST /hibernate                                          → 200 {"sealed_state":"<hex>"}  (gateway exits cleanly after response)
 ///   POST /terminate                                          → 200 {"evidence":{…},"bundle_seal":"BUNDLE_SEAL:…"}  (final proof, no resume blob, then exits)
@@ -34,6 +35,7 @@ const SecureLogger = @import("shell.zig").SecureLogger;
 const SettlementParams = @import("shell.zig").SettlementParams;
 const AttestationQuote = @import("attestation.zig").AttestationQuote;
 const sealed_state = @import("sealed_state.zig");
+const compute = @import("compute.zig");
 
 // ── Shutdown flag (set by signal handler in http_main.zig) ─────────────────
 
@@ -354,6 +356,8 @@ fn route(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
         return handleVaultSecret(server, stream, req);
     if (post and mem.eql(u8, req.path, "/log"))
         return handleLog(server, stream, req);
+    if (post and mem.eql(u8, req.path, "/compute"))
+        return handleCompute(server, stream, req);
     if (post and mem.eql(u8, req.path, "/exec"))
         return handleExec(server, stream, req);
     if (post and mem.eql(u8, req.path, "/hibernate"))
@@ -431,6 +435,63 @@ fn handleLog(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !vo
     try server.logger.logOutput(line);
     if (has_skill) try server.logger.noteSkillId(req.skill_id);
     try writeResponse(stream, 200, "{\"status\":\"ok\"}");
+}
+
+fn handleCompute(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
+    var parsed = std.json.parseFromSlice(
+        std.json.Value,
+        server.allocator,
+        req.body,
+        .{},
+    ) catch return writeError(stream, 400, "invalid JSON");
+    defer parsed.deinit();
+
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return writeError(stream, 400, "request body must be a JSON object"),
+    };
+
+    const fn_val = obj.get("fn") orelse
+        return writeError(stream, 400, "missing \"fn\" field");
+    const fn_name = switch (fn_val) {
+        .string => |s| s,
+        else => return writeError(stream, 400, "\"fn\" must be a string"),
+    };
+
+    // Canonicalise inputs so the hash is whitespace-independent.
+    // If "inputs" is absent we commit to the JSON null literal.
+    const inputs_json: []u8 = if (obj.get("inputs")) |iv|
+        try std.json.Stringify.valueAlloc(server.allocator, iv, .{})
+    else
+        try server.allocator.dupe(u8, "null");
+    defer server.allocator.free(inputs_json);
+
+    const result = try compute.run(server.allocator, fn_name, inputs_json);
+    defer result.deinit(server.allocator);
+
+    const ih = try fmtHex(server.allocator, &result.inputs_hash);
+    defer server.allocator.free(ih);
+
+    // Fold into the evidence chain — the state hash now commits to both the
+    // computation identity (fn_name) and its inputs.
+    const log_line = try std.fmt.allocPrint(
+        server.allocator,
+        "[COMPUTE:{s}] inputs_hash={s} output={s}",
+        .{ fn_name, ih, result.output },
+    );
+    defer server.allocator.free(log_line);
+    try server.logger.logOutput(log_line);
+
+    const evidence_json = try server.logger.getEvidenceBundleJson(server.allocator);
+    defer server.allocator.free(evidence_json);
+
+    const body = try std.fmt.allocPrint(
+        server.allocator,
+        "{{\"fn\":\"{s}\",\"inputs_hash\":\"{s}\",\"output\":\"{s}\",\"evidence\":{s}}}",
+        .{ fn_name, ih, result.output, evidence_json },
+    );
+    defer server.allocator.free(body);
+    try writeResponse(stream, 200, body);
 }
 
 fn handleExec(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
