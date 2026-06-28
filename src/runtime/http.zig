@@ -460,14 +460,11 @@ fn handleCompute(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
 
     // Canonicalise inputs so the hash is whitespace-independent.
     // If "inputs" is absent we commit to the JSON null literal.
-    var inputs_buf = std.ArrayListUnmanaged(u8){};
-    defer inputs_buf.deinit(server.allocator);
-    if (obj.get("inputs")) |iv| {
-        try std.json.stringify(iv, .{}, inputs_buf.writer(server.allocator));
-    } else {
-        try inputs_buf.appendSlice(server.allocator, "null");
-    }
-    const inputs_json = inputs_buf.items;
+    const inputs_json: []u8 = if (obj.get("inputs")) |iv|
+        try std.json.stringifyAlloc(server.allocator, iv, .{})
+    else
+        try server.allocator.dupe(u8, "null");
+    defer server.allocator.free(inputs_json);
 
     const result = try compute.run(server.allocator, fn_name, inputs_json);
     defer result.deinit(server.allocator);
