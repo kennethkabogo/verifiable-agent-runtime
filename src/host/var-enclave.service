@@ -35,6 +35,8 @@ Description=VAR Verifiable Agent Runtime enclave
 Documentation=https://github.com/kennethkabogo/verifiable-agent-runtime
 After=network-online.target var-kms-proxy.service
 Requires=var-kms-proxy.service
+StartLimitIntervalSec=120s
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -49,8 +51,6 @@ ExecStop=/opt/var/hibernate-enclave.sh
 
 Restart=on-failure
 RestartSec=10s
-StartLimitIntervalSec=120s
-StartLimitBurst=3
 
 # Enclave parameters — override via systemctl edit var-enclave
 Environment=EIF_PATH=/opt/var/var.eif
