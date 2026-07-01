@@ -202,8 +202,8 @@ def _unhex(s: str, label: str, expected: Optional[int] = None) -> bytes:
 def parse_bundle_header(line: str) -> BundleHeader:
     f = _fields(line)
     magic = f.get("magic", "")
-    if magic != "APXB":
-        raise ValueError(f"Bundle Header magic: expected 'APXB', got {magic!r}")
+    if magic not in ("APXB", "VARB"):
+        raise ValueError(f"Bundle Header magic: expected 'APXB' (or legacy 'VARB'), got {magic!r}")
     return BundleHeader(
         raw             = line,
         magic           = magic,
@@ -331,9 +331,14 @@ def load_bundle(lines: list[str]) -> Bundle:
 
 # ── Signature scope builders ─────────────────────────────────────────────────
 
-def _apxe_scope(pkt: EvidencePacket, session_id: bytes) -> bytes:
-    """Reconstruct the 161-byte APXE scope for SESSION_START and EVIDENCE packets."""
-    msg  = b"APXE"
+def _scope_magic(bundle_magic: str, apx: str, var: str) -> bytes:
+    """Return the scope magic bytes for a given bundle header magic."""
+    return var.encode() if bundle_magic == "VARB" else apx.encode()
+
+
+def _apxe_scope(pkt: EvidencePacket, session_id: bytes, bundle_magic: str = "APXB") -> bytes:
+    """Reconstruct the 161-byte evidence scope for SESSION_START and EVIDENCE packets."""
+    msg  = _scope_magic(bundle_magic, "APXE", "VARE")
     msg += b"\x01"
     msg += struct.pack("<Q", pkt.seq)
     msg += pkt.prev_stream
@@ -342,13 +347,13 @@ def _apxe_scope(pkt: EvidencePacket, session_id: bytes) -> bytes:
     msg += struct.pack("<I", pkt.payload_len)
     msg += pkt.payload_hash
     msg += session_id
-    assert len(msg) == 161, f"APXE scope: expected 161, got {len(msg)}"
+    assert len(msg) == 161, f"evidence scope: expected 161, got {len(msg)}"
     return msg
 
 
-def _apxp_scope(pkt: TemporalProofPacket, session_id: bytes) -> bytes:
-    """Reconstruct the 137-byte APXP scope for TEMPORAL_PROOF packets."""
-    msg  = b"APXP"
+def _apxp_scope(pkt: TemporalProofPacket, session_id: bytes, bundle_magic: str = "APXB") -> bytes:
+    """Reconstruct the 137-byte temporal proof scope for TEMPORAL_PROOF packets."""
+    msg  = _scope_magic(bundle_magic, "APXP", "VART")
     msg += b"\x01"
     msg += struct.pack("<Q", pkt.seq)
     msg += pkt.prev_stream
@@ -358,19 +363,19 @@ def _apxp_scope(pkt: TemporalProofPacket, session_id: bytes) -> bytes:
     msg += struct.pack("<I", pkt.t)
     msg += struct.pack("<I", pkt.p)
     msg += session_id
-    assert len(msg) == 137, f"APXP scope: expected 137, got {len(msg)}"
+    assert len(msg) == 137, f"temporal proof scope: expected 137, got {len(msg)}"
     return msg
 
 
-def _apxs_scope(pkt: SessionResumePacket, session_id: bytes) -> bytes:
-    """Reconstruct the 93-byte APXS scope for SESSION_RESUME packets."""
-    msg  = b"APXS"
+def _apxs_scope(pkt: SessionResumePacket, session_id: bytes, bundle_magic: str = "APXB") -> bytes:
+    """Reconstruct the 93-byte session resume scope for SESSION_RESUME packets."""
+    msg  = _scope_magic(bundle_magic, "APXS", "VARS")
     msg += b"\x01"
     msg += struct.pack("<Q", pkt.seq)
     msg += pkt.prev_stream
     msg += pkt.stream
     msg += session_id
-    assert len(msg) == 93, f"APXS scope: expected 93, got {len(msg)}"
+    assert len(msg) == 93, f"session resume scope: expected 93, got {len(msg)}"
     return msg
 
 
@@ -400,6 +405,7 @@ def _verify_nitro_cose(
         return False, "cryptography not installed — pip install cryptography"
 
     from cryptography.hazmat.primitives.asymmetric.ec import ECDSA
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
     from cryptography.hazmat.primitives.hashes import SHA384
     from cryptography import x509
 
@@ -426,14 +432,23 @@ def _verify_nitro_cose(
             return False, "attestation doc: no leaf certificate"
         leaf_cert = x509.load_der_x509_certificate(leaf_cert_der)
 
+        # AWS Nitro emits raw P-384 signatures (r‖s, 96 bytes), not DER.
+        # cryptography.verify() expects DER — convert if needed.
+        if len(signature) == 96:
+            r = int.from_bytes(signature[:48], "big")
+            s = int.from_bytes(signature[48:], "big")
+            der_sig = encode_dss_signature(r, s)
+        else:
+            der_sig = signature
         try:
-            leaf_cert.public_key().verify(signature, sig_structure, ECDSA(SHA384()))
+            leaf_cert.public_key().verify(der_sig, sig_structure, ECDSA(SHA384()))
         except Exception as exc:
             return False, f"COSE_Sign1 signature invalid: {exc}"
 
         # ── 3. Verify certificate chain ───────────────────────────────────────
+        # AWS Nitro cabundle is ordered root→intermediate (reversed from leaf→root).
         cabundle = payload.get("cabundle", [])
-        chain = [leaf_cert] + [x509.load_der_x509_certificate(c) for c in cabundle]
+        chain = [leaf_cert] + [x509.load_der_x509_certificate(c) for c in reversed(cabundle)]
         for i in range(len(chain) - 1):
             child, issuer = chain[i], chain[i + 1]
             try:
@@ -519,18 +534,19 @@ def step_1_bundle_header(bundle: Bundle) -> CheckResult:
     """Step 1 — Parse and validate the Bundle Header."""
     hdr = bundle.segments[0].header
     # Magic
-    if hdr.magic != "APXB":
-        return _fail("Step 1 Bundle Header", f"magic: expected 'APXB', got {hdr.magic!r}")
+    if hdr.magic not in ("APXB", "VARB"):
+        return _fail("Step 1 Bundle Header", f"magic: expected 'APXB' (or legacy 'VARB'), got {hdr.magic!r}")
     # Version MAJOR
     try:
-        major = int(hdr.version.split(".")[0])
+        ver_str = hdr.version.lstrip("0") or "0"
+        major = int(ver_str.split(".")[0])
     except (ValueError, IndexError):
         return _fail("Step 1 Bundle Header", f"unparseable version: {hdr.version!r}")
     if major > SPEC_MAJOR:
         return _fail("Step 1 Bundle Header",
                      f"bundle MAJOR={major} > implemented MAJOR={SPEC_MAJOR} — verifier too old")
     return _pass("Step 1 Bundle Header",
-                 f"magic=APXB  version={hdr.version}  MAJOR={major} ≤ {SPEC_MAJOR}  "
+                 f"magic={hdr.magic}  version={hdr.version}  MAJOR={major} ≤ {SPEC_MAJOR}  "
                  f"session={hdr.session_id.hex()[:16]}…")
 
 
@@ -639,20 +655,21 @@ def step_5_signatures(bundle: Bundle) -> CheckResult:
         return _skip("Step 5 Signatures",
                      "SKIPPED — pip install cryptography to enable Ed25519 verification")
 
-    session_id = bundle.session_id()
-    failures   = []
-    total      = 0
+    session_id   = bundle.session_id()
+    bundle_magic = bundle.segments[0].header.magic
+    failures     = []
+    total        = 0
 
     for seg in bundle.segments:
         pub = seg.header.signing_pub
         for pkt in seg.packets:
             total += 1
             if isinstance(pkt, EvidencePacket):
-                scope = _apxe_scope(pkt, session_id)
+                scope = _apxe_scope(pkt, session_id, bundle_magic)
             elif isinstance(pkt, TemporalProofPacket):
-                scope = _apxp_scope(pkt, session_id)
+                scope = _apxp_scope(pkt, session_id, bundle_magic)
             elif isinstance(pkt, SessionResumePacket):
-                scope = _apxs_scope(pkt, session_id)
+                scope = _apxs_scope(pkt, session_id, bundle_magic)
             else:
                 failures.append(f"seq=?: unknown packet type {type(pkt)}")
                 continue
@@ -694,7 +711,8 @@ def step_7_bundle_seal(bundle: Bundle) -> CheckResult:
     last_pub   = last_seg.header.signing_pub
     td         = seal.terminal_digest
 
-    expected_hash = hashlib.sha256(b"APXB" + session_id + nonce + last_pub + td).digest()
+    bundle_magic  = bundle.segments[0].header.magic.encode()
+    expected_hash = hashlib.sha256(bundle_magic + session_id + nonce + last_pub + td).digest()
     if expected_hash != seal.bundle_hash:
         return _fail("Step 7 Bundle Seal",
                      f"BundleHash MISMATCH\n"
