@@ -242,6 +242,35 @@ pub const SecureLogger = struct {
         return result;
     }
 
+    /// Log an exec result produced externally (e.g. by the exec-worker process).
+    /// Equivalent to the logging half of runAndLog; the caller already has the
+    /// ExecResult and just needs it folded into the L1 chain + executions list.
+    pub fn logExecResult(
+        self:   *SecureLogger,
+        argv:   []const []const u8,
+        result: *const exec.ExecResult,
+    ) !void {
+        var stdout_hash: [32]u8 = undefined;
+        Sha256.hash(result.stdout, &stdout_hash, .{});
+        var stderr_hash: [32]u8 = undefined;
+        Sha256.hash(result.stderr, &stderr_hash, .{});
+        const cmd_str = try std.mem.join(self.allocator, " ", argv);
+        errdefer self.allocator.free(cmd_str);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (result.stdout.len > 0) self.logOutputLocked(result.stdout);
+
+        try self.executions.append(self.allocator, ExecRecord{
+            .cmd        = cmd_str,
+            .stdout_hash = stdout_hash,
+            .stderr_hash = stderr_hash,
+            .exit_code  = result.exit_code,
+            .seq        = self.sequence,
+        });
+    }
+
     /// Signs an evidence snapshot following spec §3.1.
     ///
     /// Message layout (161 bytes):
