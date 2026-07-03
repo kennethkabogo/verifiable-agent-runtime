@@ -17,7 +17,7 @@ ID_FILE="/run/var/enclave.id"
 mkdir -p "$(dirname "${RESUME_STATE_FILE}")"
 
 python3 - <<PYEOF
-import socket, json, base64, os, sys
+import socket, json, os, sys
 
 cid  = int(os.environ.get("ENCLAVE_CID", 16))
 port = int(os.environ.get("ENCLAVE_PORT", 8765))
@@ -49,7 +49,7 @@ if not (resp.startswith(b"HTTP/1.") and b" 200 " in resp[:16]):
 sep = resp.find(b"\r\n\r\n")
 try:
     data = json.loads(resp[sep + 4:])
-    sealed = base64.b64decode(data["sealed_state"])
+    sealed = bytes.fromhex(data["sealed_state"])
 except Exception as exc:
     print(f"[hibernate] parse error: {exc}", file=sys.stderr)
     sys.exit(1)

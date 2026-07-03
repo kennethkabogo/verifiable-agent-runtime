@@ -74,7 +74,7 @@ const VsockHandler = @import("vsock.zig").VsockHandler;
 // ---------------------------------------------------------------------------
 
 const MAGIC = [4]u8{ 'A', 'P', 'X', 'S' };
-const FORMAT_VERSION: u8 = 0x04;
+const FORMAT_VERSION: u8 = 0x05;
 
 /// Minimum plaintext size (v0.02, smallest accepted blob):
 ///   magic(4) + version(1) + session_id(16) + stream_hash(32) +
@@ -82,7 +82,8 @@ const FORMAT_VERSION: u8 = 0x04;
 ///   vault_count(4) + exec_count(4) = 133
 /// v0.03 adds temporal_proof_present(1)          → 134 min
 /// v0.04 adds segment_index(4)                   → 138 min
-/// The deserializer accepts v0.02, v0.03, and v0.04.
+/// v0.05 adds sig_count(4)                       → 142 min
+/// The deserializer accepts v0.02, v0.03, v0.04, and v0.05.
 const MIN_PLAINTEXT: usize = 133;
 
 /// Minimum and maximum byte lengths for the wrapped DEK field.
@@ -120,6 +121,12 @@ pub const CapturedState = struct {
     /// Audit convenience field — not a security verification input.
     /// Ordering is established by seq and the L1 hash chain.
     segment_index: u32 = 0,
+    /// Ordered Ed25519 signatures from every evidence packet emitted so far,
+    /// including TEMPORAL_PROOF and SESSION_RESUME packets.  Carried forward
+    /// across hibernate/resume boundaries so the resumed segment can extend
+    /// the running signature log and produce a correct TerminalDigest at
+    /// terminate time (spec §7: SHA-256 of ALL packet signatures in order).
+    sig_entries: [][64]u8 = &.{},
 
     pub const VaultEntry = struct {
         key: []const u8,
@@ -149,6 +156,7 @@ pub const CapturedState = struct {
             self.allocator.free(e.cmd);
         }
         self.allocator.free(self.exec_entries);
+        self.allocator.free(self.sig_entries);
     }
 };
 
@@ -180,6 +188,8 @@ pub fn capture(
     var bootstrap_nonce: [32]u8 = undefined;
     var segment_index: u32 = 0;
 
+    var sig_entries: [][64]u8 = undefined;
+
     const exec_entries = blk: {
         logger.mutex.lock();
         defer logger.mutex.unlock();
@@ -190,6 +200,15 @@ pub fn capture(
         sequence         = logger.sequence;
         bootstrap_nonce  = logger.bootstrap_nonce;
         segment_index    = logger.segment_index + 1; // next segment index (§10.2)
+
+        // Copy the full signature log so the resumed segment can extend it and
+        // compute the correct global TerminalDigest at terminate time (§7).
+        const nsigs = logger.sig_log.items.len;
+        const sigs_buf = try allocator.alloc([64]u8, nsigs);
+        errdefer allocator.free(sigs_buf);
+        @memcpy(sigs_buf, logger.sig_log.items);
+        sig_entries = sigs_buf;
+
         const n = logger.executions.items.len;
         const buf = try allocator.alloc(CapturedState.ExecEntry, n);
         var init_count: usize = 0;
@@ -264,6 +283,7 @@ pub fn capture(
         .vault_entries = vault_entries,
         .exec_entries = exec_entries,
         .segment_index = segment_index,
+        .sig_entries = sig_entries,
     };
 }
 
@@ -347,6 +367,12 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
             .seq = e.seq,
         });
     }
+
+    // Restore the prior signature log so the resumed segment extends rather than
+    // replaces it.  TerminalDigest at terminate time covers ALL signatures across
+    // ALL segments (spec §7), so the sig_log must survive hibernate/resume.
+    logger.sig_log.clearRetainingCapacity();
+    try logger.sig_log.appendSlice(logger.allocator, state.sig_entries);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +381,7 @@ pub fn restoreLogger(state: *const CapturedState, logger: *SecureLogger) !void {
 
 fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
     // Pre-compute total size (MIN_PLAINTEXT already includes the 1-byte presence flag).
-    var size: usize = MIN_PLAINTEXT + 1 + 4; // +1: presence flag; +4: segment_index (v0.04)
+    var size: usize = MIN_PLAINTEXT + 1 + 4 + 4 + 64 * state.sig_entries.len; // +1: presence flag; +4: segment_index; +4: sig_count; +64N: sig bytes
     for (state.vault_entries) |e| {
         size += 2 + e.key.len + 2 + e.value.len;
     }
@@ -405,6 +431,12 @@ fn serialize(allocator: std.mem.Allocator, state: *const CapturedState) ![]u8 {
         buf[pos] = 0x00; pos += 1;
     }
 
+    // sig_count + sig bytes (v0.05 extension, §7 TerminalDigest continuity).
+    std.mem.writeInt(u32, buf[pos..][0..4], @intCast(state.sig_entries.len), .little); pos += 4;
+    for (state.sig_entries) |sig| {
+        @memcpy(buf[pos..][0..64], &sig); pos += 64;
+    }
+
     std.debug.assert(pos == size);
     return buf;
 }
@@ -417,9 +449,9 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
     if (!std.mem.eql(u8, buf[pos..][0..4], &MAGIC)) return error.InvalidMagic;
     pos += 4;
     // Accept v0.02 (no TemporalProofHash/SegmentIndex), v0.03 (TemporalProofHash only),
-    // and v0.04 (TemporalProofHash + SegmentIndex).
+    // v0.04 (TemporalProofHash + SegmentIndex), and v0.05 (+ sig_entries).
     const fmt_ver = buf[pos];
-    if (fmt_ver != 0x02 and fmt_ver != 0x03 and fmt_ver != FORMAT_VERSION) return error.UnsupportedVersion;
+    if (fmt_ver != 0x02 and fmt_ver != 0x03 and fmt_ver != 0x04 and fmt_ver != FORMAT_VERSION) return error.UnsupportedVersion;
     pos += 1;
 
     var session_id: [16]u8 = undefined;
@@ -441,9 +473,9 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
     @memcpy(&bootstrap_nonce, buf[pos..][0..32]);
     pos += 32;
 
-    // SegmentIndex (§10.2): present only in v0.04 blobs.
+    // SegmentIndex (§10.2): present in v0.04 and v0.05 blobs.
     // v0.02/v0.03 blobs were sealed from segment 0, so next = 1.
-    const segment_index: u32 = if (fmt_ver == 0x04) blk: {
+    const segment_index: u32 = if (fmt_ver == 0x04 or fmt_ver == 0x05) blk: {
         if (pos + 4 > buf.len) return error.TruncatedState;
         const v = std.mem.readInt(u32, buf[pos..][0..4], .little);
         pos += 4;
@@ -523,8 +555,8 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         exec_init = i + 1;
     }
 
-    // TemporalProofHash (§10.2): present in v0.03 and v0.04 blobs.
-    const temporal_proof_hash: ?[32]u8 = if (fmt_ver == 0x03 or fmt_ver == 0x04) blk: {
+    // TemporalProofHash (§10.2): present in v0.03, v0.04, and v0.05 blobs.
+    const temporal_proof_hash: ?[32]u8 = if (fmt_ver == 0x03 or fmt_ver == 0x04 or fmt_ver == 0x05) blk: {
         if (pos >= buf.len) return error.TruncatedState;
         const has_hash = buf[pos]; pos += 1;
         if (has_hash == 0x01) {
@@ -537,6 +569,23 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         break :blk null;
     } else null;
 
+    // sig_entries (v0.05): sig_count(4) + sig_bytes(N×64).
+    // v0.02/v0.03/v0.04: no sig_log persisted — resume with empty slice; TerminalDigest
+    // will cover only the current segment's signatures (acceptable for single-segment bundles).
+    const sig_entries: [][64]u8 = if (fmt_ver == 0x05) blk: {
+        if (pos + 4 > buf.len) return error.TruncatedState;
+        const sig_count = std.mem.readInt(u32, buf[pos..][0..4], .little);
+        pos += 4;
+        if (sig_count > 65536) return error.SigCountTooLarge;
+        if (pos + 64 * sig_count > buf.len) return error.TruncatedState;
+        const sigs = try allocator.alloc([64]u8, sig_count);
+        for (sigs) |*sig| {
+            @memcpy(sig, buf[pos..][0..64]);
+            pos += 64;
+        }
+        break :blk sigs;
+    } else &.{};
+
     return CapturedState{
         .allocator = allocator,
         .session_id = session_id,
@@ -548,6 +597,7 @@ fn deserialize(allocator: std.mem.Allocator, buf: []const u8) !CapturedState {
         .exec_entries = exec_entries,
         .temporal_proof_hash = temporal_proof_hash,
         .segment_index = segment_index,
+        .sig_entries = sig_entries,
     };
 }
 
@@ -1065,4 +1115,42 @@ test "seal/unseal round-trip: segment_index advances on each capture" {
     defer restored.deinit();
 
     try std.testing.expectEqual(@as(u32, 3), restored.segment_index);
+}
+
+test "seal/unseal round-trip: sig_entries are preserved" {
+    const allocator = std.testing.allocator;
+
+    var nonce: [32]u8 = undefined;
+    std.crypto.random.bytes(&nonce);
+    var sid: [16]u8 = undefined;
+    std.crypto.random.bytes(&sid);
+
+    var sig0: [64]u8 = undefined;
+    var sig1: [64]u8 = undefined;
+    std.crypto.random.bytes(&sig0);
+    std.crypto.random.bytes(&sig1);
+
+    var sigs = [_][64]u8{ sig0, sig1 };
+
+    const state = CapturedState{
+        .allocator = allocator,
+        .session_id = sid,
+        .stream_hash = nonce,
+        .prev_stream_hash = nonce,
+        .sequence = 3,
+        .bootstrap_nonce = nonce,
+        .vault_entries = &.{},
+        .exec_entries = &.{},
+        .sig_entries = &sigs,
+    };
+
+    const blob = try seal(allocator, &state);
+    defer allocator.free(blob);
+
+    var restored = try unseal(allocator, blob);
+    defer restored.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), restored.sig_entries.len);
+    try std.testing.expectEqual(sig0, restored.sig_entries[0]);
+    try std.testing.expectEqual(sig1, restored.sig_entries[1]);
 }

@@ -112,10 +112,11 @@ pub const ProtocolHandler = struct {
         const quote_str = try self.quote.serialize(self.allocator);
         defer self.allocator.free(quote_str);
 
+        const sim_marker: []const u8 = if (self.quote.is_simulation) "sim=1:" else "";
         return std.fmt.allocPrint(
             self.allocator,
-            "BUNDLE_HEADER:magic=APXB:version=01:session={s}:nonce={s}:enc_pub={s}:{s}",
-            .{ sid_h, nonce_h, enc_pub_h, quote_str },
+            "BUNDLE_HEADER:magic=APXB:version=01:session={s}:nonce={s}:enc_pub={s}:{s}{s}",
+            .{ sid_h, nonce_h, enc_pub_h, sim_marker, quote_str },
         );
     }
 

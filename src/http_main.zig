@@ -20,6 +20,7 @@ const http = @import("runtime/http.zig");
 const sealed_state = @import("runtime/sealed_state.zig");
 const sandbox = @import("runtime/sandbox.zig");
 const VsockHandler = @import("runtime/vsock.zig").VsockHandler;
+const ExecWorker = @import("runtime/exec_worker.zig").ExecWorker;
 
 /// Fetch the sealed resume state blob from the KMS proxy at startup.
 ///
@@ -206,10 +207,18 @@ pub fn main() !void {
     //     from these cached values instead of the environment at request time.
     sealed_state.initSealConfig(allocator);
 
-    // 6b. Harden the process: scrub env vars, install Landlock + caps-drop +
+    // 6b. Fork the exec-worker BEFORE hardening so it runs outside the seccomp-BPF
+    //     allowlist.  Any fork after hardenProcess() inherits the sandbox and the
+    //     dynamic linker's openat(257) call will hit KILL_PROCESS.
+    var exec_worker = try ExecWorker.start();
+    defer exec_worker.deinit();
+
+    // 6c. Harden the process: scrub env vars, install Landlock + caps-drop +
     //     seccomp-BPF.  All environment reads are complete above; socket bind
     //     happens inside serve() using only allowlisted syscalls.
-    sandbox.hardenProcess();
+    // The exec-worker's pipe FDs are declared as expected so the FD audit
+    // does not flag them as ghost descriptors.
+    sandbox.hardenProcess(&.{ exec_worker.req_fd, exec_worker.res_fd });
 
     // 7. Start HTTP gateway — blocks forever serving skills.
     var gw = http.GatewayServer.init(
@@ -221,6 +230,7 @@ pub fn main() !void {
         protocol.session_id,
         protocol.bootstrap_nonce,
         protocol.enc_public,
+        exec_worker,
     );
     try gw.serve();
 }

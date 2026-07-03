@@ -5,11 +5,15 @@ const nsm = @import("nsm.zig");
 /// On real Nitro hardware `doc` contains the CBOR-encoded COSE_Sign1 attestation
 /// document returned by the NSM.  In simulation it holds a deterministic mock.
 pub const AttestationQuote = struct {
-    pcr0: [48]u8,       // PCR0 — SHA-384 of the enclave image (EIF)
-    pcr1: [48]u8,       // PCR1 — SHA-384 of the Linux kernel and boot ROMfs
-    pcr2: [48]u8,       // PCR2 — SHA-384 of the application / user-data
-    public_key: [32]u8, // Enclave's ephemeral public key bound into the attestation
-    doc: []u8,          // Raw attestation document bytes (caller-allocated, owned)
+    pcr0: [48]u8,          // PCR0 — SHA-384 of the enclave image (EIF)
+    pcr1: [48]u8,          // PCR1 — SHA-384 of the Linux kernel and boot ROMfs
+    pcr2: [48]u8,          // PCR2 — SHA-384 of the application / user-data
+    public_key: [32]u8,    // Enclave's ephemeral public key bound into the attestation
+    doc: []u8,             // Raw attestation document bytes (caller-allocated, owned)
+    /// True when /dev/nsm is absent and the mock attestation doc is used.
+    /// Consumers (e.g. prepareHandshake) include sim=1 in the BUNDLE_HEADER so
+    /// verifiers can identify simulation-mode bundles without inspecting PCR bytes.
+    is_simulation: bool,
 
     pub fn generate(allocator: std.mem.Allocator, public_key: [32]u8, session_id: [16]u8) !AttestationQuote {
         // Pass the ephemeral public key and session_id so the NSM (or mock) can
@@ -27,7 +31,11 @@ pub const AttestationQuote = struct {
         var fallback: [48]u8 = undefined;
         @memset(&fallback, 0xAA);
 
-        const pcr0 = extractPcrFromDoc(doc, 0) catch fallback;
+        var is_simulation = false;
+        const pcr0 = extractPcrFromDoc(doc, 0) catch blk: {
+            is_simulation = true;
+            break :blk fallback;
+        };
         const pcr1 = extractPcrFromDoc(doc, 1) catch fallback;
         const pcr2 = extractPcrFromDoc(doc, 2) catch fallback;
 
@@ -37,6 +45,7 @@ pub const AttestationQuote = struct {
             .pcr2 = pcr2,
             .public_key = public_key,
             .doc = doc,
+            .is_simulation = is_simulation,
         };
     }
 

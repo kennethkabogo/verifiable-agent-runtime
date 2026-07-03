@@ -83,6 +83,7 @@ class BundleHeader:
     pcr2:            bytes   # 48 bytes
     signing_pub:     bytes   # 32 bytes  Ed25519 SessionPub
     attest_doc:      bytes   # raw attestation document bytes
+    sim_flag:        bool    = False  # explicit sim=1 marker (§11)
 
 
 @dataclass
@@ -216,6 +217,7 @@ def parse_bundle_header(line: str) -> BundleHeader:
         pcr2            = _unhex(f.get("pcr2",    "aa" * 48),           "pcr2",            48),
         signing_pub     = _unhex(f["pk"],                               "signing_pub",     32),
         attest_doc      = _unhex(f.get("doc", ""),                      "attest_doc"),
+        sim_flag        = f.get("sim", "0") == "1",
     )
 
 
@@ -559,11 +561,11 @@ def step_2_segment_headers(bundle: Bundle) -> CheckResult:
     for i, seg in enumerate(bundle.segments):
         hdr = seg.header
 
-        # Detect simulation mode: attestation doc is all-0xAA fill or PCRs all-zero
+        # Detect simulation mode: explicit sim=1 marker (§11), all-0xAA mock doc, or all-zero PCRs (legacy)
         doc_is_sim = len(hdr.attest_doc) > 0 and all(b == _SIM_ATTEST_FILL for b in hdr.attest_doc)
         pcr_is_sim = all(b == _SIM_PCR_FILL for b in hdr.pcr0 + hdr.pcr1 + hdr.pcr2)
 
-        if doc_is_sim or pcr_is_sim:
+        if hdr.sim_flag or doc_is_sim or pcr_is_sim:
             sim_mode = True
             notes.append(f"segment {i}: simulation-mode attestation — COSE skipped (§11)")
             computed = hashlib.sha256(hdr.pcr0 + hdr.pcr1 + hdr.pcr2).digest()
@@ -944,15 +946,13 @@ def step_11_temporal_proofs(bundle: Bundle) -> tuple[CheckResult, int, int]:
             K_tp += 1  # optimistically count as attested when crypto unavailable
             continue
 
-        # Derive argon_input = LastEvidenceL1Hash ‖ SessionID ‖ Sequence (u64 LE)
-        # LastEvidenceL1Hash = the stream hash of the packet immediately before this TEMPORAL_PROOF
-        tp_idx   = all_pkts.index(tp)
-        last_ev  = all_pkts[tp_idx - 1] if tp_idx > 0 else None
-        if last_ev is None:
-            issues.append(f"seq={seq}: no preceding packet to derive LastEvidenceL1Hash")
-            continue
+        # Derive argon_input = LastL1Hash ‖ SessionID ‖ Sequence (u64 LE)
+        # LastL1Hash = stream of the packet immediately before the TEMPORAL_PROOF,
+        # or tp.prev_stream when the proof is the first packet in the bundle (§5.7).
+        tp_idx = all_pkts.index(tp)
+        last_stream = all_pkts[tp_idx - 1].stream if tp_idx > 0 else tp.prev_stream
 
-        argon_input = last_ev.stream + session_id + struct.pack("<Q", seq)
+        argon_input = last_stream + session_id + struct.pack("<Q", seq)
         try:
             computed = _argon2_ll.hash_secret_raw(
                 secret      = argon_input,

@@ -36,6 +36,7 @@ const SettlementParams = @import("shell.zig").SettlementParams;
 const AttestationQuote = @import("attestation.zig").AttestationQuote;
 const sealed_state = @import("sealed_state.zig");
 const compute = @import("compute.zig");
+const ExecWorker = @import("exec_worker.zig").ExecWorker;
 
 // ── Shutdown flag (set by signal handler in http_main.zig) ─────────────────
 
@@ -83,6 +84,10 @@ pub const GatewayServer = struct {
     /// X25519 public key used for secret encryption.
     /// Included in GET /session so the bundle_header field is complete.
     enc_pub: [32]u8,
+    /// Pre-forked subprocess that handles POST /exec requests.
+    /// Forked before sandbox.hardenProcess() so it runs outside the seccomp-BPF
+    /// allowlist; the gateway communicates with it over a length-prefixed pipe pair.
+    exec_worker: ExecWorker,
 
     pub fn init(
         allocator: Allocator,
@@ -93,6 +98,7 @@ pub const GatewayServer = struct {
         session_id: [16]u8,
         bootstrap_nonce: [32]u8,
         enc_pub: [32]u8,
+        exec_worker: ExecWorker,
     ) GatewayServer {
         return .{
             .allocator = allocator,
@@ -103,6 +109,7 @@ pub const GatewayServer = struct {
             .session_id = session_id,
             .bootstrap_nonce = bootstrap_nonce,
             .enc_pub = enc_pub,
+            .exec_worker = exec_worker,
         };
     }
 
@@ -525,12 +532,17 @@ fn handleExec(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !v
         };
     }
 
-    // Run the command, fold stdout into the L1 chain, and record exec metadata.
-    const result = server.logger.runAndLog(argv) catch |err| {
+    // Run the command in the pre-forked exec-worker (outside the seccomp sandbox),
+    // then fold stdout into the L1 chain and record exec metadata in the logger.
+    const result = server.exec_worker.run(server.allocator, argv) catch |err| {
         std.log.err("[VAR-gateway] exec failed: {}", .{err});
         return writeError(stream, 500, "exec failed");
     };
     defer result.deinit(server.allocator);
+    server.logger.logExecResult(argv, &result) catch |err| {
+        std.log.err("[VAR-gateway] logExecResult failed: {}", .{err});
+        return writeError(stream, 500, "exec log failed");
+    };
 
     // Base64-encode stdout and stderr for safe JSON embedding.
     const Encoder = std.base64.standard.Encoder;

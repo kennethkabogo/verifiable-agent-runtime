@@ -56,7 +56,10 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 ///      with a warning on older kernels to preserve CI compatibility).
 ///   3. Capabilities: PR_SET_NO_NEW_PRIVS + capset-to-zero.
 ///   4. Seccomp-BPF: strict allowlist — unknown syscalls kill the process.
-pub fn hardenProcess() void {
+/// extra_fds: FDs that are intentionally open beyond 0/1/2 at hardening time
+/// (e.g. exec-worker pipe ends forked before the sandbox).  The audit will
+/// allow these descriptors instead of fataling on them.
+pub fn hardenProcess(extra_fds: []const std.posix.fd_t) void {
     if (comptime builtin.os.tag != .linux) {
         std.log.warn("[sandbox] Non-Linux host — skipping process hardening", .{});
         return;
@@ -65,7 +68,7 @@ pub fn hardenProcess() void {
     // FD audit FIRST: /proc/self/fd must be openable, which requires the
     // filesystem to be accessible.  After installLandlock() all opens are
     // denied, so we cannot perform the audit there.
-    auditFileDescriptors();
+    auditFileDescriptors(extra_fds);
     scrubEnvironment();
 
     installLandlock() catch |err| switch (err) {
@@ -92,7 +95,7 @@ pub fn hardenProcess() void {
 // ---------------------------------------------------------------------------
 
 /// Walk /proc/self/fd and fatal() if any descriptor is open beyond the
-/// expected allowlist {stdin=0, stdout=1, stderr=2}.
+/// expected allowlist {stdin=0, stdout=1, stderr=2} ∪ extra_fds.
 ///
 /// This catches "ghost FDs": parent-process handles, accidentally un-closed
 /// setup resources (e.g. /dev/nsm), or anything else that shouldn't survive
@@ -102,7 +105,7 @@ pub fn hardenProcess() void {
 /// On non-procfs systems (macOS, restricted containers) the open fails and
 /// we skip the audit with a warning rather than fataling — procfs absence
 /// is not itself a security problem.
-fn auditFileDescriptors() void {
+fn auditFileDescriptors(extra_fds: []const std.posix.fd_t) void {
     var proc_fd_dir = std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true }) catch |err| {
         std.log.warn("[sandbox] FD audit skipped (cannot open /proc/self/fd: {})", .{err});
         return;
@@ -127,6 +130,9 @@ fn auditFileDescriptors() void {
 
         if (fd_num == dir_fd) continue;          // the /proc/self/fd dir itself
         if (fd_num == 0 or fd_num == 1 or fd_num == 2) continue; // stdin/stdout/stderr
+        var is_extra = false;
+        for (extra_fds) |efd| { if (fd_num == efd) { is_extra = true; break; } }
+        if (is_extra) continue;
 
         fatal(
             "Ghost FD {d} open at sandbox entry — unexpected descriptor " ++
