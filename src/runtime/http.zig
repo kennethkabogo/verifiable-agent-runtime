@@ -763,10 +763,11 @@ fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
     // Reconstruct the full BUNDLE_HEADER line — identical to what protocol.zig
     // emits over vsock.  Returned here so clients (demo harness, verifier) can
     // pass it directly to verify.py without reconstructing it themselves.
+    const sim_marker: []const u8 = if (server.quote.is_simulation) "sim=1:" else "";
     const bundle_header = try std.fmt.allocPrint(
         server.allocator,
-        "BUNDLE_HEADER:magic=APXB:version=01:session={s}:nonce={s}:enc_pub={s}:QUOTE:pcr0={s}:pcr1={s}:pcr2={s}:pk={s}:doc={s}",
-        .{ sid_h, nonce_h, enc_pub_h, pcr0_h, pcr1_h, pcr2_h, pk_h, doc_h },
+        "BUNDLE_HEADER:magic=APXB:version=01:session={s}:nonce={s}:enc_pub={s}:{s}QUOTE:pcr0={s}:pcr1={s}:pcr2={s}:pk={s}:doc={s}",
+        .{ sid_h, nonce_h, enc_pub_h, sim_marker, pcr0_h, pcr1_h, pcr2_h, pk_h, doc_h },
     );
     defer server.allocator.free(bundle_header);
 
