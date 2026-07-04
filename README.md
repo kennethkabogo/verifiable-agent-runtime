@@ -224,6 +224,25 @@ QUICKSTART.md                   30-minute first-bundle walkthrough
 
 ---
 
+## Independent Verification
+
+Any party that receives a VAR evidence bundle can verify it without trusting the operator:
+
+```bash
+pip install cryptography argon2-cffi cbor2
+python tools/apex_verify.py bundle.log
+```
+
+This runs the normative §8 verification algorithm (Steps 1–12) against the bundle and prints a step-by-step trace. Steps that are not applicable to the bundle type (e.g. simulation COSE, no settlement block) are printed as SKIP with the reason inline.
+
+On success, the tool prints an Execution Compliance Report (ECR) and exits 0.
+
+For the synthetic reference fixture: `python tools/apex_verify.py tests/fixtures/multi_bundle_20260703.log`
+
+See `spec/APEX.md §8` for the full normative verification algorithm.
+
+---
+
 ## License
 
 MIT
