@@ -72,9 +72,9 @@
       "Resource": "*",
       "Condition": {
         "StringEqualsIgnoreCase": {
-          "kms:RecipientAttestation:PCR0": "c70b4c9a1abfe385b5ef4d54453f93e470d2cb929497d5225dfb21c19758c216e1765963f819a0fa88efa7994181a975",
+          "kms:RecipientAttestation:PCR0": "5be726791c959b9a45dc9700f69cd53c589efb1832685656ac3980da029a242b64d67dd5e955538febfe167ebd2bc3fa",
           "kms:RecipientAttestation:PCR1": "4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493",
-          "kms:RecipientAttestation:PCR2": "edad79708717e0404fe7bf3781c7749fea6a30e6ad056632ca060a7f23270cec16d3f526c0839685e6d6fd2e331be034"
+          "kms:RecipientAttestation:PCR2": "50890a2c13fe09669c752bf4311d631c048d830457ff9c72e2dfdfecd4b5936d0e5ef217ab60f936d61200cf7f2fff59"
         }
       }
     }
