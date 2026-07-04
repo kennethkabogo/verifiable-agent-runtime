@@ -276,10 +276,13 @@ hardware was **~170 ms** (median 169.8 ms, mean 169.4 ms, min 167.1 ms, max 172.
 n=5 runs on the host instance sharing physical CPUs with the enclave). Because 170 ms
 falls below the 200 ms practical security floor and bumping `t` would only increase
 wall-clock time without increasing the memory footprint an attacker must allocate, the
-reference implementation uses **`m=131072` (128 MiB)**, which projects to ~340 ms on the
-same hardware. This directly strengthens the memory-hardness property Argon2id was
-designed for. Downstream integrators SHOULD treat 400 ms as the practical upper bound
-per checkpoint on this hardware class; if measured latency significantly exceeds 400 ms,
+reference implementation uses **`m=131072` (128 MiB)**, measured at ~445 ms median
+(mean 446.65 ms, p50 444.81 ms, p95 458.69 ms; n=7 runs inside a production-mode
+enclave with real NSM attestation enabled) — enclave vCPUs have reduced memory
+bandwidth relative to the host, so actual latency exceeds the host-only projection.
+This directly strengthens the memory-hardness property Argon2id was designed for.
+Downstream integrators SHOULD treat 500 ms as the practical upper bound per checkpoint
+on this hardware class; if measured latency significantly exceeds 500 ms,
 params MAY be adjusted within the normative floor, but such bundles MUST be flagged as
 non-standard-floor in a future registry extension.
 
