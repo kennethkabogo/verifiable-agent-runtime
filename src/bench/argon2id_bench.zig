@@ -3,7 +3,7 @@ const argon2 = std.crypto.pwhash.argon2;
 
 // Floor params from APEX §5.7
 const T_COST: u32 = 3;
-const M_COST: u32 = 65536; // 64 MiB
+const M_COST: u32 = 131072; // 128 MiB — production value post-benchmark
 const P_COST: u32 = 1;
 const DK_LEN: usize = 32;
 const DEFAULT_ITERS: usize = 7;

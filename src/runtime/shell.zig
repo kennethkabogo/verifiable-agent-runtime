@@ -6,7 +6,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const argon2 = std.crypto.pwhash.argon2;
 
 // ── TEMPORAL_PROOF constants (§5.7) ───────────────────────────────────────────
-const TEMPORAL_PROOF_M: u32 = 65536; // 64 MiB — RFC 9106 interactive floor
+const TEMPORAL_PROOF_M: u32 = 131072; // 128 MiB — benchmarked on Nitro; floor is 65536
 const TEMPORAL_PROOF_T: u32 = 3;     // iterations — RFC 9106 interactive floor
 const TEMPORAL_PROOF_P: u32 = 1;     // parallelism fixed at 1 (sequential property)
 

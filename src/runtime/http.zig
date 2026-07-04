@@ -23,7 +23,7 @@
 ///   POST /settle         {"escrow_id":"<32hex>","amount":"…","currency":"…","recipient":"<128hex>"}
 ///                                                            → 200 {"settlement":"SETTLEMENT:…"}
 ///   GET  /health                                             → 200 {"status":"healthy"}
-///   GET  /benchmark                                          → 200 {"params":{"m":65536,"t":3,"p":1},"n":7,"mean_ms":…,"p50_ms":…,"p95_ms":…,"min_ms":…,"max_ms":…}
+///   GET  /benchmark                                          → 200 {"params":{"m":131072,"t":3,"p":1},"n":7,"mean_ms":…,"p50_ms":…,"p95_ms":…,"min_ms":…,"max_ms":…}
 ///
 const std = @import("std");
 const mem = std.mem;
@@ -895,7 +895,7 @@ fn handleSettle(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) 
 // ── JSON helpers ───────────────────────────────────────────────────────────
 
 // Argon2id floor params from APEX §5.7
-const BENCH_M: u32 = 65536;
+const BENCH_M: u32 = 131072;
 const BENCH_T: u32 = 3;
 const BENCH_P: u32 = 1;
 const BENCH_N: usize = 7;

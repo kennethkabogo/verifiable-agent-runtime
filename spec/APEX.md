@@ -271,13 +271,17 @@ adding cores. A TEMPORAL_PROOF with `p ≠ 1` MUST be rejected by the verifier a
 
 **Performance note.** Implementers SHOULD benchmark Argon2id at the floor parameters
 (`m=65536, t=3, p=1`) inside their TEE platform before finalising deployment params.
-On AWS Nitro Enclave c5.xlarge vCPUs (2 vCPU, 512 MiB), measured latency at the floor
-is **~240 ms** (mean 239.81 ms, p50 241.22 ms, p95 247.09 ms; n=7 runs inside a
-production-mode enclave with real NSM attestation enabled). Downstream integrators SHOULD
-treat 250 ms as the practical upper bound per checkpoint on this hardware class.
-If measured latency significantly exceeds 250 ms at the floor on a given TEE platform,
-the Argon2id params MAY be adjusted downward toward an implementation-specific minimum,
-but such bundles MUST be flagged as non-standard-floor in a future registry extension.
+On AWS Nitro Enclave (2 vCPU, 512 MiB), measured latency at the floor on 2026-07-04
+hardware was **~170 ms** (median 169.8 ms, mean 169.4 ms, min 167.1 ms, max 172.9 ms;
+n=5 runs on the host instance sharing physical CPUs with the enclave). Because 170 ms
+falls below the 200 ms practical security floor and bumping `t` would only increase
+wall-clock time without increasing the memory footprint an attacker must allocate, the
+reference implementation uses **`m=131072` (128 MiB)**, which projects to ~340 ms on the
+same hardware. This directly strengthens the memory-hardness property Argon2id was
+designed for. Downstream integrators SHOULD treat 400 ms as the practical upper bound
+per checkpoint on this hardware class; if measured latency significantly exceeds 400 ms,
+params MAY be adjusted within the normative floor, but such bundles MUST be flagged as
+non-standard-floor in a future registry extension.
 
 ---
 
@@ -1397,6 +1401,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.7.1 | §5.7 performance note updated with measured Argon2id latency on current AWS Nitro hardware: ~170 ms (median 169.8 ms, n=5) at floor params m=65536 t=3 p=1; reference implementation bumped to m=131072 (128 MiB) to strengthen memory-hardness property and maintain margin above the 200 ms security floor; 400 ms practical upper bound documented; multi-segment reference fixture regenerated with m=131072 (tests/fixtures/multi_bundle_20260704.log) |
 | 2.7.0 | §8 Step 12 added: Evidence Coverage Ratio (ECR) — verifier-computed metric reporting the fraction of hibernate boundaries with a valid TEMPORAL_PROOF; MUST NOT be reported before BundleSeal verification; ECR = K_tp / K (K = 0 → 1.0); settlement precondition formalized; §14.9.12 ECR test vector (K=1, K_tp=1, ECR=1.0); §17 Conformance updated to Steps 1–12 |
 | 2.6.1 | TEMPORAL_PROOF (0x09) signature scope magic renamed VART→APXP; all §14.9 fixture vectors updated (Sig[3], TemporalProofHash, TerminalDigest, BundleHash, SealSig, SettlementSig); gen_fixture_14n.py updated to APXP; shell.zig scope comment updated |
 | 2.5.0 | §14.9 two-segment session test vectors added: SESSION_START (0x06) 161-byte APXE scope, TEMPORAL_PROOF (0x09) 137-byte APXP scope with Argon2id SWF, SESSION_RESUME (0x07) 93-byte APXS scope, four-packet TerminalDigest, two-keypair bundle seal; gen_fixture_14n.py generation script; §14.1 "Planned" stub replaced with §14.9 reference |
