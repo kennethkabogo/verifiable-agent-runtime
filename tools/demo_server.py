@@ -288,6 +288,22 @@ class DemoHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_HEAD(self) -> None:
+        if self.path == "/":
+            try:
+                size = _DEMO_HTML_PATH.stat().st_size
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_GET(self) -> None:
         if self.path == "/":
             self._serve_demo_html()
