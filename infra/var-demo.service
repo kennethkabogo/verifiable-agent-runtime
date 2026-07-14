@@ -1,0 +1,52 @@
+# /etc/systemd/system/var-demo.service
+#
+# Systemd unit for the VAR browser demo server.
+#
+# Installation:
+#
+#   1. Copy unit file:
+#        sudo cp /home/ec2-user/VAR/infra/var-demo.service /etc/systemd/system/
+#
+#   2. Reload and enable:
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now var-demo
+#
+#   3. Check logs:
+#        sudo journalctl -u var-demo -f
+#
+# The demo server binds to 127.0.0.1:8080 and is exposed externally via
+# the Cloudflare tunnel (cloudflared). It proxies compute requests through
+# the vsock bridge (127.0.0.1:8765) into the Nitro enclave, assembles the
+# APEX bundle, and runs the 12-step apex_verify.py verifier in-process.
+
+[Unit]
+Description=VAR browser demo server
+Documentation=https://github.com/kennethkabogo/verifiable-agent-runtime
+After=network-online.target var-enclave.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/VAR/tools
+
+ExecStart=/usr/bin/python3 /home/ec2-user/VAR/tools/demo_server.py \
+    --port 8080 \
+    --bridge http://127.0.0.1:8765
+
+Restart=always
+RestartSec=5s
+
+TimeoutStartSec=15s
+TimeoutStopSec=10s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=var-demo
+
+[Install]
+WantedBy=multi-user.target
