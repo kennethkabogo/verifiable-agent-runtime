@@ -44,9 +44,65 @@ pub fn run(
         };
     }
 
+    // Document hash verification.
+    // Inputs: {"document": "<text>", "expected_hash": "<64-char lowercase hex>"}
+    // Output: {"match":<bool>,"computed_hash":"<hex>","expected_hash":"<hex>"}
+    //
+    // The operator can see the document and the expected hash going in, and the
+    // match result coming out — but cannot forge a "match:true" output without
+    // running this exact EIF, because the evidence signature is produced by the
+    // enclave's KMS-gated signing key. The result is operator-untrusted.
+    if (std.mem.eql(u8, fn_name, "verify")) {
+        return runVerify(allocator, inputs_json, inputs_hash);
+    }
+
     // Default: output = hex(inputs_hash).
     // Deterministic and verifiable; replace by adding a named branch above.
     const hex_buf = std.fmt.bytesToHex(inputs_hash, .lower);
     const output = try allocator.dupe(u8, &hex_buf);
+    return ComputeResult{ .output = output, .inputs_hash = inputs_hash };
+}
+
+fn runVerify(
+    allocator: std.mem.Allocator,
+    inputs_json: []const u8,
+    inputs_hash: [32]u8,
+) !ComputeResult {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, inputs_json, .{});
+    defer parsed.deinit();
+
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.InputsNotObject,
+    };
+
+    const doc_val = obj.get("document") orelse return error.MissingDocument;
+    const exp_val = obj.get("expected_hash") orelse return error.MissingExpectedHash;
+
+    const document = switch (doc_val) {
+        .string => |s| s,
+        else => return error.DocumentNotString,
+    };
+    const expected_hex = switch (exp_val) {
+        .string => |s| s,
+        else => return error.ExpectedHashNotString,
+    };
+
+    if (expected_hex.len != 64) return error.InvalidExpectedHashLength;
+
+    var doc_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(document, &doc_hash, .{});
+    const computed_hex = std.fmt.bytesToHex(doc_hash, .lower);
+
+    const match = std.ascii.eqlIgnoreCase(&computed_hex, expected_hex);
+
+    const output = try std.fmt.allocPrint(allocator,
+        \\{{"match":{s},"computed_hash":"{s}","expected_hash":"{s}"}}
+    , .{
+        if (match) "true" else "false",
+        computed_hex,
+        expected_hex,
+    });
+
     return ComputeResult{ .output = output, .inputs_hash = inputs_hash };
 }
