@@ -150,7 +150,7 @@ def _evidence_line(pkt: dict) -> str:
     )
 
 
-def run_enclave_request(user_input: str, fn: str = "echo") -> dict[str, Any]:
+def run_enclave_request(inputs: dict, fn: str = "echo") -> dict[str, Any]:
     """Drive one full round trip: compute → collect evidence → seal → verify.
 
     Returns a JSON-serialisable dict describing the compute result, the
@@ -159,7 +159,7 @@ def run_enclave_request(user_input: str, fn: str = "echo") -> dict[str, Any]:
     session = _bridge_get("/session")
     header_line = session["bundle_header"]
 
-    compute = _bridge_post("/compute", {"fn": fn, "inputs": {"text": user_input}})
+    compute = _bridge_post("/compute", {"fn": fn, "inputs": inputs})
     latest_seq = compute["evidence"]["sequence"]
 
     evidence_range = _bridge_get(f"/evidence?from=1&to={latest_seq}")
@@ -347,18 +347,28 @@ class DemoHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "invalid JSON body"})
             return
 
-        user_input = body.get("input", "")
-        if not isinstance(user_input, str) or not user_input.strip():
-            self._send_json(400, {"ok": False, "error": "\"input\" must be a non-empty string"})
-            return
-
         fn = body.get("fn", "echo")
         if not isinstance(fn, str):
             self._send_json(400, {"ok": False, "error": "\"fn\" must be a string"})
             return
 
+        # Callers may pass a structured "inputs" dict for functions like
+        # "verify" that need more than a single text field. Fall back to
+        # wrapping the legacy "input" string as {"text": <value>}.
+        if "inputs" in body:
+            inputs = body["inputs"]
+            if not isinstance(inputs, dict):
+                self._send_json(400, {"ok": False, "error": "\"inputs\" must be an object"})
+                return
+        else:
+            user_input = body.get("input", "")
+            if not isinstance(user_input, str) or not user_input.strip():
+                self._send_json(400, {"ok": False, "error": "\"input\" must be a non-empty string"})
+                return
+            inputs = {"text": user_input}
+
         try:
-            result = run_enclave_request(user_input, fn=fn)
+            result = run_enclave_request(inputs, fn=fn)
             self._send_json(200, result)
         except BridgeError as exc:
             self._send_json(502, {"ok": False, "stage": exc.stage, "error": exc.message})
