@@ -1,0 +1,14 @@
+{
+  "name": "qvac-payment-demo",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Qvac agent makes a payment decision locally. VAR seals it in a Nitro enclave. The receipt is hardware-attested.",
+  "scripts": {
+    "agent": "node agent.mjs",
+    "attest": "node attest.mjs",
+    "demo": "node demo.mjs"
+  },
+  "dependencies": {
+    "@qvac/sdk": "^0.15.0"
+  }
+}
