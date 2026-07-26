@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.7.0
+## Specification v2.8.0
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -77,17 +77,40 @@ Emitted once per session at session start.
 | SessionID | `[16]u8` | UUID v4 — identifies the session across segments |
 | AgentID | `[32]u8` | SHA-256 of the enclave image file (EIF or equivalent) |
 | CreatedAt | `u64` LE | Nanoseconds since Unix epoch (UTC) |
-| BootstrapNonce | `[32]u8` | `SHA-256(AttestationDoc ‖ SessionID)` — anchors the L1 chain |
+| BootstrapNonce | `[32]u8` | See §3.1 — anchors the L1 chain to hardware attestation and constraint commitment |
+| AllowedFunctionsHash | `[32]u8` | `SHA-256(manifest_bytes)` for constrained sessions (§3.2, §15); zero-filled for unconstrained sessions |
 
 ### 3.1 Bootstrap Nonce
 
-The Bootstrap Nonce is the genesis state of the L1 hash chain. It MUST be derived inside the enclave as:
+The Bootstrap Nonce is the genesis state of the L1 hash chain. It MUST be derived inside the enclave before any agent call is processed.
 
+**v2.8+ (constrained and unconstrained):**
+```
+BootstrapNonce = SHA-256(AttestationDoc ‖ SessionID ‖ AllowedFunctionsHash)
+```
+
+**v2.7 and below (legacy):**
 ```
 BootstrapNonce = SHA-256(AttestationDoc ‖ SessionID)
 ```
 
-This binds the initial chain state to a specific hardware attestation and a specific session UUID. An auditor who independently recomputes this value confirms that the chain originated inside the correct enclave.
+Verifiers MUST select the derivation formula based on the bundle's SpecVersion MINOR field. Applying the v2.8 formula to a v2.7 bundle will produce a different nonce and MUST cause Step 3 of the verification algorithm to fail; this is correct behavior, not a bug.
+
+For unconstrained v2.8+ bundles, AllowedFunctionsHash is zero-filled (`0x00 × 32`). The nonce is still derived with the zero-filled value, binding the unconstrained declaration to hardware at session origin.
+
+This construction binds the initial chain state to a specific hardware attestation, a specific session UUID, and the declared function constraint set — all in a single value that anchors the entire L1 chain. An auditor who independently recomputes this value confirms that the constraint commitment was locked inside the enclave before any agent action occurred.
+
+### 3.2 AllowedFunctions Commitment
+
+The `AllowedFunctionsHash` field declares the set of functions the enclave will accept at dispatch time. It is committed at session initialization — before the first agent call — and is included in the BootstrapNonce derivation (§3.1), making it immutable for the life of the session.
+
+A non-zero `AllowedFunctionsHash` places the bundle in **constrained mode**. The full protocol is defined in §15. In summary:
+
+- The enclave MUST reject any dispatch call whose `fn` value does not appear in the registered manifest.
+- A verifier in constrained mode MUST confirm that every recorded function call appears in the manifest corresponding to `AllowedFunctionsHash`.
+- The enclave cannot selectively enforce the allowlist: the constraint is baked into the BootstrapNonce, so a bundle produced with a different manifest would fail Step 3 regardless of what the header claims.
+
+A zero-filled `AllowedFunctionsHash` places the bundle in unconstrained mode. This is the v2.7 behavioral equivalent and is valid for v2.8+ bundles. Verifiers MAY emit a warning on unconstrained bundles but MUST NOT fail verification on this basis alone.
 
 ---
 
@@ -336,10 +359,23 @@ For each segment:
 5. Assert SessionPub is present in AttestationDoc `public_key` field
 
 ### Step 3 — Reconstruct the Bootstrap Nonce
+
+Select the derivation formula based on SpecVersion:
+
+- If SpecVersion MINOR >= 8 (v2.8+): `expected = SHA-256(Segment[0].AttestationDoc ‖ SessionID ‖ BundleHeader.AllowedFunctionsHash)`
+- If SpecVersion MINOR < 8 (v2.7 and below): `expected = SHA-256(Segment[0].AttestationDoc ‖ SessionID)`
+
 ```
-expected = SHA-256(Segment[0].AttestationDoc ‖ SessionID)
 assert expected == BundleHeader.BootstrapNonce
 ```
+
+### Step 3.5 — Verify AllowedFunctions commitment (v2.8+ constrained bundles only)
+
+Skip this step if SpecVersion MINOR < 8 or if `BundleHeader.AllowedFunctionsHash` is zero-filled.
+
+1. Obtain the Function Manifest for this session (out-of-band or from a manifest registry; transport is not defined by this spec).
+2. Assert `SHA-256(manifest_bytes) == BundleHeader.AllowedFunctionsHash`.
+3. For each EXEC packet in the Evidence Chain, extract the recorded function name and assert it appears in the manifest. Any EXEC packet whose function name is absent from the manifest MUST cause verification to fail.
 
 ### Step 4 — Verify chain continuity
 ```
@@ -585,6 +621,7 @@ Simulation-mode bundles MUST be clearly marked. An APEX verifier MUST reject sim
 | Short CBOR slice | Verifiers MUST bounds-check all CBOR bstr reads; a truncated document MUST fail, not yield a short slice |
 | ECDSA signature truncation | Settlement signatures MUST be validated for correct length before r/s extraction |
 | Input-channel attestation (known gap) | APEX attests the output side of process attestation — what the agent produced. Input-channel attestation (verifying that inputs were not synthetically replayed) is out of scope for v2.x and is a known gap for adversarial input replay on owned hardware. |
+| Indirect prompt injection via external content | A malicious document, repository, or web page consumed by the agent may embed instructions targeting the agent's reasoning. APEX records what the agent decided with tamper-evidence; it does not prevent a poisoned input from producing a bad decision. Constrained dispatch (§15) is the architectural mitigation: if the agent's action surface is limited to registered functions, injected instructions cannot invoke capabilities outside the manifest regardless of how the agent was manipulated. Constrained mode reduces the blast radius of a successful injection to the declared function set. |
 | Stale sealed-state replay under partition | An attacker forces a crash during a network partition (S_D→S_F in the session lifecycle), then replays a stale sealed checkpoint on RESUME. The KMS will unseal it (the PCR measurement is valid). Mitigation: the `TEMPORAL_PROOF` packet (`0x09`) at each hibernate boundary bounds the replay window to the Argon2id wall-clock cost — an attacker cannot replay a stale checkpoint faster than the memory-hard function allows. **Conformance caveat:** mitigation requires `p = 1` enforcement at Step 11. A non-conformant implementation that accepts `p > 1` reduces the sequential work bound proportionally. Full KMS-layer anti-replay (rejecting any RESUME whose sealed sequence number was already seen) remains a defence-in-depth complement and a v3.x candidate. |
 
 ---
@@ -1229,7 +1266,95 @@ A hypothetical two-segment bundle identical to §14.9 but with the TEMPORAL_PROO
 
 ---
 
-## 15. Settlement Block Test Vectors
+## 15. Constrained Dispatch Protocol
+
+### 15.1 Overview
+
+APEX bundles operate in one of two modes, determined by the `AllowedFunctionsHash` field in the Bundle Header (§3.2):
+
+- **Unconstrained mode** (`AllowedFunctionsHash` zero-filled): the enclave attests what the agent did. The agent's action surface is defined outside the bundle. This is the v2.7 behavioral equivalent and remains valid for v2.8+ bundles.
+- **Constrained mode** (`AllowedFunctionsHash` non-zero): the agent's action surface is a first-class commitment in the bundle. The enclave enforces the allowlist at dispatch time. A verifier can confirm not only what the agent did, but that it was physically incapable of calling functions outside the declared set during this session.
+
+The security guarantee of constrained mode: given a valid v2.8+ bundle with non-zero `AllowedFunctionsHash`, a verifier can assert that any function call outside the manifest would have been rejected by the enclave before producing an evidence packet — not merely that no such call was recorded.
+
+### 15.2 Function Manifest
+
+The Function Manifest is the canonical description of the allowlist. It is a UTF-8 document with one function name per line, sorted in lexicographic (byte) order, with a trailing newline. No blank lines, no comments, no whitespace padding around names.
+
+Example:
+```
+deny
+pay
+sign
+verify
+```
+
+The `AllowedFunctionsHash` in the Bundle Header MUST equal `SHA-256(manifest_bytes)` where `manifest_bytes` is the UTF-8 encoding of the complete manifest.
+
+Function names MUST be non-empty, MUST consist only of printable ASCII characters, and MUST NOT contain whitespace. Maximum name length is 64 bytes. A manifest with duplicate names, names that violate these constraints, or names not in sorted order MUST be rejected by verifiers.
+
+### 15.3 Enclave Enforcement (Normative)
+
+At session initialization, before processing any agent call, the enclave MUST:
+
+1. Receive or derive the Function Manifest for this session.
+2. Compute `AllowedFunctionsHash = SHA-256(manifest_bytes)`.
+3. Include `AllowedFunctionsHash` in the BootstrapNonce derivation (§3.1). This locks the constraint commitment to the hardware attestation before the first agent action.
+4. Emit `AllowedFunctionsHash` in the Bundle Header.
+
+During session execution, the enclave MUST:
+
+1. Reject any dispatch call whose `fn` value does not appear in the manifest. Rejected calls MUST NOT produce an evidence packet and MUST NOT advance the L1 hash chain.
+2. Log rejected calls to stderr. The enclave MAY terminate the session on a rejected call at operator discretion; it MUST NOT silently succeed.
+
+The enclave cannot selectively enforce the allowlist. Because `AllowedFunctionsHash` is committed in the BootstrapNonce (step 3), a bundle produced with a different manifest — or with the enforcement bypassed — would fail Step 3 of the verification algorithm regardless of what the header claims.
+
+### 15.4 Verifier Requirements
+
+**Unconstrained bundles** (zero-filled `AllowedFunctionsHash`): verifiers MUST NOT fail verification solely because no constraint is declared. A verifier MAY emit a warning: `UNCONSTRAINED_SESSION`.
+
+**Constrained bundles** (non-zero `AllowedFunctionsHash`): at Step 3.5 of the verification algorithm (§8), the verifier MUST:
+
+1. Obtain the Function Manifest. Transport is not defined by this spec; acceptable sources include: an inline manifest block appended to the bundle (see §15.5), a manifest registry keyed by `AllowedFunctionsHash`, or out-of-band delivery.
+2. Assert `SHA-256(manifest_bytes) == BundleHeader.AllowedFunctionsHash`. A mismatch MUST cause verification to fail.
+3. For each EXEC packet in the Evidence Chain, assert the recorded function name appears in the manifest. An EXEC packet with an unregistered function name MUST cause verification to fail.
+
+### 15.5 Manifest Block (Optional)
+
+A manifest MAY be embedded in the bundle as a Manifest Block, positioned immediately after the Bundle Header and before the first Segment Header. Embedding the manifest makes the bundle self-contained for verification.
+
+| Field | Type | Description |
+|:---|:---|:---|
+| Magic | `[4]u8` | `"APXM"` (`0x41 0x50 0x58 0x4D`) |
+| ManifestLen | `u32` LE | Byte length of the manifest |
+| Manifest | `[ManifestLen]u8` | UTF-8 function manifest (§15.2) |
+
+A verifier that encounters an `APXM` block MUST verify it against `BundleHeader.AllowedFunctionsHash` before trusting its contents. The block is informational — the hash in the header is authoritative.
+
+### 15.6 Trust Model Comparison
+
+| Property | Unconstrained (v2.7 / v2.8 zero-hash) | Constrained (v2.8 non-zero hash) |
+|:---|:---|:---|
+| Tamper-evident record of what the agent did | ✓ | ✓ |
+| Operator cannot modify the record after the fact | ✓ | ✓ |
+| Any third party can verify the record independently | ✓ | ✓ |
+| Declared function set committed in hardware at session start | — | ✓ |
+| Agent cannot call functions outside the manifest | — | ✓ (enforced inside enclave) |
+| Verifier can confirm agent operated within declared constraints | — | ✓ |
+| Indirect prompt injection blast radius bounded by manifest | — | ✓ |
+
+### 15.7 Relationship to Indirect Prompt Injection
+
+A constrained session does not prevent a malicious input from influencing an agent's reasoning — it bounds what the agent can do regardless of how it was influenced. An agent that processes a hostile document and is manipulated into attempting `fn: exfiltrate` will have that call rejected at the enclave boundary if `exfiltrate` is not in the manifest, and the rejection is not committed to the evidence chain.
+
+This means:
+- The evidence chain for a constrained session is a complete record of all *successful* function calls — by construction, every recorded call was within the declared allowlist.
+- The absence of a function call from the evidence chain does not prove the agent never attempted it; it proves only that any attempt was rejected.
+- For most agentic workflows, bounding the action surface is the correct security primitive. Detection of injection attempts is a separate problem and out of scope for this spec.
+
+---
+
+## 16. Settlement Block Test Vectors
 
 ### §15.1 Scope
 
@@ -1400,18 +1525,19 @@ inputs plus the §15.2 additional inputs:
 
 ---
 
-## 16. Version History
+## 17. Version History
 
 | Version | Changes |
 |:---|:---|
+| 2.8.0 | §3 Bundle Header gains `AllowedFunctionsHash` field; §3.1 BootstrapNonce derivation updated (v2.8+ includes AllowedFunctionsHash); §3.2 AllowedFunctions Commitment added; §8 Step 3 updated for version-aware nonce derivation; §8 Step 3.5 added (constrained bundle verification); §12 indirect prompt injection row added; §15 Constrained Dispatch Protocol added (§15.1–§15.7); §16 Settlement Block Test Vectors renumbered from §15; §18 Conformance updated |
 | 2.7.1 | §5.7 performance note updated with measured Argon2id latency on current AWS Nitro hardware: ~170 ms (median 169.8 ms, n=5) at floor params m=65536 t=3 p=1; reference implementation bumped to m=131072 (128 MiB) to strengthen memory-hardness property and maintain margin above the 200 ms security floor; 400 ms practical upper bound documented; multi-segment reference fixture regenerated with m=131072 (tests/fixtures/multi_bundle_20260704.log) |
-| 2.7.0 | §8 Step 12 added: Evidence Coverage Ratio (ECR) — verifier-computed metric reporting the fraction of hibernate boundaries with a valid TEMPORAL_PROOF; MUST NOT be reported before BundleSeal verification; ECR = K_tp / K (K = 0 → 1.0); settlement precondition formalized; §14.9.12 ECR test vector (K=1, K_tp=1, ECR=1.0); §17 Conformance updated to Steps 1–12 |
+| 2.7.0 | §8 Step 12 added: Evidence Coverage Ratio (ECR) — verifier-computed metric reporting the fraction of hibernate boundaries with a valid TEMPORAL_PROOF; MUST NOT be reported before BundleSeal verification; ECR = K_tp / K (K = 0 → 1.0); settlement precondition formalized; §14.9.12 ECR test vector (K=1, K_tp=1, ECR=1.0); §18 Conformance updated to Steps 1–12 |
 | 2.6.1 | TEMPORAL_PROOF (0x09) signature scope magic renamed VART→APXP; all §14.9 fixture vectors updated (Sig[3], TemporalProofHash, TerminalDigest, BundleHash, SealSig, SettlementSig); gen_fixture_14n.py updated to APXP; shell.zig scope comment updated |
 | 2.5.0 | §14.9 two-segment session test vectors added: SESSION_START (0x06) 161-byte APXE scope, TEMPORAL_PROOF (0x09) 137-byte APXP scope with Argon2id SWF, SESSION_RESUME (0x07) 93-byte APXS scope, four-packet TerminalDigest, two-keypair bundle seal; gen_fixture_14n.py generation script; §14.1 "Planned" stub replaced with §14.9 reference |
 | 2.4.1 | §5.7 performance note updated with measured Argon2id latency on AWS Nitro c5.xlarge: ~240 ms (mean 239.81 ms, p50 241.22 ms, p95 247.09 ms) at floor params m=65536 t=3 p=1; 250 ms practical upper bound documented; §14 TEMPORAL_PROOF fixture note updated (benchmark settled, fixture unblocked) |
-| 2.4.0 | ActionType `0x09 TEMPORAL_PROOF` added (§5.4); §5.7 TEMPORAL_PROOF packet payload schema (ArgonOutput, m, t, p); normative parameter floor m≥65536, t≥3, p=1 fixed; §9.5 TEMPORAL_PROOF emission ordering at hibernate boundaries; §10.2 sealed payload extended with optional `TemporalProofHash`; §8 Step 11 checkpoint-local verifier rules (Rule A/B, settlement escalation); §12 stale sealed-state replay moved from known gap to mitigated with conformance caveat; §17 Conformance updated |
-| 2.3.0 | §9 Hibernate/Resume expanded to four subsections covering crash recovery (§9.2), SESSION_RESUME first-packet requirement (§9.3), and verifier rules (§9.4); §10 Sealed State expanded with sealed payload field table (§10.2) and checkpoint timing (§10.3); §8 Step 10 added for multi-segment boundary verification; §17 Conformance updated; input-channel attestation gap documented in §12 |
-| 2.2.0 | §15 Settlement Block Test Vectors — two-packet session, TerminalDigest over multiple signatures, 88-byte APXT settlement signature scope; §13 roadmap marked complete |
+| 2.4.0 | ActionType `0x09 TEMPORAL_PROOF` added (§5.4); §5.7 TEMPORAL_PROOF packet payload schema (ArgonOutput, m, t, p); normative parameter floor m≥65536, t≥3, p=1 fixed; §9.5 TEMPORAL_PROOF emission ordering at hibernate boundaries; §10.2 sealed payload extended with optional `TemporalProofHash`; §8 Step 11 checkpoint-local verifier rules (Rule A/B, settlement escalation); §12 stale sealed-state replay moved from known gap to mitigated with conformance caveat; §18 Conformance updated |
+| 2.3.0 | §9 Hibernate/Resume expanded to four subsections covering crash recovery (§9.2), SESSION_RESUME first-packet requirement (§9.3), and verifier rules (§9.4); §10 Sealed State expanded with sealed payload field table (§10.2) and checkpoint timing (§10.3); §8 Step 10 added for multi-segment boundary verification; §18 Conformance updated; input-channel attestation gap documented in §12 |
+| 2.2.0 | §16 Settlement Block Test Vectors — two-packet session, TerminalDigest over multiple signatures, 88-byte APXT settlement signature scope; §13 roadmap marked complete |
 | 2.1.0 | §14 Test Vectors — fully-worked single-packet session with known synthetic inputs |
 | 2.0.0 | APEX spec. New magic bytes, named action types, Settlement Block, Bundle Seal, strict unknown-type rejection, grapheme cluster correction |
 | 1.5 | VAR evidence_spec: CBOR map walk for PCR extraction, CBOR bounds check, session_pub_cert |
@@ -1422,7 +1548,7 @@ inputs plus the §15.2 additional inputs:
 
 ---
 
-## 17. Conformance
+## 18. Conformance
 
 An implementation is **APEX-compliant** if it:
 
@@ -1434,8 +1560,9 @@ An implementation is **APEX-compliant** if it:
 6. Writes a sealed checkpoint after each EVIDENCE emission (§10.3) and emits SESSION_RESUME as the first packet of every resumed segment (§9.3)
 7. Emits a `TEMPORAL_PROOF` packet (`0x09`) immediately before each sealed checkpoint write at hibernate boundaries, with `p = 1`, `m ≥ 65536`, and `t ≥ 3` (§9.5)
 8. Includes `TemporalProofHash` in the sealed payload whenever a conformant `TEMPORAL_PROOF` was emitted for that checkpoint (§10.2)
+9. (v2.8+ constrained mode) Locks `AllowedFunctionsHash` in the BootstrapNonce before processing any agent call, rejects dispatch calls to unregistered functions, and does not produce evidence packets for rejected calls (§15.3)
 
-A verifier is **APEX-compliant** if it implements all Steps 1–12 and correctly handles multi-segment sessions per §9.4 and §9.5.
+A verifier is **APEX-compliant** if it implements all Steps 1–12 (including Step 3.5 for v2.8+ constrained bundles) and correctly handles multi-segment sessions per §9.4 and §9.5.
 
 ---
 
