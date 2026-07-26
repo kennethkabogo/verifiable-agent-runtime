@@ -84,6 +84,7 @@ class BundleHeader:
     signing_pub:     bytes   # 32 bytes  Ed25519 SessionPub
     attest_doc:      bytes   # raw attestation document bytes
     sim_flag:        bool    = False  # explicit sim=1 marker (§11)
+    created_at:      int     = 0     # nanoseconds since Unix epoch (0 = field absent)
 
 
 @dataclass
@@ -218,6 +219,7 @@ def parse_bundle_header(line: str) -> BundleHeader:
         signing_pub     = _unhex(f["pk"],                               "signing_pub",     32),
         attest_doc      = _unhex(f.get("doc", ""),                      "attest_doc"),
         sim_flag        = f.get("sim", "0") == "1",
+        created_at      = int(f["created_at"]) if "created_at" in f else 0,
     )
 
 
@@ -606,6 +608,59 @@ def step_3_bootstrap_nonce(bundle: Bundle) -> CheckResult:
                      f"MISMATCH\n  expected : {expected.hex()}\n  got      : {hdr.bootstrap_nonce.hex()}")
     return _pass("Step 3 Bootstrap Nonce",
                  f"SHA-256(doc ‖ session_id) = {expected.hex()[:16]}…  matches header.nonce")
+
+
+def step_3_6_attestation_timestamp(bundle: Bundle, max_skew_ns: int = 30_000_000_000) -> CheckResult:
+    """Step 3.6 — Verify Attestation Timestamp (§8).
+
+    Checks Segment[0].AttestationDoc.timestamp (TEE-vendor-signed, ms) against
+    BundleHeader.CreatedAt (ns). Only Segment[0] is checked — resumed segments
+    carry later attestations that legitimately post-date CreatedAt.
+    """
+    hdr = bundle.segments[0].header
+
+    doc_is_sim = len(hdr.attest_doc) > 0 and all(b == _SIM_ATTEST_FILL for b in hdr.attest_doc)
+    if hdr.sim_flag or doc_is_sim:
+        return _skip("Step 3.6 Attestation Timestamp", "simulation mode — timestamp check skipped (§11)")
+
+    if hdr.created_at == 0:
+        return _skip("Step 3.6 Attestation Timestamp", "BundleHeader.CreatedAt absent — bundle predates this field")
+
+    if not _CBOR2:
+        return _skip("Step 3.6 Attestation Timestamp", "cbor2 not installed — pip install cbor2")
+
+    try:
+        cose = _cbor2.loads(hdr.attest_doc)
+        cose_list = cose.value if hasattr(cose, "value") else cose
+        if not isinstance(cose_list, list) or len(cose_list) != 4:
+            return _fail("Step 3.6 Attestation Timestamp", "COSE_Sign1: unexpected structure")
+        _, _, payload_bytes, _ = cose_list
+        payload = _cbor2.loads(payload_bytes)
+    except Exception as exc:
+        return _fail("Step 3.6 Attestation Timestamp", f"CBOR parse error: {exc}")
+
+    attest_ts_ms = payload.get("timestamp")
+    if attest_ts_ms is None:
+        return _fail("Step 3.6 Attestation Timestamp", "AttestationDoc has no 'timestamp' field")
+
+    attest_ns = int(attest_ts_ms) * 1_000_000
+    delta_ns  = abs(attest_ns - hdr.created_at)
+
+    if delta_ns > max_skew_ns:
+        return _fail(
+            "Step 3.6 Attestation Timestamp",
+            f"clock skew {delta_ns / 1_000_000_000:.3f}s exceeds {max_skew_ns // 1_000_000_000}s limit\n"
+            f"  AttestationDoc.timestamp : {attest_ts_ms} ms → {attest_ns} ns\n"
+            f"  BundleHeader.CreatedAt   : {hdr.created_at} ns\n"
+            f"  delta                    : {delta_ns} ns",
+        )
+
+    return _pass(
+        "Step 3.6 Attestation Timestamp",
+        f"delta = {delta_ns / 1_000_000_000:.3f}s ≤ {max_skew_ns // 1_000_000_000}s\n"
+        f"  AttestationDoc.timestamp : {attest_ts_ms} ms\n"
+        f"  BundleHeader.CreatedAt   : {hdr.created_at} ns",
+    )
 
 
 def step_4_chain_continuity(bundle: Bundle) -> CheckResult:
@@ -1044,6 +1099,7 @@ def run(lines: list[str], pty_path: Optional[str] = None) -> tuple[bool, list[Ch
     results.append(step_1_bundle_header(bundle))
     results.append(step_2_segment_headers(bundle))
     results.append(step_3_bootstrap_nonce(bundle))
+    results.append(step_3_6_attestation_timestamp(bundle))
     results.append(step_4_chain_continuity(bundle))
     results.append(step_5_signatures(bundle))
     results.append(step_6_terminal_digest(bundle))

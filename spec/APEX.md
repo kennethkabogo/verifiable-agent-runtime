@@ -379,12 +379,16 @@ Skip this step if SpecVersion MINOR < 8 or if `BundleHeader.AllowedFunctionsHash
 
 ### Step 3.6 — Verify Attestation Timestamp
 
-1. From the parsed `AttestationDoc` CBOR map (Step 2), extract the `timestamp` field (milliseconds since Unix epoch, u64).
+Skip this step if `Segment[0]` is a simulation-mode bundle (§11) — the attestation document is a placeholder and carries no real timestamp. Skip this step if `BundleHeader.CreatedAt` is zero — the bundle predates this field.
+
+1. From `Segment[0].AttestationDoc` (the COSE_Sign1 payload parsed in Step 2), extract the `timestamp` field (milliseconds since Unix epoch, u64).
 2. Convert to nanoseconds: `attest_ns = AttestationDoc.timestamp × 1,000,000`.
 3. Assert `|attest_ns − BundleHeader.CreatedAt| ≤ Δ` where Δ is the implementation's permitted clock skew (RECOMMENDED: `30,000,000,000` ns = 30 seconds).
 4. If the assertion fails, FAIL with a descriptive error identifying the observed delta and both timestamp values.
 
 This step verifies that the bundle's stated creation time is consistent with the wall-clock time recorded by the TEE vendor in the attestation document. Because the attestation document is signed by the TEE vendor root CA (verified in Step 2), `AttestationDoc.timestamp` cannot be backdated by the operator or agent. This upgrades wall-clock freshness from "available in the attestation document" to a normative, verified property.
+
+**Note:** Only `Segment[0].AttestationDoc` is checked. Resumed segments carry later attestations that correctly post-date `BundleHeader.CreatedAt` — checking them against the original CreatedAt would cause false failures on legitimate multi-segment bundles.
 
 ### Step 4 — Verify chain continuity
 ```
