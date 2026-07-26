@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.8.0
+## Specification v2.8.1
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -376,6 +376,15 @@ Skip this step if SpecVersion MINOR < 8 or if `BundleHeader.AllowedFunctionsHash
 1. Obtain the Function Manifest for this session (out-of-band or from a manifest registry; transport is not defined by this spec).
 2. Assert `SHA-256(manifest_bytes) == BundleHeader.AllowedFunctionsHash`.
 3. For each EXEC packet in the Evidence Chain, extract the recorded function name and assert it appears in the manifest. Any EXEC packet whose function name is absent from the manifest MUST cause verification to fail.
+
+### Step 3.6 — Verify Attestation Timestamp
+
+1. From the parsed `AttestationDoc` CBOR map (Step 2), extract the `timestamp` field (milliseconds since Unix epoch, u64).
+2. Convert to nanoseconds: `attest_ns = AttestationDoc.timestamp × 1,000,000`.
+3. Assert `|attest_ns − BundleHeader.CreatedAt| ≤ Δ` where Δ is the implementation's permitted clock skew (RECOMMENDED: `30,000,000,000` ns = 30 seconds).
+4. If the assertion fails, FAIL with a descriptive error identifying the observed delta and both timestamp values.
+
+This step verifies that the bundle's stated creation time is consistent with the wall-clock time recorded by the TEE vendor in the attestation document. Because the attestation document is signed by the TEE vendor root CA (verified in Step 2), `AttestationDoc.timestamp` cannot be backdated by the operator or agent. This upgrades wall-clock freshness from "available in the attestation document" to a normative, verified property.
 
 ### Step 4 — Verify chain continuity
 ```
@@ -1529,6 +1538,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.8.1 | §8 Step 3.6 added: Attestation Timestamp — verifier extracts `AttestationDoc.timestamp` (ms, TEE-vendor-signed), converts to ns, and asserts `\|attest_ns − BundleHeader.CreatedAt\| ≤ 30,000,000,000 ns`; upgrades wall-clock freshness from available-but-unchecked to normative; §18 Conformance updated |
 | 2.8.0 | §3 Bundle Header gains `AllowedFunctionsHash` field; §3.1 BootstrapNonce derivation updated (v2.8+ includes AllowedFunctionsHash); §3.2 AllowedFunctions Commitment added; §8 Step 3 updated for version-aware nonce derivation; §8 Step 3.5 added (constrained bundle verification); §12 indirect prompt injection row added; §15 Constrained Dispatch Protocol added (§15.1–§15.7); §16 Settlement Block Test Vectors renumbered from §15; §18 Conformance updated |
 | 2.7.1 | §5.7 performance note updated with measured Argon2id latency on current AWS Nitro hardware: ~170 ms (median 169.8 ms, n=5) at floor params m=65536 t=3 p=1; reference implementation bumped to m=131072 (128 MiB) to strengthen memory-hardness property and maintain margin above the 200 ms security floor; 400 ms practical upper bound documented; multi-segment reference fixture regenerated with m=131072 (tests/fixtures/multi_bundle_20260704.log) |
 | 2.7.0 | §8 Step 12 added: Evidence Coverage Ratio (ECR) — verifier-computed metric reporting the fraction of hibernate boundaries with a valid TEMPORAL_PROOF; MUST NOT be reported before BundleSeal verification; ECR = K_tp / K (K = 0 → 1.0); settlement precondition formalized; §14.9.12 ECR test vector (K=1, K_tp=1, ECR=1.0); §18 Conformance updated to Steps 1–12 |
@@ -1562,7 +1572,7 @@ An implementation is **APEX-compliant** if it:
 8. Includes `TemporalProofHash` in the sealed payload whenever a conformant `TEMPORAL_PROOF` was emitted for that checkpoint (§10.2)
 9. (v2.8+ constrained mode) Locks `AllowedFunctionsHash` in the BootstrapNonce before processing any agent call, rejects dispatch calls to unregistered functions, and does not produce evidence packets for rejected calls (§15.3)
 
-A verifier is **APEX-compliant** if it implements all Steps 1–12 (including Step 3.5 for v2.8+ constrained bundles) and correctly handles multi-segment sessions per §9.4 and §9.5.
+A verifier is **APEX-compliant** if it implements all Steps 1–12 (including Step 3.5 for v2.8+ constrained bundles and Step 3.6 for all bundles) and correctly handles multi-segment sessions per §9.4 and §9.5.
 
 ---
 
