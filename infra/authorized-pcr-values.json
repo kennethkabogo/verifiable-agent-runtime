@@ -1,0 +1,18 @@
+{
+  "_comment": "Append-only log of PCR values authorized in the VAR KMS key policy. Each entry corresponds to a specific EIF build. To verify: rebuild the EIF from the tagged commit, compare nitro-cli describe-enclave output against the values here, and check that these values appear in infra/kms-key-policy.json AllowDecryptOnlyFromVerifiedEnclave.",
+  "kms_key_id": "572dc9aa-73c3-45a6-9cf4-4233ebbf26b8",
+  "kms_key_arn": "arn:aws:kms:us-east-1:752439474140:key/572dc9aa-73c3-45a6-9cf4-4233ebbf26b8",
+  "authorized_images": [
+    {
+      "authorized_at": "2026-07-15",
+      "git_tag": null,
+      "git_commit": "eb827dd",
+      "description": "EIF rebuild — verify function added; PCR0/PCR2 updated",
+      "pcr0": "ce0cbbb8a50b6f447231aa80c0d5d088cce31d6b67dce870e94de27f1eef989cc6b564efe20b1811b06782f909583773",
+      "pcr1": "4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493",
+      "pcr2": "450a1fa285e63fd2d461861c232f003f259d8347ccf1fc56f91e395882a44e99836900364815fec0cf920df46360999a",
+      "authorized_by": "kennethkabogo",
+      "policy_change_event": null
+    }
+  ]
+}

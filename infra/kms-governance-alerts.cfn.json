@@ -1,0 +1,126 @@
+{
+  "Description": "Immutable alerting on KMS signing-key policy mutations for VAR. Requires CloudTrail to be active in the account.",
+  "Parameters": {
+    "AlertEmail": {
+      "Type": "String",
+      "Description": "Email address to receive KMS policy-change alerts"
+    },
+    "KmsKeyId": {
+      "Type": "String",
+      "Default": "572dc9aa-73c3-45a6-9cf4-4233ebbf26b8",
+      "Description": "Key ID (not ARN) of the VAR signing key"
+    }
+  },
+  "Resources": {
+    "KmsAlertTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "TopicName": "var-kms-policy-changes",
+        "Subscription": [
+          {
+            "Protocol": "email",
+            "Endpoint": {"Ref": "AlertEmail"}
+          }
+        ]
+      }
+    },
+    "KmsAlertTopicPolicy": {
+      "Type": "AWS::SNS::TopicPolicy",
+      "Properties": {
+        "Topics": [{"Ref": "KmsAlertTopic"}],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {"Service": "events.amazonaws.com"},
+              "Action": "SNS:Publish",
+              "Resource": {"Ref": "KmsAlertTopic"}
+            }
+          ]
+        }
+      }
+    },
+    "KmsPolicyMutationRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Name": "var-kms-policy-mutation",
+        "Description": "Alert on any mutation to the VAR KMS signing key — PutKeyPolicy widens the PCR allowlist, DisableKey/ScheduleKeyDeletion destroy it.",
+        "EventPattern": {"Fn::Sub": "{\"source\":[\"aws.kms\"],\"detail-type\":[\"AWS API Call via CloudTrail\"],\"detail\":{\"eventName\":[\"PutKeyPolicy\",\"DisableKey\",\"ScheduleKeyDeletion\",\"CancelKeyDeletion\",\"EnableKeyRotation\",\"DisableKeyRotation\"],\"requestParameters\":{\"keyId\":[{\"suffix\":\"${KmsKeyId}\"}]}}}"},
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Id": "KmsAlertSNS",
+            "Arn": {"Ref": "KmsAlertTopic"}
+          }
+        ]
+      }
+    },
+    "CloudTrailBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {"Fn::Sub": "var-cloudtrail-logs-${AWS::AccountId}"},
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        }
+      }
+    },
+    "CloudTrailBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {"Ref": "CloudTrailBucket"},
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {"Service": "cloudtrail.amazonaws.com"},
+              "Action": "s3:GetBucketAcl",
+              "Resource": {"Fn::GetAtt": ["CloudTrailBucket", "Arn"]}
+            },
+            {
+              "Effect": "Allow",
+              "Principal": {"Service": "cloudtrail.amazonaws.com"},
+              "Action": "s3:PutObject",
+              "Resource": {"Fn::Sub": "${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"},
+              "Condition": {
+                "StringEquals": {"s3:x-amz-acl": "bucket-owner-full-control"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "VarKmsTrail": {
+      "Type": "AWS::CloudTrail::Trail",
+      "DependsOn": ["CloudTrailBucketPolicy"],
+      "Properties": {
+        "TrailName": "var-kms-audit",
+        "S3BucketName": {"Ref": "CloudTrailBucket"},
+        "IsLogging": true,
+        "EnableLogFileValidation": true,
+        "IncludeGlobalServiceEvents": true,
+        "IsMultiRegionTrail": false,
+        "EventSelectors": [
+          {
+            "ReadWriteType": "WriteOnly",
+            "IncludeManagementEvents": true
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "AlertTopicArn": {
+      "Value": {"Ref": "KmsAlertTopic"},
+      "Description": "SNS topic ARN — subscribe additional endpoints here (Slack webhook, PagerDuty, etc.)"
+    },
+    "CloudTrailBucketName": {
+      "Value": {"Ref": "CloudTrailBucket"},
+      "Description": "S3 bucket holding CloudTrail logs with integrity validation enabled"
+    }
+  }
+}
