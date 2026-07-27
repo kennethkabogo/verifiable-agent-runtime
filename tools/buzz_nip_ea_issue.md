@@ -30,7 +30,7 @@ A companion NIP (call it **NIP-EA**, Enclave Attestation) would let an event opt
 ["attest", "<bundle-hash>", "<pcr0>", "<attestation-endpoint>"]
 ```
 
-`<bundle-hash>` is the APEX BundleHash (SHA-256 over the sealed bundle), already computed and signed as part of the Bundle Seal. A verifier fetches the bundle from `<attestation-endpoint>` (or any mirror), hashes the bytes, and checks the hash against the value committed on the Nostr event — so the endpoint is a transport, not a trust anchor. A verifier that controls its own fetch (IPFS, a local cache, a different CDN) can verify without trusting the endpoint at all.
+`<bundle-hash>` is the APEX BundleHash, `SHA-256("APXB" ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ TerminalDigest)`, already computed and signed as part of the Bundle Seal (§7). It's not a flat hash of the bundle's raw bytes, it's a structured commitment over the session header fields plus the hash-chained signature sequence, so tampering with any evidence packet changes TerminalDigest, which changes BundleHash. A verifier fetches the bundle from `<attestation-endpoint>` (or any mirror), recomputes BundleHash following that formula, and checks it against the value committed on the Nostr event — so the endpoint is a transport, not a trust anchor. A verifier that controls its own fetch (IPFS, a local cache, a different CDN) can verify without trusting the endpoint at all.
 
 - Verifiers that care about execution integrity fetch and verify the bundle independently.
 - Verifiers that don't care ignore the tag, exactly as NIP-OA is already optional at the relay layer.
@@ -38,4 +38,4 @@ A companion NIP (call it **NIP-EA**, Enclave Attestation) would let an event opt
 
 ## Why an issue first
 
-Per `CONTRIBUTING.md`, this is more than a small fix, so I'm not opening a `docs/nips/NIP-EA.md` PR yet. I'd rather describe the gap and the proposed shape first and get a maintainer's read on whether this fits the NIP-OA lineage the way I think it does, and whether `attest`/`bundle-id`/`pcr0` is the right tag shape or something else better matches how you're already thinking about agent trust. Happy to write the full spec (Motivation, Non-Goals, Security Properties, test vectors, in NIP-OA's own format) once the approach is acknowledged.
+Per `CONTRIBUTING.md`, this is more than a small fix, so I'm not opening a `docs/nips/NIP-EA.md` PR yet. I'd rather describe the gap and the proposed shape first and get a maintainer's read on whether this fits the NIP-OA lineage the way I think it does, and whether `attest`/`bundle-hash`/`pcr0` is the right tag shape or something else better matches how you're already thinking about agent trust. Happy to write the full spec (Motivation, Non-Goals, Security Properties, test vectors, in NIP-OA's own format) once the approach is acknowledged.
