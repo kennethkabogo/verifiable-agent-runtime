@@ -11,3 +11,4 @@ build_log*.txt
 build_exe_linux*.txt
 final_build_log.txt
 spec/research-roadmap.md
+spec/vertical-scan.md
