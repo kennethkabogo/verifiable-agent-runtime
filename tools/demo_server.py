@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import re
 import sys
 import threading
 import time
@@ -76,41 +75,6 @@ def _bridge_get(path: str) -> dict:
         raise BridgeError(f"GET {path}", f"invalid JSON from bridge: {exc}")
 
 
-
-# src/runtime/http.zig's handleCompute() builds its response body as
-# `"output":"{s}"` with result.output interpolated *unescaped*. For
-# fn="echo", compute.zig sets output = the raw canonical-JSON of the
-# request's `inputs`, so the response is literally invalid JSON (an
-# unescaped `{"..."}` embedded inside a quoted string). Recover the fields
-# with a split anchored on the surrounding literals from that same format
-# string, rather than attempting a generic "repair" of arbitrary broken
-# JSON (undecidable if the embedded value itself contains the anchor text).
-_COMPUTE_REPAIR_RE = re.compile(
-    r'^\{"fn":"([^"]*)","inputs_hash":"([0-9a-f]+)","output":"(.*)","evidence":(\{.*\})\}\s*$',
-    re.DOTALL,
-)
-
-
-def _parse_compute_body(text: str) -> dict:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    m = _COMPUTE_REPAIR_RE.match(text)
-    if not m:
-        raise BridgeError(
-            "POST /compute",
-            f"invalid JSON from bridge and could not recover known /compute shape: {text[:300]}",
-        )
-    fn_name, inputs_hash, output_raw, evidence_raw = m.groups()
-    try:
-        evidence = json.loads(evidence_raw)
-    except json.JSONDecodeError as exc:
-        raise BridgeError("POST /compute", f"recovered response but evidence sub-object still invalid: {exc}")
-    return {"fn": fn_name, "inputs_hash": inputs_hash, "output": output_raw, "evidence": evidence}
-
-
 def _bridge_post(path: str, payload: dict) -> dict:
     url = f"{BRIDGE_URL}{path}"
     data = json.dumps(payload).encode()
@@ -127,8 +91,6 @@ def _bridge_post(path: str, payload: dict) -> dict:
     except (urllib.error.URLError, OSError) as exc:
         raise BridgeError(f"POST {path}", f"bridge unreachable at {url}: {exc}")
 
-    if path == "/compute":
-        return _parse_compute_body(text)
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:

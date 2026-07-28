@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VAR — Live Verification Demo</title>
+<style>
+  :root {
+    --bg: #0A0A0A;
+    --surface: #111111;
+    --border: #1E1E1E;
+    --accent: #00FF88;
+    --accent-dim: rgba(0, 255, 136, 0.08);
+    --accent-border: rgba(0, 255, 136, 0.25);
+    --red: #FF4D4D;
+    --red-dim: rgba(255, 77, 77, 0.08);
+    --red-border: rgba(255, 77, 77, 0.25);
+    --yellow: #FFC24D;
+    --text-primary: #F0F0F0;
+    --text-secondary: #888888;
+    --text-tertiary: #444444;
+    --mono: "SF Mono", "Menlo", "Consolas", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text-primary); font-family: var(--sans);
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.9rem 1.5rem; border-bottom: 1px solid var(--border);
+  }
+  .brand { font-family: var(--mono); font-size: 12px; color: var(--accent); letter-spacing: 0.15em; text-transform: uppercase; }
+  .brand span { color: var(--text-secondary); }
+  #conn-badge {
+    font-family: var(--mono); font-size: 10px; padding: 3px 8px; border-radius: 3px;
+    border: 1px solid var(--border); color: var(--text-tertiary);
+  }
+  #conn-badge.ok { color: var(--accent); border-color: var(--accent-border); background: var(--accent-dim); }
+  #conn-badge.err { color: var(--red); border-color: var(--red-border); background: var(--red-dim); }
+
+  .panels {
+    flex: 1; display: grid; grid-template-columns: 1fr 1.4fr 1fr;
+    gap: 1px; background: var(--border); overflow: hidden;
+  }
+  .panel { background: var(--bg); display: flex; flex-direction: column; min-width: 0; }
+  .panel-head {
+    font-family: var(--mono); font-size: 10px; color: var(--text-secondary);
+    letter-spacing: 0.1em; text-transform: uppercase; padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .panel-body { flex: 1; overflow-y: auto; padding: 1rem; }
+
+  /* Left panel */
+  textarea#input {
+    width: 100%; min-height: 100px; background: var(--surface); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;
+    font-family: var(--mono); font-size: 12.5px; resize: vertical;
+  }
+  textarea#input:focus { outline: none; border-color: var(--accent-border); }
+  select#fn {
+    margin-top: 0.6rem; width: 100%; background: var(--surface); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem;
+    font-family: var(--mono); font-size: 11px;
+  }
+  button#send {
+    margin-top: 0.75rem; width: 100%; padding: 0.65rem; border-radius: 4px; border: none;
+    background: var(--accent); color: #06180F; font-family: var(--mono); font-size: 12px;
+    font-weight: 600; letter-spacing: 0.05em; cursor: pointer;
+  }
+  button#send:disabled { background: var(--border); color: var(--text-tertiary); cursor: not-allowed; }
+  button#send:not(:disabled):hover { filter: brightness(1.1); }
+
+  .log { margin-top: 1rem; font-family: var(--mono); font-size: 11px; }
+  .log-line { padding: 0.3rem 0; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+  .log-line .t { color: var(--text-tertiary); margin-right: 0.5rem; }
+  .log-line.error { color: var(--red); }
+  .log-line.ok { color: var(--accent); }
+
+  /* Middle panel: bundle */
+  .empty-state { color: var(--text-tertiary); font-family: var(--mono); font-size: 11.5px; text-align: center; margin-top: 2rem; }
+  .bundle-section { margin-bottom: 1.2rem; }
+  .bundle-section h3 {
+    font-family: var(--mono); font-size: 10px; color: var(--accent); text-transform: uppercase;
+    letter-spacing: 0.1em; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.5rem;
+  }
+  .bundle-section h3::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .kv { display: grid; grid-template-columns: 110px 1fr; gap: 0.15rem 0.75rem; font-family: var(--mono); font-size: 11px; }
+  .kv .k { color: var(--text-tertiary); }
+  .kv .v { color: var(--text-secondary); word-break: break-all; }
+  .kv .v.hl { color: var(--text-primary); }
+  .badge { display: inline-block; font-family: var(--mono); font-size: 9.5px; padding: 1px 6px; border-radius: 3px; }
+  .badge.sim { color: var(--yellow); border: 1px solid rgba(255,194,77,0.3); background: rgba(255,194,77,0.08); }
+  .badge.prod { color: var(--accent); border: 1px solid var(--accent-border); background: var(--accent-dim); }
+
+  .packet-card {
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.75rem;
+    margin-bottom: 0.5rem; background: var(--surface);
+  }
+  .packet-card .seq { font-family: var(--mono); font-size: 10px; color: var(--accent); margin-bottom: 0.3rem; }
+  .packet-card .kv .v { font-size: 10px; }
+
+  details.raw { margin-top: 0.5rem; }
+  details.raw summary {
+    font-family: var(--mono); font-size: 10px; color: var(--text-secondary); cursor: pointer;
+  }
+  pre.raw-text {
+    font-family: var(--mono); font-size: 10px; color: var(--text-secondary);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.6rem; margin-top: 0.5rem; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow-y: auto;
+  }
+
+  /* Right panel: verifier steps */
+  .step {
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.75rem;
+    margin-bottom: 0.5rem; background: var(--surface); opacity: 0; transform: translateY(4px);
+    animation: reveal 0.28s ease forwards;
+  }
+  @keyframes reveal { to { opacity: 1; transform: translateY(0); } }
+  .step-head { display: flex; align-items: center; justify-content: space-between; }
+  .step-name { font-family: var(--mono); font-size: 11.5px; color: var(--text-primary); }
+  .tag { font-family: var(--mono); font-size: 9.5px; font-weight: 700; padding: 2px 8px; border-radius: 3px; letter-spacing: 0.05em; }
+  .tag.PASS { color: var(--accent); border: 1px solid var(--accent-border); background: var(--accent-dim); }
+  .tag.FAIL { color: var(--red); border: 1px solid var(--red-border); background: var(--red-dim); }
+  .tag.SKIP { color: var(--yellow); border: 1px solid rgba(255,194,77,0.3); background: rgba(255,194,77,0.08); }
+  .step-detail {
+    margin-top: 0.4rem; font-family: var(--mono); font-size: 10px; color: var(--text-secondary);
+    white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+  }
+
+  .verdict {
+    margin-top: 0.75rem; padding: 0.85rem 1rem; border-radius: 4px; text-align: center;
+    font-family: var(--mono); font-size: 13px; font-weight: 700; letter-spacing: 0.08em;
+    border: 1px solid var(--border);
+  }
+  .verdict.PASS { color: var(--accent); border-color: var(--accent-border); background: var(--accent-dim); }
+  .verdict.FAIL { color: var(--red); border-color: var(--red-border); background: var(--red-dim); }
+  .ecr-line { text-align: center; font-family: var(--mono); font-size: 10.5px; color: var(--text-secondary); margin-top: 0.4rem; }
+
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 0.4rem;
+    vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">VAR <span>/ verifiable agent runtime — live demo</span></div>
+  <div id="conn-badge">checking bridge…</div>
+</header>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-head">Send Request → Enclave</div>
+    <div class="panel-body">
+      <textarea id="input" placeholder="Enter a value to send into the enclave as attested compute input…">agent action: approve invoice #4471 for $12,500</textarea>
+      <select id="fn">
+        <option value="echo">fn: echo</option>
+      </select>
+      <button id="send">SEND TO ENCLAVE</button>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">APEX Bundle</div>
+    <div class="panel-body" id="bundle-body">
+      <div class="empty-state">— waiting for a request —</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">Verifier — §8 Steps 1–12</div>
+    <div class="panel-body" id="steps-body">
+      <div class="empty-state">— no bundle to verify yet —</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const logEl = document.getElementById('log');
+const bundleBody = document.getElementById('bundle-body');
+const stepsBody = document.getElementById('steps-body');
+const sendBtn = document.getElementById('send');
+const input = document.getElementById('input');
+const fnSelect = document.getElementById('fn');
+const connBadge = document.getElementById('conn-badge');
+
+function logLine(msg, cls) {
+  const div = document.createElement('div');
+  div.className = 'log-line' + (cls ? ' ' + cls : '');
+  const t = new Date().toLocaleTimeString();
+  div.innerHTML = `<span class="t">${t}</span>${escapeHtml(msg)}`;
+  logEl.prepend(div);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function short(hex, n = 16) {
+  if (!hex) return '';
+  return hex.length > n ? hex.slice(0, n) + '…' : hex;
+}
+
+async function checkHealth() {
+  try {
+    const r = await fetch('/api/health');
+    const j = await r.json();
+    if (j.ok) {
+      connBadge.textContent = 'bridge connected';
+      connBadge.className = 'ok';
+    } else {
+      throw new Error(j.error || 'unhealthy');
+    }
+  } catch (e) {
+    connBadge.textContent = 'bridge unreachable';
+    connBadge.className = 'err';
+  }
+}
+
+function renderBundle(bundle) {
+  const simBadge = bundle.sim_mode
+    ? '<span class="badge sim">SIMULATION</span>'
+    : '<span class="badge prod">NITRO HARDWARE</span>';
+
+  let html = `
+    <div class="bundle-section">
+      <h3>Bundle Header ${simBadge}</h3>
+      <div class="kv">
+        <div class="k">magic</div><div class="v hl">${bundle.magic}</div>
+        <div class="k">version</div><div class="v hl">${bundle.version}</div>
+        <div class="k">session_id</div><div class="v">${short(bundle.session_id, 32)}</div>
+        <div class="k">nonce</div><div class="v">${short(bundle.bootstrap_nonce, 32)}</div>
+        <div class="k">pcr0</div><div class="v">${short(bundle.pcr0)}</div>
+        <div class="k">pcr1</div><div class="v">${short(bundle.pcr1)}</div>
+        <div class="k">pcr2</div><div class="v">${short(bundle.pcr2)}</div>
+      </div>
+    </div>
+
+    <div class="bundle-section">
+      <h3>Evidence Packets (${bundle.packets.length})</h3>
+      ${bundle.packets.map(p => `
+        <div class="packet-card">
+          <div class="seq">seq=${p.seq}</div>
+          <div class="kv">
+            <div class="k">prev_stream</div><div class="v">${short(p.prev_stream)}</div>
+            <div class="k">stream</div><div class="v">${short(p.stream)}</div>
+            <div class="k">state</div><div class="v">${short(p.state)}</div>
+            <div class="k">sig</div><div class="v">${short(p.sig)}</div>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+
+    <div class="bundle-section">
+      <h3>Bundle Seal</h3>
+      <div class="kv">
+        <div class="k">terminal_digest</div><div class="v">${short(bundle.seal.terminal_digest, 32)}</div>
+        <div class="k">bundle_hash</div><div class="v">${short(bundle.seal.bundle_hash, 32)}</div>
+        <div class="k">seal_sig</div><div class="v">${short(bundle.seal.seal_sig, 32)}</div>
+      </div>
+    </div>
+
+    <details class="raw">
+      <summary>raw bundle text</summary>
+      <pre class="raw-text">${escapeHtml(bundle.raw_text)}</pre>
+    </details>
+  `;
+  bundleBody.innerHTML = html;
+}
+
+function renderSteps(verification) {
+  stepsBody.innerHTML = '';
+  verification.steps.forEach((s, i) => {
+    const div = document.createElement('div');
+    div.className = 'step';
+    div.style.animationDelay = (i * 90) + 'ms';
+    div.innerHTML = `
+      <div class="step-head">
+        <span class="step-name">${escapeHtml(s.step)}</span>
+        <span class="tag ${s.status}">${s.status}</span>
+      </div>
+      <div class="step-detail">${escapeHtml(s.detail)}</div>
+    `;
+    stepsBody.appendChild(div);
+  });
+
+  const verdictDiv = document.createElement('div');
+  verdictDiv.className = 'verdict ' + (verification.all_passed ? 'PASS' : 'FAIL');
+  verdictDiv.style.animationDelay = (verification.steps.length * 90) + 'ms';
+  verdictDiv.style.opacity = '0';
+  verdictDiv.style.animation = 'reveal 0.28s ease forwards';
+  verdictDiv.textContent = verification.all_passed ? 'ALL STEPS PASSED' : 'VERIFICATION FAILED';
+  stepsBody.appendChild(verdictDiv);
+
+  const ecrDiv = document.createElement('div');
+  ecrDiv.className = 'ecr-line';
+  ecrDiv.textContent = `Evidence Coverage Ratio (ECR) = ${verification.ecr.toFixed(4)}`;
+  stepsBody.appendChild(ecrDiv);
+}
+
+async function send() {
+  const text = input.value.trim();
+  if (!text) return;
+
+  sendBtn.disabled = true;
+  sendBtn.innerHTML = '<span class="spinner"></span>VERIFYING…';
+  stepsBody.innerHTML = '<div class="empty-state">— running compute + collecting evidence —</div>';
+  logLine(`→ sending to enclave: "${text.slice(0, 60)}${text.length > 60 ? '…' : ''}"`);
+
+  try {
+    const r = await fetch('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: text, fn: fnSelect.value }),
+    });
+    const j = await r.json();
+
+    if (!j.ok) {
+      logLine(`✗ ${j.stage || 'error'}: ${j.error}`, 'error');
+      bundleBody.innerHTML = `<div class="empty-state">— request failed at ${escapeHtml(j.stage || '?')} —</div>`;
+      stepsBody.innerHTML = `<div class="empty-state">— nothing to verify —</div>`;
+      return;
+    }
+
+    logLine(`✓ compute output: ${typeof j.compute.output === 'object' ? JSON.stringify(j.compute.output) : j.compute.output}`, 'ok');
+    logLine(`✓ inputs_hash=${short(j.compute.inputs_hash)}`, 'ok');
+
+    renderBundle(j.bundle);
+    renderSteps(j.verification);
+
+    logLine(j.verification.all_passed
+      ? `✓ all 12 steps PASSED — ECR=${j.verification.ecr.toFixed(4)}`
+      : `✗ verification FAILED`, j.verification.all_passed ? 'ok' : 'error');
+  } catch (e) {
+    logLine(`✗ network error: ${e.message}`, 'error');
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'SEND TO ENCLAVE';
+  }
+}
+
+sendBtn.addEventListener('click', send);
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
+});
+
+checkHealth();
+setInterval(checkHealth, 10000);
+</script>
+
+</body>
+</html>
