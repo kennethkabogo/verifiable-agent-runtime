@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const ComputeResult = struct {
-    /// Hex-encoded computation output. Caller frees.
+    /// JSON-encoded computation output (string, object, or array). Caller frees.
     output: []u8,
     /// SHA-256(fn_name || ":" || canonical_inputs_json).
     /// Commits to exactly what was submitted so the evidence chain entry is
@@ -56,10 +56,10 @@ pub fn run(
         return runVerify(allocator, inputs_json, inputs_hash);
     }
 
-    // Default: output = hex(inputs_hash).
+    // Default: output = hex(inputs_hash) as a JSON string.
     // Deterministic and verifiable; replace by adding a named branch above.
     const hex_buf = std.fmt.bytesToHex(inputs_hash, .lower);
-    const output = try allocator.dupe(u8, &hex_buf);
+    const output = try std.fmt.allocPrint(allocator, "\"{s}\"", .{&hex_buf});
     return ComputeResult{ .output = output, .inputs_hash = inputs_hash };
 }
 

@@ -9,7 +9,7 @@
 ///
 ///   POST /vault/secret   {"key":"…","value":"…"}           → 200 {"status":"ok"}
 ///   POST /log            {"msg":"…"}  (+X-Skill-Id header)  → 200 {"status":"ok"}
-///   POST /compute        {"fn":"…","inputs":<json>}         → 200 {"fn":"…","inputs_hash":"…","output":"…","evidence":{…}}
+///   POST /compute        {"fn":"…","inputs":<json>}         → 200 {"fn":"…","inputs_hash":"…","output":<json>,"evidence":{…}}
 ///   POST /exec           {"cmd":["arg0","arg1",…]}          → 200 {"exit_code":0,"stdout_b64":"…","stderr_b64":"…","stdout_hash":"…","stderr_hash":"…"}
 ///   POST /hibernate                                          → 200 {"sealed_state":"<hex>"}  (gateway exits cleanly after response)
 ///   POST /terminate                                          → 200 {"evidence":{…},"bundle_seal":"BUNDLE_SEAL:…"}  (final proof, no resume blob, then exits)
@@ -494,7 +494,7 @@ fn handleCompute(server: *GatewayServer, stream: net.Stream, req: ParsedRequest)
 
     const body = try std.fmt.allocPrint(
         server.allocator,
-        "{{\"fn\":\"{s}\",\"inputs_hash\":\"{s}\",\"output\":\"{s}\",\"evidence\":{s}}}",
+        "{{\"fn\":\"{s}\",\"inputs_hash\":\"{s}\",\"output\":{s},\"evidence\":{s}}}",
         .{ fn_name, ih, result.output, evidence_json },
     );
     defer server.allocator.free(body);
@@ -615,10 +615,10 @@ fn handleEvidenceStream(server: *GatewayServer, stream: net.Stream, req: ParsedR
     _ = req;
     try stream.writeAll(
         "HTTP/1.1 200 OK\r\n" ++
-        "Content-Type: text/event-stream\r\n" ++
-        "Cache-Control: no-cache\r\n" ++
-        "Connection: keep-alive\r\n" ++
-        "\r\n",
+            "Content-Type: text/event-stream\r\n" ++
+            "Cache-Control: no-cache\r\n" ++
+            "Connection: keep-alive\r\n" ++
+            "\r\n",
     );
 
     var cursor: usize = 0;
@@ -629,7 +629,10 @@ fn handleEvidenceStream(server: *GatewayServer, stream: net.Stream, req: ParsedR
             out.deinit(server.allocator);
         }
         cursor = try server.logger.pollEvidenceSince(
-            server.allocator, cursor, 5 * std.time.ns_per_s, &out,
+            server.allocator,
+            cursor,
+            5 * std.time.ns_per_s,
+            &out,
         );
         for (out.items) |json| {
             if (!writeSSEPacket(stream, json)) break :outer;
@@ -743,21 +746,21 @@ fn handleAttestation(server: *GatewayServer, stream: net.Stream, req: ParsedRequ
 
 fn handleSession(server: *GatewayServer, stream: net.Stream, req: ParsedRequest) !void {
     _ = req;
-    const sid_h     = try fmtHex(server.allocator, &server.session_id);
+    const sid_h = try fmtHex(server.allocator, &server.session_id);
     defer server.allocator.free(sid_h);
-    const nonce_h   = try fmtHex(server.allocator, &server.bootstrap_nonce);
+    const nonce_h = try fmtHex(server.allocator, &server.bootstrap_nonce);
     defer server.allocator.free(nonce_h);
     const enc_pub_h = try fmtHex(server.allocator, &server.enc_pub);
     defer server.allocator.free(enc_pub_h);
-    const pcr0_h    = try fmtHex(server.allocator, &server.quote.pcr0);
+    const pcr0_h = try fmtHex(server.allocator, &server.quote.pcr0);
     defer server.allocator.free(pcr0_h);
-    const pcr1_h    = try fmtHex(server.allocator, &server.quote.pcr1);
+    const pcr1_h = try fmtHex(server.allocator, &server.quote.pcr1);
     defer server.allocator.free(pcr1_h);
-    const pcr2_h    = try fmtHex(server.allocator, &server.quote.pcr2);
+    const pcr2_h = try fmtHex(server.allocator, &server.quote.pcr2);
     defer server.allocator.free(pcr2_h);
-    const pk_h      = try fmtHex(server.allocator, &server.quote.public_key);
+    const pk_h = try fmtHex(server.allocator, &server.quote.public_key);
     defer server.allocator.free(pk_h);
-    const doc_h     = try fmtHex(server.allocator, server.quote.doc);
+    const doc_h = try fmtHex(server.allocator, server.quote.doc);
     defer server.allocator.free(doc_h);
 
     // Reconstruct the full BUNDLE_HEADER line — identical to what protocol.zig
@@ -815,7 +818,11 @@ fn handleVerifyAndAttest(server: *GatewayServer, stream: net.Stream, req: Parsed
         .{
             if (sim_mode) "true" else "false",
             evidence_json,
-            pcr0_h, pcr1_h, pcr2_h, pk_h, doc_h,
+            pcr0_h,
+            pcr1_h,
+            pcr2_h,
+            pk_h,
+            doc_h,
         },
     );
     defer server.allocator.free(body);
@@ -939,12 +946,9 @@ fn handleBenchmark(server: *GatewayServer, stream: net.Stream) !void {
     const body = try std.fmt.allocPrint(server.allocator,
         \\{{"params":{{"m":{d},"t":{d},"p":{d}}},"n":{d},"mean_ms":{d:.2},"p50_ms":{d:.2},"p95_ms":{d:.2},"min_ms":{d:.2},"max_ms":{d:.2}}}
     , .{
-        BENCH_M, BENCH_T, BENCH_P, BENCH_N,
-        mean_ns / 1_000_000.0,
-        p50_ns  / 1_000_000.0,
-        p95_ns  / 1_000_000.0,
-        min_ns  / 1_000_000.0,
-        max_ns  / 1_000_000.0,
+        BENCH_M,               BENCH_T,              BENCH_P,              BENCH_N,
+        mean_ns / 1_000_000.0, p50_ns / 1_000_000.0, p95_ns / 1_000_000.0, min_ns / 1_000_000.0,
+        max_ns / 1_000_000.0,
     });
     defer server.allocator.free(body);
     try writeResponse(stream, 200, body);
@@ -1018,9 +1022,10 @@ fn writeResponse(stream: net.Stream, status: u16, body: []const u8) !void {
         500 => "Internal Server Error",
         else => "Unknown",
     };
-    
+
     var h_buf: [512]u8 = undefined;
-    const headers = try std.fmt.bufPrint(&h_buf,
+    const headers = try std.fmt.bufPrint(
+        &h_buf,
         "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
         .{ status, status_text, body.len },
     );
