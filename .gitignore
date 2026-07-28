@@ -10,5 +10,6 @@ __pycache__/
 build_log*.txt
 build_exe_linux*.txt
 final_build_log.txt
+spec/freight-one-pager.md
 spec/research-roadmap.md
 spec/vertical-scan.md

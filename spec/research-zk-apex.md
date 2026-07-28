@@ -275,7 +275,7 @@ model, same structural solution. The TSA timestamp (SETTLEMENT_INIT) is
 engineering practice; the SWF at sealed-state transitions is what distinguishes
 APEX temporally from prior work and belongs in the paper. Full protocol design
 notes (packet format, verifier rules, parameter governance) live in
-[research-roadmap.md](research-roadmap.md).
+research-roadmap.md (internal).
 
 ## Timeline
 
@@ -285,4 +285,4 @@ notes (packet format, verifier rules, parameter governance) live in
   Target: align with Markantonakis conversation, February 2027.
 - **Combined paper:** Full two-layer thesis (CTMC + ZK) targeting S&P 2028 cycle.
   Non-ZK tracks (C2PA integration, ECR) tracked in
-  [research-roadmap.md](research-roadmap.md).
+  research-roadmap.md (internal).
