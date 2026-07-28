@@ -4,6 +4,17 @@
   "kms_key_arn": "arn:aws:kms:us-east-1:752439474140:key/572dc9aa-73c3-45a6-9cf4-4233ebbf26b8",
   "authorized_images": [
     {
+      "authorized_at": "2026-07-28",
+      "git_tag": null,
+      "git_commit": "9137c45",
+      "description": "EIF rebuild — /compute JSON contract fix; output embedded as raw JSON value",
+      "pcr0": "202c26aa7f58de3f990e0112de39e7fb484b7f3b01d1562dee65a67276379b2894ee58cc30869e34000db1d4c5052fab",
+      "pcr1": "4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493",
+      "pcr2": "dc3e0e02eaa12e006b9612d1de4d5925ca5c614595e3d9c773552718252baffc72c50c28631a08fcc5764551f696440c",
+      "authorized_by": "kennethkabogo",
+      "policy_change_event": null
+    },
+    {
       "authorized_at": "2026-07-15",
       "git_tag": null,
       "git_commit": "eb827dd",
