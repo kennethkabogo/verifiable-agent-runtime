@@ -1,4 +1,4 @@
-# Quickstart — 30 minutes to your first verified bundle
+# Quickstart — 5 minutes to your first verified bundle
 
 No AWS account required. Simulation mode activates automatically when `/dev/nsm`
 is absent — you get a real hash chain and real Ed25519 signatures, with mock
@@ -6,47 +6,23 @@ PCR measurements in place of hardware attestation.
 
 ---
 
-## Prerequisites
-
-- **Zig** `0.15.x` — [ziglang.org/download](https://ziglang.org/download/)
-- **Python** `3.10+` — for the verifier and example agent
-- **jq** — for pretty-printing JSON responses (optional but recommended)
-
----
-
-## 1. Clone and build
+## 1. Start the gateway
 
 ```bash
-git clone https://github.com/kennethkabogo/VAR.git
-cd VAR
-zig build
-```
-
-This produces two binaries in `zig-out/bin/`:
-
-- `VAR-gateway` — the HTTP REST gateway (use this for new integrations)
-- `VAR` — the vsock line-protocol runtime (for direct enclave embedding)
-
----
-
-## 2. Start the gateway
-
-```bash
-./zig-out/bin/VAR-gateway
+docker run -p 8765:8765 ghcr.io/kennethkabogo/var:latest
 ```
 
 Expected output:
 
-```
+```text
 [VAR-gateway] listening on 127.0.0.1:8765 (worker threads: 64)
 ```
 
-The gateway is now running in simulation mode. Leave this terminal open and
-open a second terminal for the next steps.
+Leave this terminal open and open a second terminal for the next steps.
 
 ---
 
-## 3. Inspect the session
+## 2. Inspect the session
 
 Every session has a unique identity and a hardware-signed attestation quote.
 In simulation mode the attestation is a mock, but the structure is identical
@@ -71,7 +47,7 @@ the entire evidence chain to this specific session and enclave instance.
 
 ---
 
-## 4. Record evidence
+## 3. Record evidence
 
 ### Log a message
 
@@ -114,7 +90,7 @@ now commits to this specific computation having run.
 
 ---
 
-## 5. Read the evidence bundle
+## 4. Read the evidence bundle
 
 ```bash
 curl -s http://127.0.0.1:8765/evidence | jq .
@@ -143,7 +119,7 @@ confirm the signature originated from inside the measured binary.
 
 ---
 
-## 6. Verify a bundle
+## 5. Verify a bundle
 
 Run the self-contained verifier against the §14.9 synthetic fixture to see
 what a passing verification looks like:
@@ -155,7 +131,7 @@ python3 tools/apex_verify.py --self-test
 
 Expected output:
 
-```
+```text
 Step 1  PASS  bootstrap nonce valid
 Step 2  PASS  NSM silicon witness present
 Step 3  PASS  chain continuity (2 segments, 4 packets)
@@ -176,7 +152,7 @@ python3 tools/apex_verify.py path/to/bundle.log
 
 ---
 
-## 7. What you just proved
+## 6. What you just proved
 
 When a verifier runs `apex_verify.py` against your bundle, it checks:
 
@@ -196,7 +172,7 @@ VAR-controlled infrastructure.
 
 ---
 
-## 8. Wrap your own agent
+## 7. Wrap your own agent
 
 The simplest integration is three HTTP calls:
 
@@ -243,3 +219,23 @@ example including vault provisioning, skill ID tagging, and evidence streaming.
 | Understand the wire format | [evidence_spec.md](evidence_spec.md) |
 | Run the full test suite | `zig build test && pytest tests/ src/` |
 | Resume a session across reboots | `POST /hibernate` → set `VAR_RESUME_STATE` on restart |
+
+---
+
+## Build from source
+
+If you need to modify the runtime or target a non-x86_64 platform:
+
+**Prerequisites:** Zig `0.15.x` — [ziglang.org/download](https://ziglang.org/download/), Python `3.10+`, jq
+
+```bash
+git clone https://github.com/kennethkabogo/VAR.git
+cd VAR
+zig build
+./zig-out/bin/VAR-gateway
+```
+
+This produces two binaries in `zig-out/bin/`:
+
+- `VAR-gateway` — the HTTP REST gateway (use this for new integrations)
+- `VAR` — the vsock line-protocol runtime (for direct enclave embedding)

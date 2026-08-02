@@ -2,17 +2,24 @@
 FROM debian:bookworm-slim AS builder
 
 ARG ZIG_VERSION=0.15.2
-ARG ZIG_TARBALL=zig-x86_64-linux-${ZIG_VERSION}.tar.xz
+# TARGETARCH is injected by Docker buildx (amd64 | arm64).
+# Zig uses x86_64 / aarch64 — map between the two.
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl xz-utils ca-certificates \
+        curl xz-utils ca-certificates libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and install Zig
-RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" \
-        -o /tmp/zig.tar.xz \
+# Download and install the Zig toolchain for the target architecture.
+RUN case "$TARGETARCH" in \
+      amd64) ZIG_ARCH=x86_64 ;; \
+      arm64) ZIG_ARCH=aarch64 ;; \
+      *)     echo "unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+    esac \
+    && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+         -o /tmp/zig.tar.xz \
     && tar -xf /tmp/zig.tar.xz -C /usr/local \
-    && ln -s /usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig \
+    && ln -s /usr/local/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig /usr/local/bin/zig \
     && rm /tmp/zig.tar.xz
 
 WORKDIR /src
@@ -27,7 +34,7 @@ RUN zig build -Doptimize=ReleaseSafe
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
+        ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy both runtimes so the image can serve either entry point.

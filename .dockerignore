@@ -1,0 +1,12 @@
+*.mp4
+*.mov
+*.pdf
+*.pem
+.git
+zig-out
+.zig-cache
+node_modules
+__pycache__
+*.pyc
+infra/*.json
+scratchpad
