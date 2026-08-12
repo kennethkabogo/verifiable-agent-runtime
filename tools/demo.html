@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VAR — Live Demo</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23090C15'/%3E%3Cpolyline points='7,9 16,24 25,9' stroke='%2300C87A' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%230A0A0A'/%3E%3Cpolyline points='5,7 16,26 27,7' stroke='%23C8963A' stroke-width='4.5' stroke-linecap='square' stroke-linejoin='miter' fill='none'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg:            #090C15;
@@ -38,7 +38,6 @@
     backdrop-filter:blur(12px);
   }
   .brand{display:flex;align-items:center;gap:.55rem}
-  .brand-mark{width:22px;height:22px;flex-shrink:0}
   .brand-text{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:.16em;text-transform:uppercase}
   .brand-text em{color:var(--text-dim);font-style:normal}
   .conn-badge{
@@ -198,10 +197,6 @@
 
 <header class="header">
   <div class="brand">
-    <svg class="brand-mark" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="32" height="32" rx="6" fill="#090C15"/>
-      <polyline points="7,9 16,24 25,9" stroke="#00C87A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
     <span class="brand-text">VAR <em>/ verifiable agent runtime</em></span>
   </div>
   <div class="conn-badge" id="connBadge">checking…</div>
