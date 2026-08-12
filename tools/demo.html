@@ -52,17 +52,32 @@
   .panel-body { flex: 1; overflow-y: auto; padding: 1rem; }
 
   /* Left panel */
-  textarea#input {
-    width: 100%; min-height: 100px; background: var(--surface); color: var(--text-primary);
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;
-    font-family: var(--mono); font-size: 12.5px; resize: vertical;
-  }
-  textarea#input:focus { outline: none; border-color: var(--accent-border); }
   select#fn {
-    margin-top: 0.6rem; width: 100%; background: var(--surface); color: var(--text-primary);
+    width: 100%; background: var(--surface); color: var(--text-primary);
     border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem;
-    font-family: var(--mono); font-size: 11px;
+    font-family: var(--mono); font-size: 11px; margin-bottom: 0.6rem;
   }
+  .field-label {
+    display: block; font-family: var(--mono); font-size: 10px; color: var(--text-tertiary);
+    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.3rem; margin-top: 0.6rem;
+  }
+  .field-label:first-child { margin-top: 0; }
+  textarea.field-input, input.field-input {
+    width: 100%; background: var(--surface); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;
+    font-family: var(--mono); font-size: 12.5px;
+  }
+  textarea.field-input { min-height: 80px; resize: vertical; }
+  input.field-input { height: 36px; font-size: 11.5px; letter-spacing: 0.02em; }
+  textarea.field-input:focus, input.field-input:focus { outline: none; border-color: var(--accent-border); }
+  .hash-row { display: flex; gap: 0.4rem; }
+  .hash-row input.field-input { flex: 1; min-width: 0; }
+  button#compute-hash {
+    flex-shrink: 0; padding: 0 0.65rem; border-radius: 4px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text-secondary); font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.05em; cursor: pointer; white-space: nowrap;
+  }
+  button#compute-hash:hover { border-color: var(--accent-border); color: var(--accent); }
   button#send {
     margin-top: 0.75rem; width: 100%; padding: 0.65rem; border-radius: 4px; border: none;
     background: var(--accent); color: #06180F; font-family: var(--mono); font-size: 12px;
@@ -156,10 +171,26 @@
   <div class="panel">
     <div class="panel-head">Send Request → Enclave</div>
     <div class="panel-body">
-      <textarea id="input" placeholder="Enter a value to send into the enclave as attested compute input…">agent action: approve invoice #4471 for $12,500</textarea>
       <select id="fn">
         <option value="echo">fn: echo</option>
+        <option value="verify">fn: verify</option>
       </select>
+
+      <div id="echo-fields">
+        <span class="field-label">Input</span>
+        <textarea id="input" class="field-input" placeholder="Enter a value to send into the enclave as attested compute input…">agent action: approve invoice #4471 for $12,500</textarea>
+      </div>
+
+      <div id="verify-fields" style="display:none">
+        <span class="field-label">Document</span>
+        <textarea id="doc-input" class="field-input" placeholder="Text to hash and verify inside the enclave…"></textarea>
+        <span class="field-label">Expected SHA-256</span>
+        <div class="hash-row">
+          <input id="hash-input" class="field-input" type="text" spellcheck="false" placeholder="64-char hex — or click HASH DOC to compute">
+          <button id="compute-hash">HASH DOC</button>
+        </div>
+      </div>
+
       <button id="send">SEND TO ENCLAVE</button>
       <div class="log" id="log"></div>
     </div>
@@ -186,8 +217,12 @@ const bundleBody = document.getElementById('bundle-body');
 const stepsBody = document.getElementById('steps-body');
 const sendBtn = document.getElementById('send');
 const input = document.getElementById('input');
+const docInput = document.getElementById('doc-input');
+const hashInput = document.getElementById('hash-input');
 const fnSelect = document.getElementById('fn');
 const connBadge = document.getElementById('conn-badge');
+const echoFields = document.getElementById('echo-fields');
+const verifyFields = document.getElementById('verify-fields');
 
 function logLine(msg, cls) {
   const div = document.createElement('div');
@@ -305,20 +340,46 @@ function renderSteps(verification) {
   stepsBody.appendChild(ecrDiv);
 }
 
+fnSelect.addEventListener('change', () => {
+  const isVerify = fnSelect.value === 'verify';
+  echoFields.style.display = isVerify ? 'none' : '';
+  verifyFields.style.display = isVerify ? '' : 'none';
+});
+
+document.getElementById('compute-hash').addEventListener('click', async () => {
+  const doc = docInput.value;
+  if (!doc) return;
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(doc));
+  hashInput.value = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+});
+
 async function send() {
-  const text = input.value.trim();
-  if (!text) return;
+  const fn = fnSelect.value;
+  let fetchBody;
+
+  if (fn === 'verify') {
+    const doc = docInput.value.trim();
+    const hash = hashInput.value.trim();
+    if (!doc) { logLine('✗ document is required for fn=verify', 'error'); return; }
+    if (!/^[0-9a-fA-F]{64}$/.test(hash)) { logLine('✗ expected_hash must be 64 hex chars', 'error'); return; }
+    fetchBody = JSON.stringify({ inputs: { document: doc, expected_hash: hash }, fn: 'verify' });
+    logLine(`→ fn=verify: hashing ${doc.length} chars, expecting ${hash.slice(0, 12)}…`);
+  } else {
+    const text = input.value.trim();
+    if (!text) return;
+    fetchBody = JSON.stringify({ input: text, fn: 'echo' });
+    logLine(`→ sending to enclave: "${text.slice(0, 60)}${text.length > 60 ? '…' : ''}"`);
+  }
 
   sendBtn.disabled = true;
   sendBtn.innerHTML = '<span class="spinner"></span>VERIFYING…';
   stepsBody.innerHTML = '<div class="empty-state">— running compute + collecting evidence —</div>';
-  logLine(`→ sending to enclave: "${text.slice(0, 60)}${text.length > 60 ? '…' : ''}"`);
 
   try {
     const r = await fetch('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: text, fn: fnSelect.value }),
+      body: fetchBody,
     });
     const j = await r.json();
 
@@ -329,7 +390,14 @@ async function send() {
       return;
     }
 
-    logLine(`✓ compute output: ${typeof j.compute.output === 'object' ? JSON.stringify(j.compute.output) : j.compute.output}`, 'ok');
+    if (fn === 'verify' && typeof j.compute.output === 'object' && j.compute.output !== null) {
+      const out = j.compute.output;
+      logLine(`${out.match ? '✓' : '✗'} hash match: ${out.match ? 'TRUE' : 'FALSE'}`, out.match ? 'ok' : 'error');
+      logLine(`  computed  ${short(out.computed_hash, 32)}`, 'ok');
+      logLine(`  expected  ${short(out.expected_hash, 32)}`, 'ok');
+    } else {
+      logLine(`✓ compute output: ${typeof j.compute.output === 'object' ? JSON.stringify(j.compute.output) : j.compute.output}`, 'ok');
+    }
     logLine(`✓ inputs_hash=${short(j.compute.inputs_hash)}`, 'ok');
 
     renderBundle(j.bundle);
@@ -350,6 +418,9 @@ sendBtn.addEventListener('click', send);
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
 });
+[docInput, hashInput].forEach(el => el.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
+}));
 
 checkHealth();
 setInterval(checkHealth, 10000);
