@@ -15,7 +15,7 @@ docker run -p 8765:8765 ghcr.io/kennethkabogo/var:latest
 Expected output:
 
 ```text
-[VAR-gateway] listening on 127.0.0.1:8765 (worker threads: 64)
+[VAR-gateway] listening on 0.0.0.0:8765 (worker threads: 64)
 ```
 
 Leave this terminal open and open a second terminal for the next steps.
@@ -132,23 +132,61 @@ python3 tools/apex_verify.py --self-test
 Expected output:
 
 ```text
-Step 1  PASS  bootstrap nonce valid
-Step 2  PASS  NSM silicon witness present
-Step 3  PASS  chain continuity (2 segments, 4 packets)
-Step 4  PASS  Ed25519 signatures valid
-…
-All steps PASS
+  APEX Evidence Verifier  —  spec v2.7.0
+  Session  : 00000000000040008000000000000001
+  Segments : 2
+  Packets  : 4
+
+  [PASS] Step 1 Bundle Header
+  [SKIP] Step 2 Segment Headers
+         simulation mode — COSE skipped
+  [PASS] Step 3 Bootstrap Nonce
+  [SKIP] Step 3.6 Attestation Timestamp
+         simulation mode — timestamp check skipped (§11)
+  [PASS] Step 4 Chain Continuity
+  [PASS] Step 5 Signatures
+  [PASS] Step 6 Terminal Digest
+  [PASS] Step 7 Bundle Seal
+  [PASS] Step 8 Settlement Block
+  [SKIP] Step 9 L2 Replay
+  [PASS] Step 10 Segment Boundaries
+  [PASS] Step 11 Temporal Proofs
+  [PASS] Step 12 ECR
+
+  ECR   : 1.0000
+  RESULT: PASS
 ```
 
-To verify a bundle file captured from the running gateway:
+Steps 2, 3.6, and 9 show `SKIP` in simulation mode — this is expected. `SKIP` is not a failure;
+it means the check is bypassed because hardware attestation is absent (no `/dev/nsm`).
+
+To verify a bundle captured from the running gateway, first assemble and save it:
 
 ```bash
-# Seal the current session
-curl -s -X GET http://127.0.0.1:8765/seal | jq .
+# 1. Capture the bundle header
+curl -s http://127.0.0.1:8765/session | jq -r '.bundle_header' > bundle.log
 
-# Then run apex_verify against a saved bundle file
-python3 tools/apex_verify.py path/to/bundle.log
+# 2. Run a computation (note the sequence number in the response)
+curl -s -X POST http://127.0.0.1:8765/compute \
+  -H 'Content-Type: application/json' \
+  -d '{"fn": "echo", "inputs": {"value": 42}}' | jq .
+
+# 3. Append evidence packets (replace N with the "seq" from the compute response)
+curl -s "http://127.0.0.1:8765/evidence?from=1&to=N" \
+  | jq -r '.packets[] |
+      "EVIDENCE:prev_stream=\(.prev_stream):stream=\(.stream):state=\(.state):sig=\(.sig):seq=\(.sequence)"' \
+  >> bundle.log
+
+# 4. Seal the session and append the seal line
+curl -s http://127.0.0.1:8765/seal | jq -r '.bundle_seal' >> bundle.log
+
+# 5. Verify
+python3 tools/apex_verify.py bundle.log
 ```
+
+> **Tip:** `tools/demo_server.py` handles this entire bundle assembly automatically.
+> Run it alongside the gateway to get a browser UI that drives a full round-trip
+> and shows the 12-step verification result inline.
 
 ---
 

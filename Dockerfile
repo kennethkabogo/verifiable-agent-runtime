@@ -50,6 +50,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Bind to all interfaces so -p 8765:8765 port-forwarding reaches the gateway.
+# Override with -e VAR_HOST=127.0.0.1 to restrict to loopback.
+ENV VAR_HOST=0.0.0.0
+
 # Copy both runtimes so the image can serve either entry point.
 COPY --from=builder /src/zig-out/bin/VAR         /usr/local/bin/VAR
 COPY --from=builder /src/zig-out/bin/VAR-gateway /usr/local/bin/VAR-gateway
