@@ -522,7 +522,7 @@ def _skip(step: str, detail: str) -> CheckResult:
 
 def _ed25519_verify(pub_bytes: bytes, msg: bytes, sig: bytes) -> bool:
     if not _CRYPTO:
-        return True   # caller must check _CRYPTO before trusting result
+        raise RuntimeError("_ed25519_verify called without cryptography installed — check _CRYPTO before calling")
     try:
         Ed25519PublicKey.from_public_bytes(pub_bytes).verify(sig, msg)
         return True
