@@ -2,428 +2,605 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VAR — Live Verification Demo</title>
 <style>
   :root {
-    --bg: #0A0A0A;
-    --surface: #111111;
-    --border: #1E1E1E;
-    --accent: #00FF88;
-    --accent-dim: rgba(0, 255, 136, 0.08);
-    --accent-border: rgba(0, 255, 136, 0.25);
-    --red: #FF4D4D;
-    --red-dim: rgba(255, 77, 77, 0.08);
-    --red-border: rgba(255, 77, 77, 0.25);
-    --yellow: #FFC24D;
-    --text-primary: #F0F0F0;
-    --text-secondary: #888888;
-    --text-tertiary: #444444;
-    --mono: "SF Mono", "Menlo", "Consolas", monospace;
+    --bg:             #09090B;
+    --surface:        #0F0F14;
+    --border:         #1C1C26;
+    --accent:         #00E879;
+    --accent-dim:     rgba(0,232,121,0.07);
+    --accent-border:  rgba(0,232,121,0.22);
+    --amber:          #C8963A;
+    --amber-dim:      rgba(200,150,58,0.08);
+    --amber-border:   rgba(200,150,58,0.25);
+    --red:            #FF4D4D;
+    --red-dim:        rgba(255,77,77,0.08);
+    --red-border:     rgba(255,77,77,0.25);
+    --text:           #EDEDEF;
+    --text-dim:       #70707A;
+    --text-ghost:     #30303C;
+    --mono: "SF Mono", "Menlo", "Cascadia Code", "Consolas", monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  * { box-sizing: border-box; }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
   body {
-    background: var(--bg); color: var(--text-primary); font-family: var(--sans);
-    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
   }
-  header {
+
+  /* ── Header ── */
+  .header {
+    position: sticky; top: 0; z-index: 10;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0.9rem 1.5rem; border-bottom: 1px solid var(--border);
+    padding: 0.85rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    background: rgba(9,9,11,0.94);
+    backdrop-filter: blur(10px);
   }
-  .brand { font-family: var(--mono); font-size: 12px; color: var(--accent); letter-spacing: 0.15em; text-transform: uppercase; }
-  .brand span { color: var(--text-secondary); }
-  #conn-badge {
-    font-family: var(--mono); font-size: 10px; padding: 3px 8px; border-radius: 3px;
-    border: 1px solid var(--border); color: var(--text-tertiary);
+  .brand {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--accent); letter-spacing: 0.18em; text-transform: uppercase;
   }
-  #conn-badge.ok { color: var(--accent); border-color: var(--accent-border); background: var(--accent-dim); }
-  #conn-badge.err { color: var(--red); border-color: var(--red-border); background: var(--red-dim); }
+  .brand em { color: var(--text-dim); font-style: normal; }
+  .conn-badge {
+    font-family: var(--mono); font-size: 9.5px;
+    padding: 3px 9px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--text-dim);
+    transition: all 0.3s;
+  }
+  .conn-badge.ok  { color: var(--accent); border-color: var(--accent-border); background: var(--accent-dim); }
+  .conn-badge.err { color: var(--red);    border-color: var(--red-border);    background: var(--red-dim);   }
 
-  .panels {
-    flex: 1; display: grid; grid-template-columns: 1fr 1.4fr 1fr;
-    gap: 1px; background: var(--border); overflow: hidden;
-  }
-  .panel { background: var(--bg); display: flex; flex-direction: column; min-width: 0; }
-  .panel-head {
-    font-family: var(--mono); font-size: 10px; color: var(--text-secondary);
-    letter-spacing: 0.1em; text-transform: uppercase; padding: 0.75rem 1rem;
-    border-bottom: 1px solid var(--border); flex-shrink: 0;
-  }
-  .panel-body { flex: 1; overflow-y: auto; padding: 1rem; }
+  /* ── Page ── */
+  .page { max-width: 760px; margin: 0 auto; padding: 2.5rem 1.5rem 5rem; }
 
-  /* Left panel */
-  select#fn {
-    width: 100%; background: var(--surface); color: var(--text-primary);
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem;
-    font-family: var(--mono); font-size: 11px; margin-bottom: 0.6rem;
+  /* ── Scenario card ── */
+  .scenario-card {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.75rem; background: var(--surface); margin-bottom: 2rem;
   }
-  .field-label {
-    display: block; font-family: var(--mono); font-size: 10px; color: var(--text-tertiary);
-    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.3rem; margin-top: 0.6rem;
+  .eyebrow {
+    font-family: var(--mono); font-size: 9.5px; color: var(--amber);
+    letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 0.7rem;
   }
-  .field-label:first-child { margin-top: 0; }
-  textarea.field-input, input.field-input {
-    width: 100%; background: var(--surface); color: var(--text-primary);
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;
-    font-family: var(--mono); font-size: 12.5px;
+  .scenario-title {
+    font-size: 1.1rem; font-weight: 600; line-height: 1.4;
+    margin-bottom: 0.7rem;
   }
-  textarea.field-input { min-height: 80px; resize: vertical; }
-  input.field-input { height: 36px; font-size: 11.5px; letter-spacing: 0.02em; }
-  textarea.field-input:focus, input.field-input:focus { outline: none; border-color: var(--accent-border); }
-  .hash-row { display: flex; gap: 0.4rem; }
-  .hash-row input.field-input { flex: 1; min-width: 0; }
-  button#compute-hash {
-    flex-shrink: 0; padding: 0 0.65rem; border-radius: 4px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text-secondary); font-family: var(--mono);
-    font-size: 10px; letter-spacing: 0.05em; cursor: pointer; white-space: nowrap;
-  }
-  button#compute-hash:hover { border-color: var(--accent-border); color: var(--accent); }
-  button#send {
-    margin-top: 0.75rem; width: 100%; padding: 0.65rem; border-radius: 4px; border: none;
-    background: var(--accent); color: #06180F; font-family: var(--mono); font-size: 12px;
-    font-weight: 600; letter-spacing: 0.05em; cursor: pointer;
-  }
-  button#send:disabled { background: var(--border); color: var(--text-tertiary); cursor: not-allowed; }
-  button#send:not(:disabled):hover { filter: brightness(1.1); }
-
-  .log { margin-top: 1rem; font-family: var(--mono); font-size: 11px; }
-  .log-line { padding: 0.3rem 0; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
-  .log-line .t { color: var(--text-tertiary); margin-right: 0.5rem; }
-  .log-line.error { color: var(--red); }
-  .log-line.ok { color: var(--accent); }
-
-  /* Middle panel: bundle */
-  .empty-state { color: var(--text-tertiary); font-family: var(--mono); font-size: 11.5px; text-align: center; margin-top: 2rem; }
-  .bundle-section { margin-bottom: 1.2rem; }
-  .bundle-section h3 {
-    font-family: var(--mono); font-size: 10px; color: var(--accent); text-transform: uppercase;
-    letter-spacing: 0.1em; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.5rem;
-  }
-  .bundle-section h3::after { content: ''; flex: 1; height: 1px; background: var(--border); }
-  .kv { display: grid; grid-template-columns: 110px 1fr; gap: 0.15rem 0.75rem; font-family: var(--mono); font-size: 11px; }
-  .kv .k { color: var(--text-tertiary); }
-  .kv .v { color: var(--text-secondary); word-break: break-all; }
-  .kv .v.hl { color: var(--text-primary); }
-  .badge { display: inline-block; font-family: var(--mono); font-size: 9.5px; padding: 1px 6px; border-radius: 3px; }
-  .badge.sim { color: var(--yellow); border: 1px solid rgba(255,194,77,0.3); background: rgba(255,194,77,0.08); }
-  .badge.prod { color: var(--accent); border: 1px solid var(--accent-border); background: var(--accent-dim); }
-
-  .packet-card {
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.75rem;
-    margin-bottom: 0.5rem; background: var(--surface);
-  }
-  .packet-card .seq { font-family: var(--mono); font-size: 10px; color: var(--accent); margin-bottom: 0.3rem; }
-  .packet-card .kv .v { font-size: 10px; }
-
-  details.raw { margin-top: 0.5rem; }
-  details.raw summary {
-    font-family: var(--mono); font-size: 10px; color: var(--text-secondary); cursor: pointer;
-  }
-  pre.raw-text {
-    font-family: var(--mono); font-size: 10px; color: var(--text-secondary);
-    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
-    padding: 0.6rem; margin-top: 0.5rem; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow-y: auto;
+  .scenario-desc {
+    font-size: 0.875rem; color: var(--text-dim); line-height: 1.7;
+    margin-bottom: 1.25rem;
   }
 
-  /* Right panel: verifier steps */
-  .step {
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.75rem;
-    margin-bottom: 0.5rem; background: var(--surface); opacity: 0; transform: translateY(4px);
-    animation: reveal 0.28s ease forwards;
+  /* Inputs preview */
+  .inputs-block {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.85rem 1rem; margin-bottom: 1.25rem; overflow-x: auto;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
-  @keyframes reveal { to { opacity: 1; transform: translateY(0); } }
-  .step-head { display: flex; align-items: center; justify-content: space-between; }
-  .step-name { font-family: var(--mono); font-size: 11.5px; color: var(--text-primary); }
-  .tag { font-family: var(--mono); font-size: 9.5px; font-weight: 700; padding: 2px 8px; border-radius: 3px; letter-spacing: 0.05em; }
-  .tag.PASS { color: var(--accent); border: 1px solid var(--accent-border); background: var(--accent-dim); }
-  .tag.FAIL { color: var(--red); border: 1px solid var(--red-border); background: var(--red-dim); }
-  .tag.SKIP { color: var(--yellow); border: 1px solid rgba(255,194,77,0.3); background: rgba(255,194,77,0.08); }
-  .step-detail {
-    margin-top: 0.4rem; font-family: var(--mono); font-size: 10px; color: var(--text-secondary);
-    white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+  .inputs-block pre {
+    font-family: var(--mono); font-size: 10.5px; line-height: 1.7;
+    color: var(--text-dim); white-space: pre;
   }
+  .ck { color: var(--text-ghost); }
+  .cv { color: var(--text-dim); }
+  .cv-s { color: var(--text); }
+  .cv-n { color: var(--accent); }
 
-  .verdict {
-    margin-top: 0.75rem; padding: 0.85rem 1rem; border-radius: 4px; text-align: center;
-    font-family: var(--mono); font-size: 13px; font-weight: 700; letter-spacing: 0.08em;
-    border: 1px solid var(--border);
+  /* Run button */
+  .run-btn {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    padding: 0.65rem 1.4rem; background: var(--accent); color: #061A0F;
+    border: none; border-radius: 5px;
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+    letter-spacing: 0.08em; cursor: pointer; transition: filter 0.15s, opacity 0.15s;
   }
-  .verdict.PASS { color: var(--accent); border-color: var(--accent-border); background: var(--accent-dim); }
-  .verdict.FAIL { color: var(--red); border-color: var(--red-border); background: var(--red-dim); }
-  .ecr-line { text-align: center; font-family: var(--mono); font-size: 10.5px; color: var(--text-secondary); margin-top: 0.4rem; }
-
+  .run-btn:hover:not(:disabled) { filter: brightness(1.08); }
+  .run-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .spinner {
-    display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border);
-    border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 0.4rem;
-    vertical-align: -2px;
+    width: 11px; height: 11px; border-radius: 50%;
+    border: 2px solid rgba(6,26,15,0.3); border-top-color: #061A0F;
+    animation: spin 0.65s linear infinite; display: none;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Section labels ── */
+  .section-label {
+    font-family: var(--mono); font-size: 9.5px; color: var(--text-dim);
+    letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 0.9rem;
+  }
+
+  /* ── Timeline ── */
+  .timeline { display: none; margin-bottom: 2rem; }
+  .timeline.on { display: block; }
+
+  .tl-track { position: relative; padding-left: 1.5rem; }
+  .tl-track::before {
+    content: ''; position: absolute; left: 4px; top: 8px; bottom: 0;
+    width: 1px; background: var(--border);
+  }
+
+  .tl-item {
+    position: relative; margin-bottom: 0.85rem;
+    opacity: 0; transform: translateY(4px);
+    animation: rise 0.25s ease forwards;
+  }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+
+  .tl-item::before {
+    content: ''; position: absolute;
+    left: -1.5rem; top: 5px;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--border); border: 1.5px solid var(--border);
+    transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+  }
+  .tl-item.done::before {
+    background: var(--accent); border-color: var(--accent);
+    box-shadow: 0 0 6px rgba(0,232,121,0.3);
+  }
+  .tl-item.wait::before {
+    background: transparent; border-color: var(--amber);
+    animation: blink 1s ease infinite;
+  }
+  .tl-item.fail::before { background: var(--red); border-color: var(--red); }
+  @keyframes blink { 50% { opacity: 0.35; } }
+
+  .tl-main  { font-size: 0.8125rem; color: var(--text); line-height: 1.4; }
+  .tl-sub   { font-family: var(--mono); font-size: 10px; color: var(--text-dim); margin-top: 0.2rem; }
+
+  /* ── Hash chain ── */
+  .chain-section { display: none; margin-bottom: 2rem; }
+  .chain-section.on { display: block; }
+
+  .chain-row {
+    display: flex; align-items: center; overflow-x: auto;
+    gap: 0; padding: 0.25rem 0 1rem;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  .chain-node {
+    flex-shrink: 0; opacity: 0;
+    animation: rise 0.25s ease forwards;
+  }
+  .chain-box {
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 0.45rem 0.65rem; background: var(--surface);
+    min-width: 82px; text-align: center;
+  }
+  .chain-box.genesis { border-color: var(--amber-border); background: var(--amber-dim); }
+  .chain-box.seal    { border-color: var(--accent-border); background: var(--accent-dim); }
+  .chain-box-label {
+    font-family: var(--mono); font-size: 8px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.25rem;
+  }
+  .chain-box-hash {
+    font-family: var(--mono); font-size: 9px; color: var(--text);
+    word-break: break-all;
+  }
+  .chain-box.genesis .chain-box-hash { color: var(--amber); }
+  .chain-box.seal    .chain-box-hash { color: var(--accent); }
+
+  .chain-arrow {
+    flex-shrink: 0; font-family: var(--mono); font-size: 13px;
+    color: var(--border); padding: 0 5px;
+    opacity: 0; animation: rise 0.2s ease forwards;
+  }
+
+  /* ── Verification grid ── */
+  .verify-section { display: none; }
+  .verify-section.on { display: block; }
+
+  .steps-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem; margin-bottom: 0.9rem;
+  }
+  @media (max-width: 580px) { .steps-grid { grid-template-columns: repeat(2, 1fr); } }
+
+  .step-card {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.6rem 0.7rem; background: var(--surface);
+    opacity: 0; transform: translateY(4px);
+    animation: rise 0.25s ease forwards;
+  }
+  .step-card-head {
+    display: flex; align-items: flex-start;
+    justify-content: space-between; gap: 0.4rem; margin-bottom: 0.2rem;
+  }
+  .step-num  { font-family: var(--mono); font-size: 8.5px; color: var(--text-ghost); flex-shrink: 0; padding-top: 1px; }
+  .step-name { font-family: var(--mono); font-size: 9.5px; color: var(--text-dim); flex: 1; line-height: 1.35; }
+  .step-tag  {
+    font-family: var(--mono); font-size: 8px; font-weight: 700;
+    padding: 1px 5px; border-radius: 3px; letter-spacing: 0.05em; flex-shrink: 0;
+  }
+  .step-tag.PASS { color: var(--accent); border: 1px solid var(--accent-border); background: var(--accent-dim); }
+  .step-tag.FAIL { color: var(--red);    border: 1px solid var(--red-border);    background: var(--red-dim);   }
+  .step-tag.SKIP { color: var(--amber);  border: 1px solid var(--amber-border);  background: var(--amber-dim); }
+  .step-detail {
+    font-family: var(--mono); font-size: 9px; color: var(--text-ghost);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ── Verdict ── */
+  .verdict {
+    padding: 1.25rem 1.5rem; border-radius: 8px; text-align: center;
+    border: 1px solid var(--border); margin-top: 0.5rem;
+    opacity: 0; animation: rise 0.35s ease forwards;
+  }
+  .verdict.PASS { border-color: var(--accent-border); background: var(--accent-dim); }
+  .verdict.FAIL { border-color: var(--red-border);    background: var(--red-dim);   }
+  .verdict-text {
+    font-family: var(--mono); font-size: 1rem; font-weight: 700;
+    letter-spacing: 0.12em; margin-bottom: 0.4rem;
+  }
+  .verdict.PASS .verdict-text { color: var(--accent); }
+  .verdict.FAIL .verdict-text { color: var(--red);    }
+  .verdict-sub { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); }
+
+  /* ── What this proves ── */
+  .proof-section { display: none; margin-top: 2.5rem; }
+  .proof-section.on { display: block; }
+  .proof-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem;
+  }
+  @media (max-width: 560px) { .proof-grid { grid-template-columns: 1fr; } }
+  .proof-item {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 1.1rem; background: var(--surface);
+    opacity: 0; animation: rise 0.3s ease forwards;
+  }
+  .proof-marker {
+    font-family: var(--mono); font-size: 9px; color: var(--amber);
+    letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 0.5rem;
+  }
+  .proof-item-title {
+    font-size: 0.8125rem; font-weight: 600; margin-bottom: 0.4rem;
+  }
+  .proof-item-desc {
+    font-size: 0.75rem; color: var(--text-dim); line-height: 1.6;
+  }
+
+  /* ── Run again ── */
+  .run-again { display: none; margin-top: 1.75rem; text-align: center; }
+  .run-again.on { display: block; }
+  .run-again-btn {
+    padding: 0.55rem 1.25rem;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: transparent; color: var(--text-dim);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+    cursor: pointer; transition: border-color 0.15s, color 0.15s;
+  }
+  .run-again-btn:hover { border-color: var(--accent-border); color: var(--accent); }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="brand">VAR <span>/ verifiable agent runtime — live demo</span></div>
-  <div id="conn-badge">checking bridge…</div>
+<header class="header">
+  <div class="brand">VAR <em>/ verifiable agent runtime</em></div>
+  <div class="conn-badge" id="connBadge">checking…</div>
 </header>
 
-<div class="panels">
-  <div class="panel">
-    <div class="panel-head">Send Request → Enclave</div>
-    <div class="panel-body">
-      <select id="fn">
-        <option value="echo">fn: echo</option>
-        <option value="verify">fn: verify</option>
-      </select>
+<main class="page">
 
-      <div id="echo-fields">
-        <span class="field-label">Input</span>
-        <textarea id="input" class="field-input" placeholder="Enter a value to send into the enclave as attested compute input…">agent action: approve invoice #4471 for $12,500</textarea>
+  <!-- ── Scenario card ── -->
+  <div class="scenario-card">
+    <div class="eyebrow">Live demo — guided scenario</div>
+    <h1 class="scenario-title">AI trading agent requests rebalancing authorization</h1>
+    <p class="scenario-desc">
+      An autonomous DeFi agent queries protocol TVL and decides whether to approve a liquidity rebalance.
+      Every step — the inputs, the computation, the output — is cryptographically logged inside an
+      AWS Nitro Enclave. The resulting evidence bundle is independently verifiable by anyone:
+      no access to the enclave, no trust in the operator.
+    </p>
+
+    <div class="inputs-block">
+      <pre><span class="ck">agent_id </span>  <span class="cv-s">"rebalancer-v1"</span>
+<span class="ck">action   </span>  <span class="cv-s">"liquidity_rebalance"</span>
+<span class="ck">protocol </span>  <span class="cv-s">"uniswap-v3"</span>
+<span class="ck">pool     </span>  <span class="cv-s">"ETH/USDC-0.05%"</span>
+<span class="ck">tvl_usd  </span>  <span class="cv-n">2847391028</span>
+<span class="ck">threshold</span>  <span class="cv-n">1000000</span>
+<span class="ck">decision </span>  <span class="cv-s">"APPROVED"</span>
+<span class="ck">risk_model</span> <span class="cv-s">"conservative-v2"</span></pre>
+    </div>
+
+    <button class="run-btn" id="runBtn">
+      <span class="spinner" id="spinner"></span>
+      <span id="btnText">RUN SCENARIO</span>
+    </button>
+  </div>
+
+  <!-- ── Timeline ── -->
+  <div class="timeline" id="timeline">
+    <div class="section-label">Execution trace</div>
+    <div class="tl-track" id="tlTrack"></div>
+  </div>
+
+  <!-- ── Hash chain ── -->
+  <div class="chain-section" id="chainSection">
+    <div class="section-label">L1 hash chain</div>
+    <div class="chain-row" id="chainRow"></div>
+  </div>
+
+  <!-- ── Verification ── -->
+  <div class="verify-section" id="verifySection">
+    <div class="section-label">§8 verification — steps 1–12</div>
+    <div class="steps-grid" id="stepsGrid"></div>
+    <div id="verdictEl"></div>
+  </div>
+
+  <!-- ── What this proves ── -->
+  <div class="proof-section" id="proofSection">
+    <div class="section-label">What this proves</div>
+    <div class="proof-grid">
+      <div class="proof-item" style="animation-delay:0ms">
+        <div class="proof-marker">01 — integrity</div>
+        <div class="proof-item-title">Computation is tamper-evident</div>
+        <div class="proof-item-desc">The decision was computed exactly as logged. The L1 hash chain — SHA-256 folded at every step — means any alteration breaks every subsequent hash and signature.</div>
       </div>
-
-      <div id="verify-fields" style="display:none">
-        <span class="field-label">Document</span>
-        <textarea id="doc-input" class="field-input" placeholder="Text to hash and verify inside the enclave…"></textarea>
-        <span class="field-label">Expected SHA-256</span>
-        <div class="hash-row">
-          <input id="hash-input" class="field-input" type="text" spellcheck="false" placeholder="64-char hex — or click HASH DOC to compute">
-          <button id="compute-hash">HASH DOC</button>
-        </div>
+      <div class="proof-item" style="animation-delay:100ms">
+        <div class="proof-marker">02 — hardware</div>
+        <div class="proof-item-title">Silicon root of trust</div>
+        <div class="proof-item-desc">In production, signatures are issued by AWS Nitro silicon. PCR measurements pin the exact binary that ran — no operator can swap the code without breaking the attestation.</div>
       </div>
-
-      <button id="send">SEND TO ENCLAVE</button>
-      <div class="log" id="log"></div>
+      <div class="proof-item" style="animation-delay:200ms">
+        <div class="proof-marker">03 — auditable</div>
+        <div class="proof-item-title">Zero-trust verification</div>
+        <div class="proof-item-desc">Any counterparty can run apex_verify.py against this bundle — no enclave access, no trust in VAR, no call to any VAR infrastructure. The math is the auditor.</div>
+      </div>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="panel-head">APEX Bundle</div>
-    <div class="panel-body" id="bundle-body">
-      <div class="empty-state">— waiting for a request —</div>
-    </div>
+  <!-- ── Run again ── -->
+  <div class="run-again" id="runAgain">
+    <button class="run-again-btn" id="runAgainBtn">RUN AGAIN</button>
   </div>
 
-  <div class="panel">
-    <div class="panel-head">Verifier — §8 Steps 1–12</div>
-    <div class="panel-body" id="steps-body">
-      <div class="empty-state">— no bundle to verify yet —</div>
-    </div>
-  </div>
-</div>
+</main>
 
 <script>
-const logEl = document.getElementById('log');
-const bundleBody = document.getElementById('bundle-body');
-const stepsBody = document.getElementById('steps-body');
-const sendBtn = document.getElementById('send');
-const input = document.getElementById('input');
-const docInput = document.getElementById('doc-input');
-const hashInput = document.getElementById('hash-input');
-const fnSelect = document.getElementById('fn');
-const connBadge = document.getElementById('conn-badge');
-const echoFields = document.getElementById('echo-fields');
-const verifyFields = document.getElementById('verify-fields');
+// ── Scenario ──────────────────────────────────────────────────────────────────
+const SCENARIO = {
+  fn: "echo",
+  inputs: {
+    agent_id:    "rebalancer-v1",
+    action:      "liquidity_rebalance",
+    protocol:    "uniswap-v3",
+    pool:        "ETH/USDC-0.05%",
+    tvl_usd:     2847391028,
+    threshold_usd: 1000000,
+    decision:    "APPROVED",
+    risk_model:  "conservative-v2"
+  }
+};
 
-function logLine(msg, cls) {
-  const div = document.createElement('div');
-  div.className = 'log-line' + (cls ? ' ' + cls : '');
-  const t = new Date().toLocaleTimeString();
-  div.innerHTML = `<span class="t">${t}</span>${escapeHtml(msg)}`;
-  logEl.prepend(div);
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const delay = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const short = (hex, n = 16) => hex ? hex.slice(0, n) + '…' : '';
+
+// ── Elements ──────────────────────────────────────────────────────────────────
+const connBadge    = $('connBadge');
+const runBtn       = $('runBtn');
+const spinner      = $('spinner');
+const btnText      = $('btnText');
+const timeline     = $('timeline');
+const tlTrack      = $('tlTrack');
+const chainSection = $('chainSection');
+const chainRow     = $('chainRow');
+const verifySection = $('verifySection');
+const stepsGrid    = $('stepsGrid');
+const verdictEl    = $('verdictEl');
+const proofSection = $('proofSection');
+const runAgain     = $('runAgain');
+
+// ── Timeline ──────────────────────────────────────────────────────────────────
+function addTl(state, main, sub) {
+  const el = document.createElement('div');
+  el.className = `tl-item ${state}`;
+  el.innerHTML = `<div class="tl-main">${esc(main)}</div><div class="tl-sub">${sub ? esc(sub) : ''}</div>`;
+  tlTrack.appendChild(el);
+  return el;
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
+function setTl(el, state, main, sub) {
+  el.className = `tl-item ${state}`;
+  el.querySelector('.tl-main').textContent = main;
+  el.querySelector('.tl-sub').textContent  = sub || '';
 }
 
-function short(hex, n = 16) {
-  if (!hex) return '';
-  return hex.length > n ? hex.slice(0, n) + '…' : hex;
+// ── Hash chain ────────────────────────────────────────────────────────────────
+function addChainNode(label, hash, type, delayMs) {
+  if (chainRow.children.length > 0) {
+    const arrow = document.createElement('div');
+    arrow.className = 'chain-arrow';
+    arrow.style.animationDelay = delayMs + 'ms';
+    arrow.textContent = '→';
+    chainRow.appendChild(arrow);
+  }
+  const node = document.createElement('div');
+  node.className = 'chain-node';
+  node.style.animationDelay = delayMs + 'ms';
+  node.innerHTML = `
+    <div class="chain-box ${type}">
+      <div class="chain-box-label">${esc(label)}</div>
+      <div class="chain-box-hash">${esc(short(hash, 10))}</div>
+    </div>`;
+  chainRow.appendChild(node);
 }
 
+// ── Verification steps ────────────────────────────────────────────────────────
+const STEP_NUM_RE = /^Step (\d+(?:\.\d+)?)\s+(.+)$/;
+
+function renderSteps(steps) {
+  stepsGrid.innerHTML = '';
+  steps.forEach((s, i) => {
+    const m = STEP_NUM_RE.exec(s.step);
+    const num  = m ? '§' + m[1] : '';
+    const name = m ? m[2] : s.step;
+    const detail = (s.detail || '').split('\n')[0].trim();
+
+    const card = document.createElement('div');
+    card.className = 'step-card';
+    card.style.animationDelay = (i * 65) + 'ms';
+    card.innerHTML = `
+      <div class="step-card-head">
+        <span class="step-num">${esc(num)}</span>
+        <span class="step-name">${esc(name)}</span>
+        <span class="step-tag ${s.status}">${esc(s.status)}</span>
+      </div>
+      <div class="step-detail">${esc(detail)}</div>`;
+    stepsGrid.appendChild(card);
+  });
+}
+
+// ── State helpers ─────────────────────────────────────────────────────────────
+function setRunning(yes) {
+  runBtn.disabled   = yes;
+  spinner.style.display = yes ? 'inline-block' : 'none';
+  btnText.textContent   = yes ? 'RUNNING…' : 'RUN SCENARIO';
+}
+
+function reset() {
+  tlTrack.innerHTML = '';
+  chainRow.innerHTML = '';
+  stepsGrid.innerHTML = '';
+  verdictEl.innerHTML = '';
+  [timeline, chainSection, verifySection, proofSection, runAgain]
+    .forEach(el => el.classList.remove('on'));
+}
+
+// ── Health ────────────────────────────────────────────────────────────────────
 async function checkHealth() {
   try {
     const r = await fetch('/api/health');
     const j = await r.json();
     if (j.ok) {
-      connBadge.textContent = 'bridge connected';
-      connBadge.className = 'ok';
-    } else {
-      throw new Error(j.error || 'unhealthy');
-    }
+      connBadge.textContent = '● enclave connected';
+      connBadge.className = 'conn-badge ok';
+    } else throw new Error(j.error);
+  } catch {
+    connBadge.textContent = '○ bridge unreachable';
+    connBadge.className = 'conn-badge err';
+  }
+}
+
+// ── Main demo flow ────────────────────────────────────────────────────────────
+async function runDemo() {
+  reset();
+  setRunning(true);
+  timeline.classList.add('on');
+
+  // ── Phase 1: health check ──────────────────────────────────────────────────
+  const tlConn = addTl('wait', 'Connecting to enclave…');
+  let health;
+  try {
+    const r = await fetch('/api/health');
+    health = await r.json();
   } catch (e) {
-    connBadge.textContent = 'bridge unreachable';
-    connBadge.className = 'err';
+    setTl(tlConn, 'fail', 'Bridge unreachable — is demo_server.py running?');
+    setRunning(false);
+    return;
   }
-}
-
-function renderBundle(bundle) {
-  const simBadge = bundle.sim_mode
-    ? '<span class="badge sim">SIMULATION</span>'
-    : '<span class="badge prod">NITRO HARDWARE</span>';
-
-  let html = `
-    <div class="bundle-section">
-      <h3>Bundle Header ${simBadge}</h3>
-      <div class="kv">
-        <div class="k">magic</div><div class="v hl">${bundle.magic}</div>
-        <div class="k">version</div><div class="v hl">${bundle.version}</div>
-        <div class="k">session_id</div><div class="v">${short(bundle.session_id, 32)}</div>
-        <div class="k">nonce</div><div class="v">${short(bundle.bootstrap_nonce, 32)}</div>
-        <div class="k">pcr0</div><div class="v">${short(bundle.pcr0)}</div>
-        <div class="k">pcr1</div><div class="v">${short(bundle.pcr1)}</div>
-        <div class="k">pcr2</div><div class="v">${short(bundle.pcr2)}</div>
-      </div>
-    </div>
-
-    <div class="bundle-section">
-      <h3>Evidence Packets (${bundle.packets.length})</h3>
-      ${bundle.packets.map(p => `
-        <div class="packet-card">
-          <div class="seq">seq=${p.seq}</div>
-          <div class="kv">
-            <div class="k">prev_stream</div><div class="v">${short(p.prev_stream)}</div>
-            <div class="k">stream</div><div class="v">${short(p.stream)}</div>
-            <div class="k">state</div><div class="v">${short(p.state)}</div>
-            <div class="k">sig</div><div class="v">${short(p.sig)}</div>
-          </div>
-        </div>
-      `).join('')}
-    </div>
-
-    <div class="bundle-section">
-      <h3>Bundle Seal</h3>
-      <div class="kv">
-        <div class="k">terminal_digest</div><div class="v">${short(bundle.seal.terminal_digest, 32)}</div>
-        <div class="k">bundle_hash</div><div class="v">${short(bundle.seal.bundle_hash, 32)}</div>
-        <div class="k">seal_sig</div><div class="v">${short(bundle.seal.seal_sig, 32)}</div>
-      </div>
-    </div>
-
-    <details class="raw">
-      <summary>raw bundle text</summary>
-      <pre class="raw-text">${escapeHtml(bundle.raw_text)}</pre>
-    </details>
-  `;
-  bundleBody.innerHTML = html;
-}
-
-function renderSteps(verification) {
-  stepsBody.innerHTML = '';
-  verification.steps.forEach((s, i) => {
-    const div = document.createElement('div');
-    div.className = 'step';
-    div.style.animationDelay = (i * 90) + 'ms';
-    div.innerHTML = `
-      <div class="step-head">
-        <span class="step-name">${escapeHtml(s.step)}</span>
-        <span class="tag ${s.status}">${s.status}</span>
-      </div>
-      <div class="step-detail">${escapeHtml(s.detail)}</div>
-    `;
-    stepsBody.appendChild(div);
-  });
-
-  const verdictDiv = document.createElement('div');
-  verdictDiv.className = 'verdict ' + (verification.all_passed ? 'PASS' : 'FAIL');
-  verdictDiv.style.animationDelay = (verification.steps.length * 90) + 'ms';
-  verdictDiv.style.opacity = '0';
-  verdictDiv.style.animation = 'reveal 0.28s ease forwards';
-  verdictDiv.textContent = verification.all_passed ? 'ALL STEPS PASSED' : 'VERIFICATION FAILED';
-  stepsBody.appendChild(verdictDiv);
-
-  const ecrDiv = document.createElement('div');
-  ecrDiv.className = 'ecr-line';
-  ecrDiv.textContent = `Evidence Coverage Ratio (ECR) = ${verification.ecr.toFixed(4)}`;
-  stepsBody.appendChild(ecrDiv);
-}
-
-fnSelect.addEventListener('change', () => {
-  const isVerify = fnSelect.value === 'verify';
-  echoFields.style.display = isVerify ? 'none' : '';
-  verifyFields.style.display = isVerify ? '' : 'none';
-});
-
-document.getElementById('compute-hash').addEventListener('click', async () => {
-  const doc = docInput.value;
-  if (!doc) return;
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(doc));
-  hashInput.value = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-});
-
-async function send() {
-  const fn = fnSelect.value;
-  let fetchBody;
-
-  if (fn === 'verify') {
-    const doc = docInput.value.trim();
-    const hash = hashInput.value.trim();
-    if (!doc) { logLine('✗ document is required for fn=verify', 'error'); return; }
-    if (!/^[0-9a-fA-F]{64}$/.test(hash)) { logLine('✗ expected_hash must be 64 hex chars', 'error'); return; }
-    fetchBody = JSON.stringify({ inputs: { document: doc, expected_hash: hash }, fn: 'verify' });
-    logLine(`→ fn=verify: hashing ${doc.length} chars, expecting ${hash.slice(0, 12)}…`);
-  } else {
-    const text = input.value.trim();
-    if (!text) return;
-    fetchBody = JSON.stringify({ input: text, fn: 'echo' });
-    logLine(`→ sending to enclave: "${text.slice(0, 60)}${text.length > 60 ? '…' : ''}"`);
+  if (!health.ok) {
+    setTl(tlConn, 'fail', `Bridge error: ${health.error}`);
+    setRunning(false);
+    return;
   }
+  setTl(tlConn, 'done', 'Enclave connection verified');
+  await delay(280);
 
-  sendBtn.disabled = true;
-  sendBtn.innerHTML = '<span class="spinner"></span>VERIFYING…';
-  stepsBody.innerHTML = '<div class="empty-state">— running compute + collecting evidence —</div>';
-
+  // ── Phase 2: compute request ───────────────────────────────────────────────
+  const tlCompute = addTl('wait', 'Dispatching compute request to enclave…',
+    'fn=echo  ' + Object.keys(SCENARIO.inputs).join(', '));
+  let result;
   try {
     const r = await fetch('/api/run', {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: fetchBody,
+      body:    JSON.stringify(SCENARIO)
     });
-    const j = await r.json();
-
-    if (!j.ok) {
-      logLine(`✗ ${j.stage || 'error'}: ${j.error}`, 'error');
-      bundleBody.innerHTML = `<div class="empty-state">— request failed at ${escapeHtml(j.stage || '?')} —</div>`;
-      stepsBody.innerHTML = `<div class="empty-state">— nothing to verify —</div>`;
-      return;
-    }
-
-    if (fn === 'verify' && typeof j.compute.output === 'object' && j.compute.output !== null) {
-      const out = j.compute.output;
-      logLine(`${out.match ? '✓' : '✗'} hash match: ${out.match ? 'TRUE' : 'FALSE'}`, out.match ? 'ok' : 'error');
-      logLine(`  computed  ${short(out.computed_hash, 32)}`, 'ok');
-      logLine(`  expected  ${short(out.expected_hash, 32)}`, 'ok');
-    } else {
-      logLine(`✓ compute output: ${typeof j.compute.output === 'object' ? JSON.stringify(j.compute.output) : j.compute.output}`, 'ok');
-    }
-    logLine(`✓ inputs_hash=${short(j.compute.inputs_hash)}`, 'ok');
-
-    renderBundle(j.bundle);
-    renderSteps(j.verification);
-
-    logLine(j.verification.all_passed
-      ? `✓ all 12 steps PASSED — ECR=${j.verification.ecr.toFixed(4)}`
-      : `✗ verification FAILED`, j.verification.all_passed ? 'ok' : 'error');
+    result = await r.json();
   } catch (e) {
-    logLine(`✗ network error: ${e.message}`, 'error');
-  } finally {
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'SEND TO ENCLAVE';
+    setTl(tlCompute, 'fail', `Network error: ${e.message}`);
+    setRunning(false);
+    return;
   }
+  if (!result.ok) {
+    setTl(tlCompute, 'fail', `Failed at ${result.stage || '?'}: ${result.error}`);
+    setRunning(false);
+    return;
+  }
+  setTl(tlCompute, 'done', 'Compute returned from enclave',
+    `inputs_hash=${short(result.compute.inputs_hash, 20)}`);
+  await delay(200);
+
+  // ── Phase 3: session + evidence chain ─────────────────────────────────────
+  const b = result.bundle;
+  addTl('done', 'Session established',
+    `session_id=${short(b.session_id, 24)}  ${b.sim_mode ? 'simulation mode' : 'Nitro hardware'}`);
+  await delay(160);
+
+  addTl('done', 'Bootstrap nonce anchored to attestation document',
+    `nonce=${short(b.bootstrap_nonce, 24)}`);
+
+  // Build hash chain
+  chainSection.classList.add('on');
+  addChainNode('genesis', b.bootstrap_nonce, 'genesis', 0);
+  await delay(160);
+
+  for (let i = 0; i < b.packets.length; i++) {
+    const p = b.packets[i];
+    addTl('done', `Evidence packet logged — seq ${p.seq}`,
+      `stream=${short(p.stream, 20)}  state(L2)=${short(p.state, 14)}`);
+    addChainNode(`seq ${p.seq}`, p.stream, '', (i + 1) * 55);
+    await delay(170);
+  }
+
+  addTl('done', 'Bundle sealed',
+    `terminal_digest=${short(b.seal.terminal_digest, 24)}`);
+  addChainNode('seal', b.seal.bundle_hash, 'seal', b.packets.length * 55 + 55);
+  await delay(300);
+
+  // ── Phase 4: verification ──────────────────────────────────────────────────
+  const tlVerify = addTl('wait', 'Running §8 verification — 12 steps…');
+  await delay(380);
+
+  verifySection.classList.add('on');
+  renderSteps(result.verification.steps);
+  await delay(result.verification.steps.length * 65 + 200);
+
+  setTl(tlVerify, 'done',
+    `Verification complete — ${result.verification.all_passed ? 'all steps passed' : 'some steps failed'}`,
+    `ECR=${result.verification.ecr.toFixed(4)}  ·  ${result.verification.steps.length} steps`);
+
+  // Verdict
+  const passed = result.verification.all_passed;
+  const vdiv = document.createElement('div');
+  vdiv.className = `verdict ${passed ? 'PASS' : 'FAIL'}`;
+  vdiv.innerHTML = `
+    <div class="verdict-text">${passed ? 'ALL STEPS PASSED' : 'VERIFICATION FAILED'}</div>
+    <div class="verdict-sub">ECR = ${result.verification.ecr.toFixed(4)} · ${result.verification.steps.length} steps · ${b.packets.length} evidence packet(s)</div>`;
+  verdictEl.appendChild(vdiv);
+
+  await delay(500);
+  proofSection.classList.add('on');
+  runAgain.classList.add('on');
+  setRunning(false);
 }
 
-sendBtn.addEventListener('click', send);
-input.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
-});
-[docInput, hashInput].forEach(el => el.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
-}));
+// ── Wire up ───────────────────────────────────────────────────────────────────
+$('runBtn').addEventListener('click', runDemo);
+$('runAgainBtn').addEventListener('click', runDemo);
 
 checkHealth();
-setInterval(checkHealth, 10000);
+setInterval(checkHealth, 15000);
 </script>
 
 </body>
