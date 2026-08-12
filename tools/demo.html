@@ -4,23 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VAR — Live Verification Demo</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23090C15'/%3E%3Cpolyline points='7,9 16,24 25,9' stroke='%2300C87A' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
 <style>
   :root {
-    --bg:             #09090B;
-    --surface:        #0F0F14;
-    --border:         #1C1C26;
-    --accent:         #00E879;
-    --accent-dim:     rgba(0,232,121,0.07);
-    --accent-border:  rgba(0,232,121,0.22);
+    --bg:             #090C15;
+    --surface:        #0D1020;
+    --surface-hi:     #111428;
+    --border:         #1C2038;
+    --accent:         #00C87A;
+    --accent-dim:     rgba(0,200,122,0.07);
+    --accent-border:  rgba(0,200,122,0.22);
     --amber:          #C8963A;
     --amber-dim:      rgba(200,150,58,0.08);
     --amber-border:   rgba(200,150,58,0.25);
     --red:            #FF4D4D;
     --red-dim:        rgba(255,77,77,0.08);
     --red-border:     rgba(255,77,77,0.25);
-    --text:           #EDEDEF;
-    --text-dim:       #70707A;
-    --text-ghost:     #30303C;
+    --text:           #E6E8F0;
+    --text-dim:       #6B7090;
+    --text-ghost:     #2E3248;
     --mono: "SF Mono", "Menlo", "Cascadia Code", "Consolas", monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
@@ -38,16 +40,22 @@
   .header {
     position: sticky; top: 0; z-index: 10;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0.85rem 1.5rem;
+    padding: 0.8rem 1.5rem;
     border-bottom: 1px solid var(--border);
-    background: rgba(9,9,11,0.94);
-    backdrop-filter: blur(10px);
+    background: rgba(9,12,21,0.95);
+    backdrop-filter: blur(12px);
   }
   .brand {
-    font-family: var(--mono); font-size: 11px;
-    color: var(--accent); letter-spacing: 0.18em; text-transform: uppercase;
+    display: flex; align-items: center; gap: 0.6rem;
   }
-  .brand em { color: var(--text-dim); font-style: normal; }
+  .brand-mark {
+    width: 22px; height: 22px; flex-shrink: 0;
+  }
+  .brand-text {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--accent); letter-spacing: 0.16em; text-transform: uppercase;
+  }
+  .brand-text em { color: var(--text-dim); font-style: normal; }
   .conn-badge {
     font-family: var(--mono); font-size: 9.5px;
     padding: 3px 9px; border-radius: 4px;
@@ -58,45 +66,75 @@
   .conn-badge.err { color: var(--red);    border-color: var(--red-border);    background: var(--red-dim);   }
 
   /* ── Page ── */
-  .page { max-width: 760px; margin: 0 auto; padding: 2.5rem 1.5rem 5rem; }
+  .page { max-width: 780px; margin: 0 auto; padding: 2.5rem 1.5rem 5rem; }
 
   /* ── Scenario card ── */
   .scenario-card {
-    border: 1px solid var(--border); border-radius: 8px;
+    border: 1px solid var(--border); border-radius: 10px;
     padding: 1.75rem; background: var(--surface); margin-bottom: 2rem;
   }
   .eyebrow {
     font-family: var(--mono); font-size: 9.5px; color: var(--amber);
-    letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 0.7rem;
+    letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 0.65rem;
   }
   .scenario-title {
-    font-size: 1.1rem; font-weight: 600; line-height: 1.4;
-    margin-bottom: 0.7rem;
+    font-size: 1.125rem; font-weight: 600; line-height: 1.4;
+    margin-bottom: 0.65rem; color: var(--text);
   }
   .scenario-desc {
-    font-size: 0.875rem; color: var(--text-dim); line-height: 1.7;
-    margin-bottom: 1.25rem;
+    font-size: 0.875rem; color: var(--text-dim); line-height: 1.75;
+    margin-bottom: 1.5rem;
   }
 
-  /* Inputs preview */
-  .inputs-block {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    padding: 0.85rem 1rem; margin-bottom: 1.25rem; overflow-x: auto;
-    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  /* ── Decision context panel ── */
+  .dc-panel {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; margin-bottom: 1.4rem;
   }
-  .inputs-block pre {
-    font-family: var(--mono); font-size: 10.5px; line-height: 1.7;
-    color: var(--text-dim); white-space: pre;
+  .dc-section { padding: 0.85rem 1.1rem; border-bottom: 1px solid var(--border); }
+  .dc-section:last-child { border-bottom: none; }
+  .dc-section-label {
+    font-family: var(--mono); font-size: 8.5px; color: var(--text-ghost);
+    letter-spacing: 0.18em; text-transform: uppercase; margin-bottom: 0.65rem;
   }
-  .ck { color: var(--text-ghost); }
-  .cv { color: var(--text-dim); }
-  .cv-s { color: var(--text); }
-  .cv-n { color: var(--accent); }
+  .dc-row {
+    display: flex; align-items: baseline; gap: 0.75rem;
+    margin-bottom: 0.35rem; font-size: 0.8125rem;
+  }
+  .dc-row:last-child { margin-bottom: 0; }
+  .dc-key {
+    color: var(--text-dim); min-width: 90px; flex-shrink: 0;
+    font-size: 0.75rem;
+  }
+  .dc-val { color: var(--text); }
+  .dc-val-mono { font-family: var(--mono); font-size: 11px; color: var(--text); }
+  .dc-amount {
+    font-family: var(--mono); font-size: 1rem; font-weight: 700;
+    color: var(--text); letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .dc-risk-low {
+    display: inline-block; font-family: var(--mono); font-size: 11px;
+    color: var(--accent); margin-right: 0.35rem;
+  }
+  .dc-decision-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.85rem 1.1rem;
+    background: var(--accent-dim);
+  }
+  .dc-decision-label {
+    font-family: var(--mono); font-size: 9px; color: var(--text-dim);
+    letter-spacing: 0.15em; text-transform: uppercase;
+  }
+  .dc-decision-val {
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    color: var(--accent); letter-spacing: 0.12em;
+  }
 
   /* Run button */
   .run-btn {
     display: inline-flex; align-items: center; gap: 0.5rem;
-    padding: 0.65rem 1.4rem; background: var(--accent); color: #061A0F;
+    padding: 0.65rem 1.4rem; background: var(--accent); color: #041510;
     border: none; border-radius: 5px;
     font-family: var(--mono); font-size: 11.5px; font-weight: 700;
     letter-spacing: 0.08em; cursor: pointer; transition: filter 0.15s, opacity 0.15s;
@@ -105,7 +143,7 @@
   .run-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .spinner {
     width: 11px; height: 11px; border-radius: 50%;
-    border: 2px solid rgba(6,26,15,0.3); border-top-color: #061A0F;
+    border: 2px solid rgba(4,21,16,0.3); border-top-color: #041510;
     animation: spin 0.65s linear infinite; display: none;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -142,7 +180,7 @@
   }
   .tl-item.done::before {
     background: var(--accent); border-color: var(--accent);
-    box-shadow: 0 0 6px rgba(0,232,121,0.3);
+    box-shadow: 0 0 6px rgba(0,200,122,0.35);
   }
   .tl-item.wait::before {
     background: transparent; border-color: var(--amber);
@@ -170,7 +208,7 @@
   .chain-box {
     border: 1px solid var(--border); border-radius: 5px;
     padding: 0.45rem 0.65rem; background: var(--surface);
-    min-width: 82px; text-align: center;
+    min-width: 86px; text-align: center;
   }
   .chain-box.genesis { border-color: var(--amber-border); background: var(--amber-dim); }
   .chain-box.seal    { border-color: var(--accent-border); background: var(--accent-dim); }
@@ -249,19 +287,19 @@
   }
   @media (max-width: 560px) { .proof-grid { grid-template-columns: 1fr; } }
   .proof-item {
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 1.1rem; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.1rem 1.15rem; background: var(--surface);
     opacity: 0; animation: rise 0.3s ease forwards;
   }
   .proof-marker {
-    font-family: var(--mono); font-size: 9px; color: var(--amber);
-    letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 0.5rem;
+    font-family: var(--mono); font-size: 8.5px; color: var(--amber);
+    letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 0.55rem;
   }
   .proof-item-title {
-    font-size: 0.8125rem; font-weight: 600; margin-bottom: 0.4rem;
+    font-size: 0.8125rem; font-weight: 600; margin-bottom: 0.4rem; line-height: 1.35;
   }
   .proof-item-desc {
-    font-size: 0.75rem; color: var(--text-dim); line-height: 1.6;
+    font-size: 0.75rem; color: var(--text-dim); line-height: 1.65;
   }
 
   /* ── Run again ── */
@@ -280,7 +318,13 @@
 <body>
 
 <header class="header">
-  <div class="brand">VAR <em>/ verifiable agent runtime</em></div>
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="32" height="32" rx="6" fill="#090C15"/>
+      <polyline points="7,9 16,24 25,9" stroke="#00C87A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <span class="brand-text">VAR <em>/ verifiable agent runtime</em></span>
+  </div>
   <div class="conn-badge" id="connBadge">checking…</div>
 </header>
 
@@ -288,24 +332,54 @@
 
   <!-- ── Scenario card ── -->
   <div class="scenario-card">
-    <div class="eyebrow">Live demo — guided scenario</div>
-    <h1 class="scenario-title">AI trading agent requests rebalancing authorization</h1>
+    <div class="eyebrow">Live demo — payment authorization</div>
+    <h1 class="scenario-title">AI payment agent approves a high-value wire transfer</h1>
     <p class="scenario-desc">
-      An autonomous DeFi agent queries protocol TVL and decides whether to approve a liquidity rebalance.
-      Every step — the inputs, the computation, the output — is cryptographically logged inside an
-      AWS Nitro Enclave. The resulting evidence bundle is independently verifiable by anyone:
-      no access to the enclave, no trust in the operator.
+      An autonomous payment agent evaluates a $2.34M transfer against policy and risk model,
+      then issues a decision. VAR logs every step — the inputs seen, the computation run,
+      the output produced — inside an AWS Nitro Enclave. The resulting proof is independently
+      verifiable by any auditor, regulator, or counterparty. No access to the enclave required.
     </p>
 
-    <div class="inputs-block">
-      <pre><span class="ck">agent_id </span>  <span class="cv-s">"rebalancer-v1"</span>
-<span class="ck">action   </span>  <span class="cv-s">"liquidity_rebalance"</span>
-<span class="ck">protocol </span>  <span class="cv-s">"uniswap-v3"</span>
-<span class="ck">pool     </span>  <span class="cv-s">"ETH/USDC-0.05%"</span>
-<span class="ck">tvl_usd  </span>  <span class="cv-n">2847391028</span>
-<span class="ck">threshold</span>  <span class="cv-n">1000000</span>
-<span class="ck">decision </span>  <span class="cv-s">"APPROVED"</span>
-<span class="ck">risk_model</span> <span class="cv-s">"conservative-v2"</span></pre>
+    <div class="dc-panel">
+      <div class="dc-section">
+        <div class="dc-section-label">Transfer details</div>
+        <div class="dc-row">
+          <span class="dc-key">Amount</span>
+          <span class="dc-amount">$2,340,000.00</span>
+        </div>
+        <div class="dc-row">
+          <span class="dc-key">Recipient</span>
+          <span class="dc-val">Axiom Infrastructure Partners</span>
+        </div>
+        <div class="dc-row">
+          <span class="dc-key">Bank</span>
+          <span class="dc-val">JP Morgan Chase &nbsp;·&nbsp; <span style="font-family:var(--mono);font-size:11px">CHASUS33</span></span>
+        </div>
+        <div class="dc-row">
+          <span class="dc-key">Reference</span>
+          <span class="dc-val-mono">INV-2026-0841</span>
+        </div>
+      </div>
+      <div class="dc-section">
+        <div class="dc-section-label">Risk assessment</div>
+        <div class="dc-row">
+          <span class="dc-key">Policy</span>
+          <span class="dc-val-mono">BOARD_MANDATE_2026_Q3</span>
+        </div>
+        <div class="dc-row">
+          <span class="dc-key">Risk score</span>
+          <span class="dc-val"><span class="dc-risk-low">0.12</span> — Low</span>
+        </div>
+        <div class="dc-row">
+          <span class="dc-key">Model</span>
+          <span class="dc-val-mono">payment-risk-v3</span>
+        </div>
+      </div>
+      <div class="dc-decision-row">
+        <span class="dc-decision-label">Agent decision</span>
+        <span class="dc-decision-val">APPROVED</span>
+      </div>
     </div>
 
     <button class="run-btn" id="runBtn">
@@ -322,13 +396,13 @@
 
   <!-- ── Hash chain ── -->
   <div class="chain-section" id="chainSection">
-    <div class="section-label">L1 hash chain</div>
+    <div class="section-label">L1 evidence chain</div>
     <div class="chain-row" id="chainRow"></div>
   </div>
 
   <!-- ── Verification ── -->
   <div class="verify-section" id="verifySection">
-    <div class="section-label">§8 verification — steps 1–12</div>
+    <div class="section-label">Cryptographic verification — 12 checks</div>
     <div class="steps-grid" id="stepsGrid"></div>
     <div id="verdictEl"></div>
   </div>
@@ -338,19 +412,19 @@
     <div class="section-label">What this proves</div>
     <div class="proof-grid">
       <div class="proof-item" style="animation-delay:0ms">
-        <div class="proof-marker">01 — integrity</div>
-        <div class="proof-item-title">Computation is tamper-evident</div>
-        <div class="proof-item-desc">The decision was computed exactly as logged. The L1 hash chain — SHA-256 folded at every step — means any alteration breaks every subsequent hash and signature.</div>
+        <div class="proof-marker">Decision integrity</div>
+        <div class="proof-item-title">The approval is tamper-evident</div>
+        <div class="proof-item-desc">The decision was computed exactly as logged. Any alteration — by the operator, a vendor, or a third party — breaks the cryptographic chain and fails verification immediately.</div>
       </div>
       <div class="proof-item" style="animation-delay:100ms">
-        <div class="proof-marker">02 — hardware</div>
-        <div class="proof-item-title">Silicon root of trust</div>
-        <div class="proof-item-desc">In production, signatures are issued by AWS Nitro silicon. PCR measurements pin the exact binary that ran — no operator can swap the code without breaking the attestation.</div>
+        <div class="proof-marker">Hardware attestation</div>
+        <div class="proof-item-title">Pinned to silicon, not trust</div>
+        <div class="proof-item-desc">In production, every approval is signed by AWS Nitro hardware. The exact model binary is measured and pinned — no one can swap the AI or alter its policy without breaking the attestation.</div>
       </div>
       <div class="proof-item" style="animation-delay:200ms">
-        <div class="proof-marker">03 — auditable</div>
-        <div class="proof-item-title">Zero-trust verification</div>
-        <div class="proof-item-desc">Any counterparty can run apex_verify.py against this bundle — no enclave access, no trust in VAR, no call to any VAR infrastructure. The math is the auditor.</div>
+        <div class="proof-marker">Auditor-portable</div>
+        <div class="proof-item-title">Verifiable without calling us</div>
+        <div class="proof-item-desc">Regulators, counterparties, and auditors run verification independently — no access to VAR infrastructure, no trust in the operator. The cryptographic proof travels with the decision record.</div>
       </div>
     </div>
   </div>
@@ -367,38 +441,39 @@
 const SCENARIO = {
   fn: "echo",
   inputs: {
-    agent_id:    "rebalancer-v1",
-    action:      "liquidity_rebalance",
-    protocol:    "uniswap-v3",
-    pool:        "ETH/USDC-0.05%",
-    tvl_usd:     2847391028,
-    threshold_usd: 1000000,
-    decision:    "APPROVED",
-    risk_model:  "conservative-v2"
+    agent_id:       "payment-agent-v3",
+    action:         "wire_transfer_approval",
+    amount_usd:     2340000,
+    recipient:      "Axiom Infrastructure Partners",
+    bank_swift:     "CHASUS33",
+    reference:      "INV-2026-0841",
+    risk_score:     0.12,
+    policy:         "BOARD_MANDATE_2026_Q3",
+    decision:       "APPROVED"
   }
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const $  = id => document.getElementById(id);
-const delay = ms => new Promise(r => setTimeout(r, ms));
-const esc = s => String(s).replace(/[&<>"']/g,
+const $      = id => document.getElementById(id);
+const delay  = ms => new Promise(r => setTimeout(r, ms));
+const esc    = s  => String(s).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const short = (hex, n = 16) => hex ? hex.slice(0, n) + '…' : '';
+const short  = (hex, n = 16) => hex ? hex.slice(0, n) + '…' : '';
 
 // ── Elements ──────────────────────────────────────────────────────────────────
-const connBadge    = $('connBadge');
-const runBtn       = $('runBtn');
-const spinner      = $('spinner');
-const btnText      = $('btnText');
-const timeline     = $('timeline');
-const tlTrack      = $('tlTrack');
-const chainSection = $('chainSection');
-const chainRow     = $('chainRow');
+const connBadge     = $('connBadge');
+const runBtn        = $('runBtn');
+const spinner       = $('spinner');
+const btnText       = $('btnText');
+const timeline      = $('timeline');
+const tlTrack       = $('tlTrack');
+const chainSection  = $('chainSection');
+const chainRow      = $('chainRow');
 const verifySection = $('verifySection');
-const stepsGrid    = $('stepsGrid');
-const verdictEl    = $('verdictEl');
-const proofSection = $('proofSection');
-const runAgain     = $('runAgain');
+const stepsGrid     = $('stepsGrid');
+const verdictEl     = $('verdictEl');
+const proofSection  = $('proofSection');
+const runAgain      = $('runAgain');
 
 // ── Timeline ──────────────────────────────────────────────────────────────────
 function addTl(state, main, sub) {
@@ -441,7 +516,7 @@ const STEP_NUM_RE = /^Step (\d+(?:\.\d+)?)\s+(.+)$/;
 function renderSteps(steps) {
   stepsGrid.innerHTML = '';
   steps.forEach((s, i) => {
-    const m = STEP_NUM_RE.exec(s.step);
+    const m    = STEP_NUM_RE.exec(s.step);
     const num  = m ? '§' + m[1] : '';
     const name = m ? m[2] : s.step;
     const detail = (s.detail || '').split('\n')[0].trim();
@@ -462,14 +537,14 @@ function renderSteps(steps) {
 
 // ── State helpers ─────────────────────────────────────────────────────────────
 function setRunning(yes) {
-  runBtn.disabled   = yes;
-  spinner.style.display = yes ? 'inline-block' : 'none';
-  btnText.textContent   = yes ? 'RUNNING…' : 'RUN SCENARIO';
+  runBtn.disabled           = yes;
+  spinner.style.display     = yes ? 'inline-block' : 'none';
+  btnText.textContent       = yes ? 'RUNNING…' : 'RUN SCENARIO';
 }
 
 function reset() {
-  tlTrack.innerHTML = '';
-  chainRow.innerHTML = '';
+  tlTrack.innerHTML   = '';
+  chainRow.innerHTML  = '';
   stepsGrid.innerHTML = '';
   verdictEl.innerHTML = '';
   [timeline, chainSection, verifySection, proofSection, runAgain]
@@ -483,11 +558,11 @@ async function checkHealth() {
     const j = await r.json();
     if (j.ok) {
       connBadge.textContent = '● enclave connected';
-      connBadge.className = 'conn-badge ok';
+      connBadge.className   = 'conn-badge ok';
     } else throw new Error(j.error);
   } catch {
     connBadge.textContent = '○ bridge unreachable';
-    connBadge.className = 'conn-badge err';
+    connBadge.className   = 'conn-badge err';
   }
 }
 
@@ -502,7 +577,7 @@ async function runDemo() {
   let health;
   try {
     const r = await fetch('/api/health');
-    health = await r.json();
+    health  = await r.json();
   } catch (e) {
     setTl(tlConn, 'fail', 'Bridge unreachable — is demo_server.py running?');
     setRunning(false);
@@ -517,8 +592,8 @@ async function runDemo() {
   await delay(280);
 
   // ── Phase 2: compute request ───────────────────────────────────────────────
-  const tlCompute = addTl('wait', 'Dispatching compute request to enclave…',
-    'fn=echo  ' + Object.keys(SCENARIO.inputs).join(', '));
+  const tlCompute = addTl('wait', 'Dispatching payment authorization to enclave…',
+    'agent=payment-agent-v3  policy=BOARD_MANDATE_2026_Q3  amount=$2,340,000');
   let result;
   try {
     const r = await fetch('/api/run', {
@@ -537,7 +612,7 @@ async function runDemo() {
     setRunning(false);
     return;
   }
-  setTl(tlCompute, 'done', 'Compute returned from enclave',
+  setTl(tlCompute, 'done', 'Authorization returned from enclave',
     `inputs_hash=${short(result.compute.inputs_hash, 20)}`);
   await delay(200);
 
@@ -550,7 +625,6 @@ async function runDemo() {
   addTl('done', 'Bootstrap nonce anchored to attestation document',
     `nonce=${short(b.bootstrap_nonce, 24)}`);
 
-  // Build hash chain
   chainSection.classList.add('on');
   addChainNode('genesis', b.bootstrap_nonce, 'genesis', 0);
   await delay(160);
@@ -559,17 +633,17 @@ async function runDemo() {
     const p = b.packets[i];
     addTl('done', `Evidence packet logged — seq ${p.seq}`,
       `stream=${short(p.stream, 20)}  state(L2)=${short(p.state, 14)}`);
-    addChainNode(`seq ${p.seq}`, p.stream, '', (i + 1) * 55);
+    addChainNode(`seq ${p.seq}`, p.stream, '', (i + 1) * 55);
     await delay(170);
   }
 
-  addTl('done', 'Bundle sealed',
+  addTl('done', 'Bundle sealed — decision record finalized',
     `terminal_digest=${short(b.seal.terminal_digest, 24)}`);
   addChainNode('seal', b.seal.bundle_hash, 'seal', b.packets.length * 55 + 55);
   await delay(300);
 
   // ── Phase 4: verification ──────────────────────────────────────────────────
-  const tlVerify = addTl('wait', 'Running §8 verification — 12 steps…');
+  const tlVerify = addTl('wait', 'Running cryptographic verification — 12 checks…');
   await delay(380);
 
   verifySection.classList.add('on');
@@ -577,16 +651,15 @@ async function runDemo() {
   await delay(result.verification.steps.length * 65 + 200);
 
   setTl(tlVerify, 'done',
-    `Verification complete — ${result.verification.all_passed ? 'all steps passed' : 'some steps failed'}`,
+    `Verification complete — ${result.verification.all_passed ? 'all checks passed' : 'some checks failed'}`,
     `ECR=${result.verification.ecr.toFixed(4)}  ·  ${result.verification.steps.length} steps`);
 
-  // Verdict
   const passed = result.verification.all_passed;
-  const vdiv = document.createElement('div');
+  const vdiv   = document.createElement('div');
   vdiv.className = `verdict ${passed ? 'PASS' : 'FAIL'}`;
   vdiv.innerHTML = `
-    <div class="verdict-text">${passed ? 'ALL STEPS PASSED' : 'VERIFICATION FAILED'}</div>
-    <div class="verdict-sub">ECR = ${result.verification.ecr.toFixed(4)} · ${result.verification.steps.length} steps · ${b.packets.length} evidence packet(s)</div>`;
+    <div class="verdict-text">${passed ? 'ALL CHECKS PASSED' : 'VERIFICATION FAILED'}</div>
+    <div class="verdict-sub">ECR = ${result.verification.ecr.toFixed(4)} · ${result.verification.steps.length} checks · ${b.packets.length} evidence packet(s)</div>`;
   verdictEl.appendChild(vdiv);
 
   await delay(500);
