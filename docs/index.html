@@ -1,0 +1,677 @@
+<title>VAR — Verifiable Agent Runtime</title>
+<style>
+/* ─── TOKENS ───────────────────────────────────────────────── */
+/* dark-first (navy): light palette on bare :root                */
+:root {
+  --bg:           #F8F5EF;
+  --surface:      #FFFFFF;
+  --surface-2:    #F0EBE2;
+  --border:       #D9D0C4;
+  --text:         #141820;
+  --text-2:       #6B6050;
+  --accent:       #9A6E1A;
+  --accent-lt:    #B07E20;
+  --accent-dim:   rgba(154,110,26,0.07);
+  --accent-bdr:   rgba(154,110,26,0.22);
+  --mono-clr:     #4A6080;
+  --pass-clr:     #2E8A56;
+  --sans:   system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --serif:  Georgia, 'Times New Roman', serif;
+  --mono:   'Menlo', 'Monaco', 'Cascadia Code', 'Courier New', monospace;
+}
+
+/* dark via OS preference */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:           #060A14;
+    --surface:      #0C1220;
+    --surface-2:    #131A2B;
+    --border:       #1E2B42;
+    --text:         #E2E8F4;
+    --text-2:       #6B7F9E;
+    --accent:       #C8963A;
+    --accent-lt:    #E6AE45;
+    --accent-dim:   rgba(200,150,58,0.08);
+    --accent-bdr:   rgba(200,150,58,0.22);
+    --mono-clr:     #A8BFD8;
+    --pass-clr:     #4CAF82;
+  }
+}
+
+/* explicit dark toggle wins */
+:root[data-theme="dark"] {
+  --bg:           #060A14;
+  --surface:      #0C1220;
+  --surface-2:    #131A2B;
+  --border:       #1E2B42;
+  --text:         #E2E8F4;
+  --text-2:       #6B7F9E;
+  --accent:       #C8963A;
+  --accent-lt:    #E6AE45;
+  --accent-dim:   rgba(200,150,58,0.08);
+  --accent-bdr:   rgba(200,150,58,0.22);
+  --mono-clr:     #A8BFD8;
+  --pass-clr:     #4CAF82;
+}
+
+/* explicit light toggle wins */
+:root[data-theme="light"] {
+  --bg:           #F8F5EF;
+  --surface:      #FFFFFF;
+  --surface-2:    #F0EBE2;
+  --border:       #D9D0C4;
+  --text:         #141820;
+  --text-2:       #6B6050;
+  --accent:       #9A6E1A;
+  --accent-lt:    #B07E20;
+  --accent-dim:   rgba(154,110,26,0.07);
+  --accent-bdr:   rgba(154,110,26,0.22);
+  --mono-clr:     #4A6080;
+  --pass-clr:     #2E8A56;
+}
+
+/* ─── RESET ───────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* ─── NAV ─────────────────────────────────────────────────── */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6%;
+  height: 56px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.nav-logo {
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  font-weight: bold;
+  letter-spacing: 0.05em;
+  color: var(--text);
+  text-decoration: none;
+}
+.nav-logo .sl { color: var(--accent); }
+.nav-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.nav-link {
+  font-size: 0.8125rem;
+  color: var(--text-2);
+  text-decoration: none;
+  letter-spacing: 0.01em;
+  transition: color 0.15s;
+}
+.nav-link:hover { color: var(--text); }
+.btn-access {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+  border: 1px solid var(--accent-bdr);
+  padding: 7px 16px;
+  border-radius: 3px;
+  text-decoration: none;
+  background: var(--accent-dim);
+  transition: background 0.15s;
+}
+.btn-access:hover { background: var(--accent-bdr); }
+
+/* ─── HERO ────────────────────────────────────────────────── */
+.hero-wrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 52px;
+  align-items: start;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 84px 6% 76px;
+}
+@media (max-width: 740px) {
+  .hero-wrap { grid-template-columns: 1fr; padding: 56px 6% 52px; }
+  .chain-visual { order: -1; }
+}
+
+.hero-eyebrow {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 20px;
+}
+.hero h1 {
+  font-family: var(--serif);
+  font-size: clamp(1.85rem, 3.8vw, 2.75rem);
+  font-weight: normal;
+  font-style: italic;
+  line-height: 1.2;
+  color: var(--text);
+  text-wrap: balance;
+  margin-bottom: 22px;
+}
+.hero h1 strong {
+  font-style: normal;
+  font-weight: 700;
+  color: var(--accent-lt);
+}
+.hero-body {
+  font-size: 0.9375rem;
+  color: var(--text-2);
+  line-height: 1.8;
+  margin-bottom: 36px;
+  max-width: 440px;
+}
+.hero-btns {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 0.875rem;
+  letter-spacing: 0.02em;
+  padding: 11px 24px;
+  border-radius: 3px;
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+.btn-primary:hover { opacity: 0.86; }
+.btn-ghost {
+  color: var(--text-2);
+  font-size: 0.875rem;
+  padding: 11px 20px;
+  border-radius: 3px;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn-ghost:hover { border-color: var(--text-2); color: var(--text); }
+
+/* ─── CHAIN VISUALIZATION ─────────────────────────────────── */
+.chain-visual {
+  display: flex;
+  flex-direction: column;
+  padding-top: 8px;
+}
+.chain-block {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 14px 16px;
+  font-family: var(--mono);
+  position: relative;
+}
+.chain-block + .chain-block {
+  margin-top: 6px;
+}
+.chain-block + .chain-block::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  left: 20px;
+  width: 1px;
+  height: 6px;
+  background: var(--border);
+}
+.cb-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 9px;
+}
+.cb-type {
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.cb-seq {
+  font-size: 0.6rem;
+  color: var(--text-2);
+  letter-spacing: 0.06em;
+}
+.cb-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 3px;
+}
+.cb-lbl {
+  font-size: 0.62rem;
+  color: var(--text-2);
+  min-width: 80px;
+  flex-shrink: 0;
+}
+.cb-val {
+  font-size: 0.68rem;
+  color: var(--mono-clr);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cb-val.pass { color: var(--pass-clr); }
+.chain-block.sealed {
+  border-color: var(--accent-bdr);
+  background: var(--surface-2);
+}
+.chain-block.sealed .cb-type { color: var(--accent-lt); }
+
+/* ─── SHARED SECTION ELEMENTS ─────────────────────────────── */
+.sec-label {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 14px;
+}
+.sec-h2 {
+  font-size: clamp(1.4rem, 2.8vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+.sec-lead {
+  color: var(--text-2);
+  font-size: 0.9375rem;
+  line-height: 1.8;
+  max-width: 580px;
+}
+.hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0 6%;
+}
+
+/* ─── CONSTRUCTION ────────────────────────────────────────── */
+.construction {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 76px 6%;
+}
+.construction .sec-lead { margin-top: 12px; margin-bottom: 48px; }
+
+.pillars {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+@media (max-width: 640px) {
+  .pillars { grid-template-columns: 1fr; }
+}
+.pillar {
+  background: var(--surface);
+  padding: 28px 24px;
+}
+.pillar-tag {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+.pillar h3 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+  line-height: 1.35;
+}
+.pillar p {
+  font-size: 0.855rem;
+  color: var(--text-2);
+  line-height: 1.75;
+}
+.pillar code {
+  font-family: var(--mono);
+  font-size: 0.8em;
+  color: var(--mono-clr);
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+/* ─── USE CASES ───────────────────────────────────────────── */
+.use-cases-wrap {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 76px 6%;
+}
+.use-cases-wrap .sec-h2 { margin-top: 12px; margin-bottom: 48px; }
+.use-cases {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+@media (max-width: 640px) {
+  .use-cases { grid-template-columns: 1fr; }
+}
+.use-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 28px 26px;
+}
+.use-tag {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-bdr);
+  padding: 3px 10px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-bottom: 18px;
+}
+.use-card h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+  line-height: 1.35;
+}
+.use-card p {
+  font-size: 0.875rem;
+  color: var(--text-2);
+  line-height: 1.75;
+}
+
+/* ─── QUICKSTART ──────────────────────────────────────────── */
+.quickstart {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 76px 6%;
+}
+.quickstart .sec-h2 { margin-top: 0; margin-bottom: 10px; }
+.quickstart .sec-lead { margin-bottom: 28px; }
+.code-wrap { overflow-x: auto; }
+pre.code-block {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 20px 22px;
+  font-family: var(--mono);
+  font-size: 0.775rem;
+  line-height: 1.85;
+  white-space: pre;
+  color: var(--text);
+}
+.cm { color: var(--text-2); }
+.ca { color: var(--accent-lt); }
+
+/* ─── CTA STRIP ───────────────────────────────────────────── */
+.cta-wrap {
+  max-width: 1040px;
+  margin: 0 auto;
+}
+.cta-strip {
+  border-top: 1px solid var(--border);
+  padding: 72px 6% 64px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 40px;
+  align-items: center;
+}
+@media (max-width: 580px) {
+  .cta-strip { grid-template-columns: 1fr; }
+  .cta-right { text-align: left; }
+}
+.cta-strip h2 {
+  font-size: clamp(1.3rem, 2.5vw, 1.8rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+  line-height: 1.3;
+}
+.cta-strip p {
+  color: var(--text-2);
+  font-size: 0.9rem;
+  line-height: 1.75;
+  max-width: 440px;
+}
+.cta-right { text-align: right; }
+.cta-email {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-bdr);
+  padding-bottom: 2px;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+.cta-email:hover { color: var(--accent-lt); border-color: var(--accent-lt); }
+
+/* ─── FOOTER ──────────────────────────────────────────────── */
+footer {
+  border-top: 1px solid var(--border);
+  padding: 20px 6%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.f-logo {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text-2);
+  text-decoration: none;
+  letter-spacing: 0.05em;
+}
+.f-logo .sl { color: var(--accent); }
+footer p {
+  font-size: 0.75rem;
+  color: var(--text-2);
+}
+</style>
+
+<!-- NAV -->
+<nav>
+  <a href="/" class="nav-logo">VAR<span class="sl">/</span>protocol</a>
+  <div class="nav-right">
+    <a href="#construction" class="nav-link">How it works</a>
+    <a href="https://github.com/kennethkabogo/VAR" class="nav-link" target="_blank" rel="noopener">Docs</a>
+    <a href="mailto:kenneth@varprotocol.com" class="btn-access">Request access</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section>
+  <div class="hero-wrap">
+    <div class="hero">
+      <p class="hero-eyebrow">Verifiable Agent Runtime · v2.7.0</p>
+      <h1>Cryptographic proof of what your AI agent <strong>actually did.</strong></h1>
+      <p class="hero-body">VAR seals every agent action into a tamper-evident evidence chain, hardware-attested inside AWS Nitro Enclaves. Any auditor verifies the bundle independently — no access to your infrastructure required.</p>
+      <div class="hero-btns">
+        <a href="mailto:kenneth@varprotocol.com" class="btn-primary">Request access</a>
+        <a href="mailto:kenneth@varprotocol.com?subject=Demo request" class="btn-ghost">Request a demo →</a>
+      </div>
+    </div>
+
+    <!-- Live hash chain visualization -->
+    <div class="chain-visual" aria-label="Example evidence chain showing three sequential entries">
+      <div class="chain-block">
+        <div class="cb-head">
+          <span class="cb-type">Log</span>
+          <span class="cb-seq">seq : 1</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">msg</span>
+          <span class="cb-val">"agent started — fetching TVL data"</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">stream</span>
+          <span class="cb-val">a4f2c1e8d903b471…</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">sig</span>
+          <span class="cb-val">9c2e4b8f1a0d3c7e…</span>
+        </div>
+      </div>
+
+      <div class="chain-block">
+        <div class="cb-head">
+          <span class="cb-type">Compute</span>
+          <span class="cb-seq">seq : 2</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">fn</span>
+          <span class="cb-val">echo</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">inputs_hash</span>
+          <span class="cb-val">3a7bd3e2f8c1049a…</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">stream</span>
+          <span class="cb-val">8f1e3c9b4d07a52e…</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">sig</span>
+          <span class="cb-val">4d7e2a1f9c803b65…</span>
+        </div>
+      </div>
+
+      <div class="chain-block sealed">
+        <div class="cb-head">
+          <span class="cb-type">Evidence Sealed</span>
+          <span class="cb-seq">seq : 3</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">state</span>
+          <span class="cb-val">d8e3f1a7c29b504d…</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">ECR</span>
+          <span class="cb-val">1.0000</span>
+        </div>
+        <div class="cb-row">
+          <span class="cb-lbl">result</span>
+          <span class="cb-val pass">PASS ✓</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="hr">
+
+<!-- THE CONSTRUCTION -->
+<section class="construction" id="construction">
+  <p class="sec-label">The construction</p>
+  <h2 class="sec-h2">Hardware-sealed from first byte to final signature.</h2>
+  <p class="sec-lead">Three primitives, stacked in order. Each one is independently verifiable. Together they produce an evidence bundle that no operator — including us — can forge or alter after the fact.</p>
+
+  <div class="pillars">
+    <div class="pillar">
+      <p class="pillar-tag">Chain</p>
+      <h3>Rolling SHA-256 hash chain</h3>
+      <p>Every log entry and computation extends the chain: <code>SHA-256(prev_stream ‖ new_data)</code>. Once written, nothing can be removed or reordered without breaking every subsequent hash.</p>
+    </div>
+    <div class="pillar">
+      <p class="pillar-tag">Key</p>
+      <h3>Ed25519 signatures from hardware</h3>
+      <p>Each chain snapshot is signed by a key that lives only inside the Nitro Enclave. Its public counterpart is bound into the NSM attestation document — a verifier can confirm the signature originated inside the measured binary.</p>
+    </div>
+    <div class="pillar">
+      <p class="pillar-tag">Verify</p>
+      <h3>Independent bundle verification</h3>
+      <p>Ship the bundle to any auditor. They run <code>apex_verify.py</code> against it — no access to your enclave, no call to VAR-controlled endpoints. The math either checks out or it doesn't.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="hr">
+
+<!-- USE CASES -->
+<section class="use-cases-wrap">
+  <p class="sec-label">Where it matters</p>
+  <h2 class="sec-h2">Two places where unverifiable AI output becomes a liability.</h2>
+  <div class="use-cases">
+    <div class="use-card">
+      <span class="use-tag">Financial agents</span>
+      <h3>Agents taking irreversible financial actions</h3>
+      <p>AI agents are executing trades, auto-generating Suspicious Activity Reports, managing treasury — each action irreversible and potentially subject to regulatory review. When a federal auditor asks "prove your AI didn't alter this SAR after generation," there is currently no cryptographic answer. VAR gives you one.</p>
+    </div>
+    <div class="use-card">
+      <span class="use-tag">Security workflows</span>
+      <h3>AI-generated findings at scale</h3>
+      <p>Security teams are drowning in AI-generated findings they cannot verify at the rate they arrive. The next scarce resource isn't more output — it's trustworthy attribution. VAR's evidence chain records exactly what process produced a finding, on what inputs, under what constraints.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="hr">
+
+<!-- QUICKSTART -->
+<section class="quickstart">
+  <p class="sec-label">Start in five minutes</p>
+  <h2 class="sec-h2">No AWS account required.</h2>
+  <p class="sec-lead">Simulation mode activates automatically when <code style="font-family:var(--mono);font-size:0.85em;color:var(--mono-clr)">/dev/nsm</code> is absent — you get a real hash chain and real Ed25519 signatures, with mock PCR measurements in place of hardware attestation.</p>
+  <div class="code-wrap">
+    <pre class="code-block"><span class="cm"># 1. Start the gateway</span>
+docker run -p 127.0.0.1:8765:8765 \
+  ghcr.io/kennethkabogo/var:latest
+
+<span class="cm"># 2. Log an agent action</span>
+curl -X POST http://127.0.0.1:8765/log \
+  -d '{"msg": "agent started"}'
+
+<span class="cm"># 3. Run an attested computation</span>
+curl -X POST http://127.0.0.1:8765/compute \
+  -d '{"fn": "echo", "inputs": {"value": 42}}'
+
+<span class="cm"># 4. Seal and verify the bundle</span>
+python3 tools/apex_verify.py --self-test</pre>
+  </div>
+</section>
+
+<hr class="hr">
+
+<!-- CTA -->
+<div class="cta-wrap">
+  <div class="cta-strip">
+    <div>
+      <h2>Early access is open.</h2>
+      <p>VAR is in active development with design partners. If you're building AI agents in financial infrastructure or security workflows, we want to talk.</p>
+    </div>
+    <div class="cta-right">
+      <a href="mailto:kenneth@varprotocol.com" class="cta-email">kenneth@varprotocol.com</a>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <a href="/" class="f-logo">VAR<span class="sl">/</span>protocol</a>
+  <p>© 2026 Verifiable Agent Runtime. AWS Nitro Enclaves is a trademark of Amazon Web Services, Inc.</p>
+</footer>
