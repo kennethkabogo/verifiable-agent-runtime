@@ -198,8 +198,13 @@ pub fn main() !void {
     const port_str = std.posix.getenv("VAR_PORT") orelse "8765";
     const port = std.fmt.parseInt(u16, port_str, 10) catch 8765;
     const api_token = std.posix.getenv("VAR_API_TOKEN");
+    const is_loopback = std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1");
     if (api_token == null) {
-        std.log.warn("[VAR-gateway] VAR_API_TOKEN not set — API auth disabled (dev mode)", .{});
+        if (!is_loopback) {
+            std.log.err("[VAR-gateway] refusing to bind non-loopback address without VAR_API_TOKEN — set VAR_API_TOKEN or use VAR_HOST=127.0.0.1", .{});
+            return error.MissingApiToken;
+        }
+        std.log.warn("[VAR-gateway] VAR_API_TOKEN not set — API auth disabled (loopback only, dev mode)", .{});
     }
 
     // 6a. Capture KMS config and warm NSM cache before the sandbox scrubs the

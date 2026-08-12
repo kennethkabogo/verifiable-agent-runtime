@@ -9,7 +9,7 @@ PCR measurements in place of hardware attestation.
 ## 1. Start the gateway
 
 ```bash
-docker run -p 8765:8765 ghcr.io/kennethkabogo/var:latest
+docker run -p 127.0.0.1:8765:8765 ghcr.io/kennethkabogo/var:latest
 ```
 
 Expected output:
@@ -17,6 +17,10 @@ Expected output:
 ```text
 [VAR-gateway] listening on 0.0.0.0:8765 (worker threads: 64)
 ```
+
+> **Note:** `-p 127.0.0.1:8765:8765` restricts the host-side port to loopback only.
+> On a cloud VM without this flag, port 8765 would be reachable from the public internet.
+> For production deployments, also set `-e VAR_API_TOKEN=<secret>` and remove the `127.0.0.1:` prefix.
 
 Leave this terminal open and open a second terminal for the next steps.
 
