@@ -8,21 +8,39 @@ PCR measurements in place of hardware attestation.
 
 ## 1. Start the gateway
 
+**Option A — Docker Compose (recommended):**
+
 ```bash
-docker run -p 127.0.0.1:8765:8765 ghcr.io/kennethkabogo/var:latest
+docker compose up
+```
+
+**Option B — plain Docker:**
+
+```bash
+docker run --rm -p 127.0.0.1:8765:8765 -e VAR_API_TOKEN=dev-local \
+  ghcr.io/kennethkabogo/var:latest
 ```
 
 Expected output:
 
 ```text
-[VAR-gateway] listening on 0.0.0.0:8765 (worker threads: 64)
+warning: [VAR-gateway] VAR_API_TOKEN not set — API auth disabled (loopback only, dev mode)
+info: [VAR-gateway] listening on 0.0.0.0:8765 (worker threads: 64)
 ```
 
-> **Note:** `-p 127.0.0.1:8765:8765` restricts the host-side port to loopback only.
-> On a cloud VM without this flag, port 8765 would be reachable from the public internet.
-> For production deployments, also set `-e VAR_API_TOKEN=<secret>` and remove the `127.0.0.1:` prefix.
+> **Why `VAR_API_TOKEN`?** The gateway binds to `0.0.0.0` inside the container so Docker
+> port-forwarding can reach it. Any non-loopback bind requires a token — without one the
+> gateway exits immediately. `dev-local` is a throwaway value for local development.
+> `-p 127.0.0.1:8765:8765` keeps the host-side port on loopback so no external traffic
+> reaches the container.
 
 Leave this terminal open and open a second terminal for the next steps.
+
+Set your token once in the second terminal so the examples below work by copy-paste:
+
+```bash
+export VAR_TOKEN=dev-local
+```
 
 ---
 
@@ -33,7 +51,7 @@ In simulation mode the attestation is a mock, but the structure is identical
 to production.
 
 ```bash
-curl -s http://127.0.0.1:8765/session | jq .
+curl -s -H "Authorization: Bearer $VAR_TOKEN" http://127.0.0.1:8765/session | jq .
 ```
 
 ```json
@@ -57,6 +75,7 @@ the entire evidence chain to this specific session and enclave instance.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8765/log \
+  -H "Authorization: Bearer $VAR_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"msg": "agent started — fetching TVL data"}' | jq .
 ```
@@ -69,6 +88,7 @@ reordered without breaking every subsequent signature.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8765/compute \
+  -H "Authorization: Bearer $VAR_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"fn": "echo", "inputs": {"source": "defillama", "tvl_usd": 1250000}}' | jq .
 ```
@@ -97,7 +117,7 @@ now commits to this specific computation having run.
 ## 4. Read the evidence bundle
 
 ```bash
-curl -s http://127.0.0.1:8765/evidence | jq .
+curl -s -H "Authorization: Bearer $VAR_TOKEN" http://127.0.0.1:8765/evidence | jq .
 ```
 
 ```json
@@ -168,21 +188,25 @@ To verify a bundle captured from the running gateway, first assemble and save it
 
 ```bash
 # 1. Capture the bundle header
-curl -s http://127.0.0.1:8765/session | jq -r '.bundle_header' > bundle.log
+curl -s -H "Authorization: Bearer $VAR_TOKEN" \
+  http://127.0.0.1:8765/session | jq -r '.bundle_header' > bundle.log
 
 # 2. Run a computation (note the sequence number in the response)
 curl -s -X POST http://127.0.0.1:8765/compute \
+  -H "Authorization: Bearer $VAR_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"fn": "echo", "inputs": {"value": 42}}' | jq .
 
 # 3. Append evidence packets (replace N with the "seq" from the compute response)
-curl -s "http://127.0.0.1:8765/evidence?from=1&to=N" \
+curl -s -H "Authorization: Bearer $VAR_TOKEN" \
+  "http://127.0.0.1:8765/evidence?from=1&to=N" \
   | jq -r '.packets[] |
       "EVIDENCE:prev_stream=\(.prev_stream):stream=\(.stream):state=\(.state):sig=\(.sig):seq=\(.sequence)"' \
   >> bundle.log
 
 # 4. Seal the session and append the seal line
-curl -s http://127.0.0.1:8765/seal | jq -r '.bundle_seal' >> bundle.log
+curl -s -H "Authorization: Bearer $VAR_TOKEN" \
+  http://127.0.0.1:8765/seal | jq -r '.bundle_seal' >> bundle.log
 
 # 5. Verify
 python3 tools/apex_verify.py bundle.log
@@ -219,15 +243,20 @@ VAR-controlled infrastructure.
 The simplest integration is three HTTP calls:
 
 ```python
-import json, urllib.request
+import json, os, urllib.request
 
 BASE = "http://127.0.0.1:8765"
+TOKEN = os.environ.get("VAR_API_TOKEN", "dev-local")
 
 def var(method, path, payload=None):
     body = json.dumps(payload).encode() if payload else None
     req = urllib.request.Request(
         f"{BASE}{path}", data=body,
-        headers={"Content-Type": "application/json"}, method=method
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {TOKEN}",
+        },
+        method=method,
     )
     with urllib.request.urlopen(req, timeout=5) as r:
         return json.loads(r.read())

@@ -34,6 +34,7 @@ import urllib.request
 
 GATEWAY = os.environ.get("VAR_GATEWAY", "http://127.0.0.1:8765")
 SKILL_ID = os.environ.get("SKILL_ID", "wallet-monitor")
+API_TOKEN = os.environ.get("VAR_API_TOKEN", "")
 
 
 # ── VAR gateway HTTP helpers (same pattern as gateway_skill.py) ─────────────
@@ -45,6 +46,8 @@ def _req(method: str, path: str, payload: dict | None = None) -> dict:
         "Content-Type": "application/json",
         "X-Skill-Id": SKILL_ID,
     }
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=5) as resp:

@@ -82,12 +82,20 @@ pub fn hardenProcess(extra_fds: []const std.posix.fd_t) void {
     dropCapabilities() catch |err| fatal("Capability drop failed: {}", .{err});
 
     // Seccomp MUST be last: once active only allowlisted syscalls may be made.
-    installSeccompFilter() catch |err| fatal("Seccomp install failed: {}", .{err});
-
-    std.log.info(
-        "[sandbox] Hardened: env scrubbed | Landlock | caps=∅ | seccomp/BPF active",
-        .{},
-    );
+    // The filter encodes x86_64 syscall numbers; skip it on other arches rather
+    // than installing a filter that kills on the first syscall (arch guard fires).
+    if (comptime builtin.cpu.arch == .x86_64) {
+        installSeccompFilter() catch |err| fatal("Seccomp install failed: {}", .{err});
+        std.log.info(
+            "[sandbox] Hardened: env scrubbed | Landlock | caps=∅ | seccomp/BPF active",
+            .{},
+        );
+    } else {
+        std.log.warn(
+            "[sandbox] seccomp/BPF filter is x86_64-only — skipped on {s} (Landlock + caps still active)",
+            .{@tagName(builtin.cpu.arch)},
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

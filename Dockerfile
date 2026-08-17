@@ -30,7 +30,7 @@ COPY build.zig build.zig.zon ./
 # Fetch all declared dependencies into ~/.cache/zig/p/.
 # Zig resumes from already-downloaded packages on retry, so network blips are recoverable.
 RUN for i in 1 2 3 4 5; do \
-      zig build --fetch && break; \
+      zig build --fetch -Dwith-ghostty=false && break; \
       [ "$i" -eq 5 ] && exit 1; \
       echo "fetch attempt $i/5 failed — retrying in 20s"; \
       sleep 20; \
@@ -39,7 +39,7 @@ RUN for i in 1 2 3 4 5; do \
 # Copy the rest of the source and compile.  No internet access needed.
 COPY . .
 
-RUN zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+RUN zig build -Doptimize=ReleaseSafe -Dcpu=baseline -Dwith-ghostty=false
 
 # Stage 2 — minimal runtime image
 # debian:bookworm-slim provides glibc, libstdc++, and ca-certificates.
