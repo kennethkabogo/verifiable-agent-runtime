@@ -39,12 +39,7 @@ RUN for i in 1 2 3 4 5; do \
 # Copy the rest of the source and compile.  No internet access needed.
 COPY . .
 
-RUN case "$TARGETARCH" in \
-      amd64) ZIG_TARGET="x86_64-linux-gnu" ;; \
-      arm64) ZIG_TARGET="aarch64-linux-gnu" ;; \
-      *)     echo "unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
-    esac \
-    && zig build -Doptimize=ReleaseSafe -Dtarget="$ZIG_TARGET" -Dcpu=baseline
+RUN zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
 # Stage 2 — minimal runtime image
 # debian:bookworm-slim provides glibc, libstdc++, and ca-certificates.
