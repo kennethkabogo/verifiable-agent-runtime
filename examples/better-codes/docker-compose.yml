@@ -1,0 +1,20 @@
+services:
+  var-gateway:
+    image: ghcr.io/kennethkabogo/var:latest
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      VAR_API_TOKEN: dev-local
+
+  lean-agent:
+    build: .
+    depends_on:
+      - var-gateway
+    environment:
+      VAR_GATEWAY: http://var-gateway:8765
+      VAR_API_TOKEN: dev-local
+      YUKON_STUB: "1"          # set to 0 and configure YUKON_TOKEN once CLI is live
+      # YUKON_TOKEN: your-token-here
+      PROOF_DIR: /workspace/proofs
+    volumes:
+      - ./proofs:/workspace/proofs
