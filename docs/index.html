@@ -514,7 +514,7 @@ footer p {
     <div class="hero">
       <p class="hero-eyebrow">Verifiable Agent Runtime · v2.7.0</p>
       <h1>Cryptographic proof of what your AI agent <strong>actually did.</strong></h1>
-      <p class="hero-body">VAR seals every agent action into a tamper-evident evidence chain, hardware-attested inside AWS Nitro Enclaves. Any auditor verifies the bundle independently — no access to your infrastructure required.</p>
+      <p class="hero-body">VAR records everything your AI agent does — signed inside an AWS Nitro Enclave so no one, including us, can alter the record after the fact. Any auditor can verify it independently, without access to your infrastructure.</p>
       <div class="hero-btns">
         <a href="mailto:kenneth@varprotocol.com" class="btn-primary">Request access</a>
         <a href="mailto:kenneth@varprotocol.com?subject=Demo request" class="btn-ghost">Request a demo →</a>
@@ -592,8 +592,8 @@ footer p {
 <!-- THE CONSTRUCTION -->
 <section class="construction" id="construction">
   <p class="sec-label">The construction</p>
-  <h2 class="sec-h2">Hardware-sealed from first byte to final signature.</h2>
-  <p class="sec-lead">Three primitives, stacked in order. Each one is independently verifiable. Together they produce an evidence bundle that no operator — including us — can forge or alter after the fact.</p>
+  <h2 class="sec-h2">Three layers. Each one independently verifiable.</h2>
+  <p class="sec-lead">A hash chain links every action. A hardware key signs it. Any auditor can check the result — no access to your enclave, no call to VAR-controlled endpoints. No operator, including us, can alter the record after the fact.</p>
 
   <div class="pillars">
     <div class="pillar">
@@ -604,12 +604,12 @@ footer p {
     <div class="pillar">
       <p class="pillar-tag">Key</p>
       <h3>Ed25519 signatures from hardware</h3>
-      <p>Each chain snapshot is signed by a key that lives only inside the Nitro Enclave. Its public counterpart is bound into the NSM attestation document — a verifier can confirm the signature originated inside the measured binary.</p>
+      <p>Each chain snapshot is signed by a key that lives only inside the Nitro Enclave. The enclave's attestation document ties that key to a specific, auditable binary — so a verifier knows exactly what code held the signing key.</p>
     </div>
     <div class="pillar">
       <p class="pillar-tag">Verify</p>
-      <h3>Independent bundle verification</h3>
-      <p>Ship the bundle to any auditor. They run <code>apex_verify.py</code> against it — no access to your enclave, no call to VAR-controlled endpoints. The math either checks out or it doesn't.</p>
+      <h3>Verification without access</h3>
+      <p>Ship the record to any auditor. They run <code>apex_verify.py</code> against it — no access to your enclave, no call to VAR-controlled endpoints. The math either checks out or it doesn't.</p>
     </div>
   </div>
 </section>
@@ -619,7 +619,7 @@ footer p {
 <!-- USE CASES -->
 <section class="use-cases-wrap">
   <p class="sec-label">Where it matters</p>
-  <h2 class="sec-h2">Two places where unverifiable AI output becomes a liability.</h2>
+  <h2 class="sec-h2">Two places where "trust us" stops being enough.</h2>
   <div class="use-cases">
     <div class="use-card">
       <span class="use-tag">Financial agents</span>
@@ -629,7 +629,7 @@ footer p {
     <div class="use-card">
       <span class="use-tag">Security workflows</span>
       <h3>AI-generated findings at scale</h3>
-      <p>Security teams are drowning in AI-generated findings they cannot verify at the rate they arrive. The next scarce resource isn't more output — it's trustworthy attribution. VAR's evidence chain records exactly what process produced a finding, on what inputs, under what constraints.</p>
+      <p>Security teams are drowning in AI-generated findings they cannot verify at the rate they arrive. The question isn't volume — it's accountability. VAR records exactly what process produced a finding, on what inputs, under what constraints.</p>
     </div>
   </div>
 </section>
@@ -640,7 +640,7 @@ footer p {
 <section class="quickstart">
   <p class="sec-label">Start in five minutes</p>
   <h2 class="sec-h2">No AWS account required.</h2>
-  <p class="sec-lead">Simulation mode activates automatically when <code style="font-family:var(--mono);font-size:0.85em;color:var(--mono-clr)">/dev/nsm</code> is absent — you get a real hash chain and real Ed25519 signatures, with mock PCR measurements in place of hardware attestation.</p>
+  <p class="sec-lead">Simulation mode activates automatically when <code style="font-family:var(--mono);font-size:0.85em;color:var(--mono-clr)">/dev/nsm</code> is absent — you get a real hash chain and real Ed25519 signatures, with simulated enclave measurements so you can integrate and test without AWS hardware.</p>
   <div class="code-wrap">
     <pre class="code-block"><span class="cm"># 1. Start the gateway</span>
 docker run -p 127.0.0.1:8765:8765 \
