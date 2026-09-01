@@ -1,4 +1,5 @@
 <title>VAR — Verifiable Agent Runtime</title>
+<meta name="description" content="VAR records and hardware-signs every AI agent action inside an AWS Nitro Enclave. Any auditor can verify the full history independently — no access to your infrastructure required.">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%230A0A0A'/%3E%3Cpolyline points='5,7 16,26 27,7' stroke='%23C8963A' stroke-width='4.5' stroke-linecap='square' stroke-linejoin='miter' fill='none'/%3E%3C/svg%3E">
 <style>
 /* ─── TOKENS ───────────────────────────────────────────────── */
@@ -513,7 +514,7 @@ footer p {
   <div class="hero-wrap">
     <div class="hero">
       <p class="hero-eyebrow">Verifiable Agent Runtime · v2.7.0</p>
-      <h1>Cryptographic proof of what your AI agent <strong>actually did.</strong></h1>
+      <h1>A hash-chained, hardware-signed record of everything your AI agent <strong>actually did.</strong></h1>
       <p class="hero-body">VAR records everything your AI agent does — signed inside an AWS Nitro Enclave so no one, including us, can alter the record after the fact. Any auditor can verify it independently, without access to your infrastructure.</p>
       <div class="hero-btns">
         <a href="mailto:kenneth@varprotocol.com" class="btn-primary">Request access</a>
@@ -593,7 +594,7 @@ footer p {
 <section class="construction" id="construction">
   <p class="sec-label">The construction</p>
   <h2 class="sec-h2">Three layers. Each one independently verifiable.</h2>
-  <p class="sec-lead">A hash chain links every action. A hardware key signs it. Any auditor can check the result — no access to your enclave, no call to VAR-controlled endpoints. No operator, including us, can alter the record after the fact.</p>
+  <p class="sec-lead">A hash chain links every action. A hardware key signs it. Any auditor can check the result — no access to your enclave, no call to VAR-controlled endpoints.</p>
 
   <div class="pillars">
     <div class="pillar">
@@ -619,17 +620,12 @@ footer p {
 <!-- USE CASES -->
 <section class="use-cases-wrap">
   <p class="sec-label">Where it matters</p>
-  <h2 class="sec-h2">Two places where "trust us" stops being enough.</h2>
+  <h2 class="sec-h2">Where "trust us" stops being enough.</h2>
   <div class="use-cases">
     <div class="use-card">
       <span class="use-tag">Financial agents</span>
       <h3>Agents taking irreversible financial actions</h3>
       <p>AI agents are executing trades, auto-generating Suspicious Activity Reports, managing treasury — each action irreversible and potentially subject to regulatory review. When a federal auditor asks "prove your AI didn't alter this SAR after generation," there is currently no cryptographic answer. VAR gives you one.</p>
-    </div>
-    <div class="use-card">
-      <span class="use-tag">Security workflows</span>
-      <h3>AI-generated findings at scale</h3>
-      <p>Security teams are drowning in AI-generated findings they cannot verify at the rate they arrive. The question isn't volume — it's accountability. VAR records exactly what process produced a finding, on what inputs, under what constraints.</p>
     </div>
   </div>
 </section>
@@ -666,7 +662,7 @@ python3 tools/apex_verify.py --self-test</pre>
   <div class="cta-strip">
     <div>
       <h2>Early access is open.</h2>
-      <p>VAR is in active development with design partners. If you're building AI agents in financial infrastructure or security workflows, we want to talk.</p>
+      <p>VAR is in active development. If you're building AI agents in financial infrastructure or agentic settlement, we want to talk.</p>
     </div>
     <div class="cta-right">
       <a href="mailto:kenneth@varprotocol.com" class="cta-email">kenneth@varprotocol.com</a>
