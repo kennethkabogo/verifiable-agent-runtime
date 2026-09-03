@@ -1,3 +1,8 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VAR — Verifiable Agent Runtime</title>
 <meta name="description" content="VAR records and hardware-signs every AI agent action inside an AWS Nitro Enclave. Any auditor can verify the full history independently — no access to your infrastructure required.">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%230A0A0A'/%3E%3Cpolyline points='5,7 16,26 27,7' stroke='%23C8963A' stroke-width='4.5' stroke-linecap='square' stroke-linejoin='miter' fill='none'/%3E%3C/svg%3E">
@@ -474,6 +479,27 @@ pre.code-block {
 }
 .cta-email:hover { color: var(--accent-lt); border-color: var(--accent-lt); }
 
+/* ─── MOBILE ──────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  .nav-link { display: none; }
+  nav { padding: 0 5%; }
+
+  .hero-wrap { padding: 44px 5% 40px; gap: 32px; }
+  .hero h1 { font-size: 1.75rem; }
+
+  .construction,
+  .use-cases-wrap { max-width: 100%; padding: 48px 5%; }
+  .quickstart { padding: 48px 5%; }
+  .cta-strip { padding: 48px 5% 40px; }
+
+  .pillars { border-radius: 4px; }
+  .pillar { padding: 22px 18px; }
+
+  pre.code-block { font-size: 0.7rem; padding: 16px; }
+
+  footer { padding: 16px 5%; }
+}
+
 /* ─── FOOTER ──────────────────────────────────────────────── */
 footer {
   border-top: 1px solid var(--border);
@@ -498,6 +524,8 @@ footer p {
   color: var(--text-2);
 }
 </style>
+</head>
+<body>
 
 <!-- NAV -->
 <nav>
@@ -675,3 +703,5 @@ python3 tools/apex_verify.py --self-test</pre>
   <a href="/" class="f-logo">VAR</a>
   <p>© 2026 Verifiable Agent Runtime. AWS Nitro Enclaves is a trademark of Amazon Web Services, Inc.</p>
 </footer>
+</body>
+</html>
