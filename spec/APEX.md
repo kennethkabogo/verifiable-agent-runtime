@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.8.1
+## Specification v2.9.1
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -357,12 +357,15 @@ The provider signs the following concatenation:
 ```
 provider_signed_scope =
     b"APEX-EXTDEC-v1"   (14 bytes, ASCII literal)
+  ‖ ProviderSigAlg       (ProviderSigAlgLen bytes)
   ‖ Decision             (1 byte)
   ‖ CredentialRef        (CredentialRefLen bytes)
   ‖ RequestedScope       (RequestedScopeLen bytes)
   ‖ SessionID            (16 bytes, from Bundle Header §3)
   ‖ PrevL1Hash           (32 bytes, the PrevL1Hash field of this SECRET_ACCESS packet)
 ```
+
+`ProviderSigAlg` is included in the signed scope so that the algorithm identifier is structurally bound to the signature it governs. Without this binding, the algorithm field in the payload could be altered to a different algorithm while the signature bytes remain valid — enabling algorithm-confusion attacks of the class seen in JWT `alg` header manipulation. Including it in the scope makes any such alteration produce a verification failure.
 
 `SessionID` and `PrevL1Hash` together bind the provider's decision to a specific session and chain position, preventing replay of a valid provider approval from one session or position into another.
 
@@ -381,6 +384,16 @@ A verifier processing a `SECRET_ACCESS` packet with an ExternalDecision payload 
 7. Treat `CredentialRef` and `RequestedScope` as self-reported (§5.8.1): confirm their byte contents are consistent with the provider-signed scope, but do not assert their semantic accuracy.
 
 **Open question — human-in-the-loop approvals.** A human approval delivered through a channel that produces a signed, attributable decision (e.g. a hardware approval token or a signed authorisation from a delegated human reviewer) fits the ExternalDecision schema without modification: `ProviderRef` identifies the human-approval channel, `Decision` carries the approval or denial, and the rest of the schema applies unchanged. Defining standard `ProviderRef` conventions for human-approval channels is left as an open question for a future revision.
+
+#### 5.8.5 Integration Completeness Requirement
+
+**A conformant APEX enclave MUST** originate the credential request to the external provider, or proxy it such that the provider's response arrives directly at the enclave without passing through an agent-controlled relay. An architecture in which the agent obtains the provider's signed decision externally and subsequently presents it to the enclave for inclusion in a `SECRET_ACCESS` packet is **NOT conformant** under this section.
+
+**Rationale:** §5.3's no-gaps requirement (sequential Sequence numbers) protects against omission of packets that exist in the chain. It does not protect against an agent that executes a credential access and simply never presents evidence of it to the enclave. A verifier receiving a complete, gapless Evidence Chain with no `SECRET_ACCESS` packet cannot distinguish a session where the credential was never accessed from a session where the access was suppressed at the agent layer. Routing the credential request through the enclave makes suppression architecturally impossible in a conformant implementation: the enclave learns of the access through its own outbound request, not the agent's relay.
+
+**Implementation note:** In a TEE integration, the credential request must originate from within the enclave's security boundary. Provider integrations (e.g. Turnkey Agent Auth) should be invoked as enclave-originated outbound calls rather than having the agent-layer fetch a signed provider receipt and pass it inward.
+
+**Known boundary:** This requirement governs the enclave's own outbound credential requests. Input-channel attestation (verifying that agent inputs were not synthetically replayed) remains a known open gap for v2.x; see §12.
 
 ---
 
@@ -1615,6 +1628,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.9.1 | §5.8 security fixes: (1) `ProviderSigAlg` added to `provider_signed_scope` (§5.8.3) — algorithm identifier was previously unsigned, enabling algorithm-confusion attacks; (2) §5.8.5 Integration Completeness Requirement added — conformant enclaves MUST originate the credential request directly rather than accepting agent-relayed provider receipts, closing the packet-suppression gap that §5.3 no-gaps alone cannot address; (3) version header corrected to v2.9.0 (was v2.8.1) |
 | 2.9.0 | §5.8 External Decision Payload added for `SECRET_ACCESS` (`0x03`) packets: ExternalDecision schema (§5.8.2), provider signature scope (§5.8.3), verifier requirements (§5.8.4); explicit witnessed/self-reported evidentiary tier split (§5.8.1); provider-agnostic `ProviderRef` + self-describing `ProviderSigAlg`; session-binding via `SessionID ‖ PrevL1Hash` in provider signature scope; DENY decision preserved in chain without invalidating verification; open question noted for human-in-the-loop approval channels; §5.4 `SECRET_ACCESS` row updated to reference §5.8 |
 | 2.8.1 | §8 Step 3.6 added: Attestation Timestamp — verifier extracts `AttestationDoc.timestamp` (ms, TEE-vendor-signed), converts to ns, and asserts `\|attest_ns − BundleHeader.CreatedAt\| ≤ 30,000,000,000 ns`; upgrades wall-clock freshness from available-but-unchecked to normative; §18 Conformance updated |
 | 2.8.0 | §3 Bundle Header gains `AllowedFunctionsHash` field; §3.1 BootstrapNonce derivation updated (v2.8+ includes AllowedFunctionsHash); §3.2 AllowedFunctions Commitment added; §8 Step 3 updated for version-aware nonce derivation; §8 Step 3.5 added (constrained bundle verification); §12 indirect prompt injection row added; §15 Constrained Dispatch Protocol added (§15.1–§15.7); §16 Settlement Block Test Vectors renumbered from §15; §18 Conformance updated |
