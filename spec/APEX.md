@@ -215,7 +215,7 @@ Unknown action types MUST cause verification to fail. Implementers MUST NOT sile
 |:---|:---|:---|
 | `0x01` | STREAM | PTY byte stream chunk |
 | `0x02` | EXEC | Subprocess execution record |
-| `0x03` | SECRET_ACCESS | Secret provisioned to the agent |
+| `0x03` | SECRET_ACCESS | Secret provisioned to the agent (payload schema: §5.8) |
 | `0x04` | SETTLEMENT_INIT | Settlement escrow opened |
 | `0x05` | SETTLEMENT_FINAL | Settlement escrow released or rejected |
 | `0x06` | SESSION_START | First packet of a session |
@@ -308,6 +308,79 @@ Downstream integrators SHOULD treat 500 ms as the practical upper bound per chec
 on this hardware class; if measured latency significantly exceeds 500 ms,
 params MAY be adjusted within the normative floor, but such bundles MUST be flagged as
 non-standard-floor in a future registry extension.
+
+---
+
+### 5.8 External Decision Payload
+
+For `SECRET_ACCESS` packets (`0x03`), the payload carries an **ExternalDecision** record: evidence that a named external provider approved or denied the agent's request for a credential or secret. This packet type is provider-agnostic — `ProviderRef` identifies which provider made the decision; the payload schema does not change for different providers.
+
+#### 5.8.1 Evidentiary Tiers
+
+Fields in this payload fall into two tiers with different evidentiary weight. Both tiers are covered by the APEX enclave signature (§5.5), making the full payload tamper-evident. Only the **witnessed** tier is independently verifiable without trusting the agent's own claims.
+
+**Witnessed** — a verifier can confirm these without trusting the agent:
+
+- The identity of the provider that made the decision (`ProviderRef`)
+- The decision itself (`Decision`)
+- The provider's cryptographic signature (`ProviderSigAlg`, `ProviderSignature`)
+
+**Self-reported** — preserved faithfully in the provider signature scope and therefore tamper-evident after signing, but NOT independently verified by APEX:
+
+- The credential being accessed (`CredentialRef`)
+- The agent's scope assertion (`RequestedScope`)
+
+`CredentialRef` and `RequestedScope` are included in the `ProviderSignature` scope (§5.8.3), so they cannot be altered after the provider's decision without invalidating that signature. However, whether the provider independently verified the agent's `RequestedScope` claim is a provider-level policy question outside APEX's scope. A provider that accepts the agent's scope assertion at face value still produces a valid APEX packet; the presence of a valid `ProviderSignature` does not imply that `RequestedScope` was independently confirmed.
+
+**What a valid ExternalDecision packet proves:** a named external provider made a cryptographically attributable decision about a specific credential reference and scope claim at this point in the chain. It does not prove the scope claim is accurate.
+
+#### 5.8.2 Payload Schema
+
+| Field | Type | Tier | Description |
+| :--- | :--- | :--- | :--- |
+| ProviderRefLen | `u16` LE | — | Byte length of `ProviderRef` |
+| ProviderRef | `[ProviderRefLen]u8` | Witnessed | Opaque identifier for the provider (e.g. SHA-256 of the provider's public key, a URL, or a registry handle). MUST uniquely identify a specific provider key in the verifier's provider key registry. |
+| Decision | `u8` | Witnessed | `0x01` = APPROVE; `0x00` = DENY. Other values MUST cause verification to fail. |
+| ProviderSigAlgLen | `u8` | — | Byte length of `ProviderSigAlg` |
+| ProviderSigAlg | `[ProviderSigAlgLen]u8` | Witnessed | UTF-8 algorithm identifier (e.g. `"Ed25519"`, `"ES256"`, `"RS256"`). Providers MUST self-describe; verifiers MUST reject a packet whose `ProviderSigAlg` they do not recognise. |
+| ProviderSigLen | `u16` LE | — | Byte length of `ProviderSignature` |
+| ProviderSignature | `[ProviderSigLen]u8` | Witnessed | Provider's signature over the scope defined in §5.8.3 |
+| CredentialRefLen | `u16` LE | — | Byte length of `CredentialRef` |
+| CredentialRef | `[CredentialRefLen]u8` | Self-reported | Opaque reference to the credential (e.g. a key handle or content hash). MUST NOT contain raw key material. |
+| RequestedScopeLen | `u16` LE | — | Byte length of `RequestedScope` |
+| RequestedScope | `[RequestedScopeLen]u8` | Self-reported | Agent-asserted scope claim (opaque UTF-8 or structured bytes per provider convention). Not independently verified by APEX; see §5.8.1. |
+
+#### 5.8.3 Provider Signature Scope
+
+The provider signs the following concatenation:
+
+```
+provider_signed_scope =
+    b"APEX-EXTDEC-v1"   (14 bytes, ASCII literal)
+  ‖ Decision             (1 byte)
+  ‖ CredentialRef        (CredentialRefLen bytes)
+  ‖ RequestedScope       (RequestedScopeLen bytes)
+  ‖ SessionID            (16 bytes, from Bundle Header §3)
+  ‖ PrevL1Hash           (32 bytes, the PrevL1Hash field of this SECRET_ACCESS packet)
+```
+
+`SessionID` and `PrevL1Hash` together bind the provider's decision to a specific session and chain position, preventing replay of a valid provider approval from one session or position into another.
+
+The verifier reconstructs `provider_signed_scope` from packet fields and the Bundle Header; it is not stored in the payload.
+
+#### 5.8.4 Verifier Requirements
+
+A verifier processing a `SECRET_ACCESS` packet with an ExternalDecision payload MUST:
+
+1. Locate the provider's public key by resolving `ProviderRef` against the provider key registry. A `ProviderRef` that cannot be resolved MUST cause verification to fail. Transport of the provider key registry is not specified by this document; acceptable sources include an inline provider block appended to the bundle, an out-of-band registry, or a manifest entry keyed by `ProviderRef`.
+2. Assert `ProviderSigAlg` is a recognised algorithm identifier. Unknown values MUST cause verification to fail.
+3. Reconstruct `provider_signed_scope` (§5.8.3).
+4. Verify `ProviderSignature` over `provider_signed_scope` using the resolved public key and `ProviderSigAlg`. A signature verification failure MUST cause the overall bundle verification to fail.
+5. Assert `Decision` is `0x00` or `0x01`. Other values MUST cause verification to fail.
+6. Record the `Decision` value in the verification report. A `Decision` of `0x00` (DENY) does not by itself invalidate the Evidence Chain — the chain records what happened, including denied requests. Higher-level policy MAY reject a session containing a DENY decision.
+7. Treat `CredentialRef` and `RequestedScope` as self-reported (§5.8.1): confirm their byte contents are consistent with the provider-signed scope, but do not assert their semantic accuracy.
+
+**Open question — human-in-the-loop approvals.** A human approval delivered through a channel that produces a signed, attributable decision (e.g. a hardware approval token or a signed authorisation from a delegated human reviewer) fits the ExternalDecision schema without modification: `ProviderRef` identifies the human-approval channel, `Decision` carries the approval or denial, and the rest of the schema applies unchanged. Defining standard `ProviderRef` conventions for human-approval channels is left as an open question for a future revision.
 
 ---
 
@@ -1542,6 +1615,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.9.0 | §5.8 External Decision Payload added for `SECRET_ACCESS` (`0x03`) packets: ExternalDecision schema (§5.8.2), provider signature scope (§5.8.3), verifier requirements (§5.8.4); explicit witnessed/self-reported evidentiary tier split (§5.8.1); provider-agnostic `ProviderRef` + self-describing `ProviderSigAlg`; session-binding via `SessionID ‖ PrevL1Hash` in provider signature scope; DENY decision preserved in chain without invalidating verification; open question noted for human-in-the-loop approval channels; §5.4 `SECRET_ACCESS` row updated to reference §5.8 |
 | 2.8.1 | §8 Step 3.6 added: Attestation Timestamp — verifier extracts `AttestationDoc.timestamp` (ms, TEE-vendor-signed), converts to ns, and asserts `\|attest_ns − BundleHeader.CreatedAt\| ≤ 30,000,000,000 ns`; upgrades wall-clock freshness from available-but-unchecked to normative; §18 Conformance updated |
 | 2.8.0 | §3 Bundle Header gains `AllowedFunctionsHash` field; §3.1 BootstrapNonce derivation updated (v2.8+ includes AllowedFunctionsHash); §3.2 AllowedFunctions Commitment added; §8 Step 3 updated for version-aware nonce derivation; §8 Step 3.5 added (constrained bundle verification); §12 indirect prompt injection row added; §15 Constrained Dispatch Protocol added (§15.1–§15.7); §16 Settlement Block Test Vectors renumbered from §15; §18 Conformance updated |
 | 2.7.1 | §5.7 performance note updated with measured Argon2id latency on current AWS Nitro hardware: ~170 ms (median 169.8 ms, n=5) at floor params m=65536 t=3 p=1; reference implementation bumped to m=131072 (128 MiB) to strengthen memory-hardness property and maintain margin above the 200 ms security floor; 400 ms practical upper bound documented; multi-segment reference fixture regenerated with m=131072 (tests/fixtures/multi_bundle_20260704.log) |
