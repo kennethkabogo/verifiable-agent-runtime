@@ -1,0 +1,15 @@
+[package]
+name = "apex-predicate-program"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sp1-zkvm = "6.8.1"
+apex-predicate-lib = { path = "../lib" }
+sha2 = { version = "0.10", default-features = false }
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "apex-predicate-program"
+path = "src/main.rs"

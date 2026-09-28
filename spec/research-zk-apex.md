@@ -208,6 +208,103 @@ achievable with batch ZK systems.
    APEX v2.x does not address temporal attestation. Worth flagging as a v3.x
    research candidate, particularly for billing and interactive-agent workloads.
 
+6. **Selective disclosure over execution content** — distinct axis from
+   everything above. The Nova IVC work compresses the cost of verifying chain
+   *integrity*; it says nothing about chain *content*. Today, showing a
+   counterparty "this execution complied with policy P" means handing them
+   the evidence packets themselves — only the integrity check is succinct,
+   not the disclosure. Selective disclosure is the actual privacy-flavored ZK
+   property (same family as ZK-KYC, zkTLS): prove a predicate over packet
+   contents without revealing them.
+
+   Concrete workload: a counterparty needs "this agent never called API X" or
+   "every settlement stayed under threshold Y" without seeing the full trace,
+   because the trace contains customer data or proprietary logic the operator
+   has no reason to disclose to someone who only needs the compliance answer.
+
+   This is a different circuit than the integrity proof — the per-step
+   relation would need to fold a predicate check over packet_i as a private
+   witness, emitting a public compliance bit rather than (or alongside) the
+   hash/sig check. Whether this composes with the existing IVC structure or
+   needs a separate circuit is open.
+
+   The harder problem sits underneath the circuit: who defines P, and is P
+   itself attested? A predicate proof only means something if the verifier
+   trusts the *right* predicate was checked — an operator free to swap P for
+   a weaker one at proving time has reintroduced the exact trust-the-operator
+   problem APEX exists to remove. P likely needs to be publicly committed
+   (hashed into the circuit, or attested via the TEE) rather than chosen
+   freely by the prover.
+
+   **APEX already solves this sub-problem for a narrower predicate.**
+   `AllowedFunctionsHash` (§3.2) is exactly this commitment mechanism applied
+   to function-dispatch policy: hash the allowlist manifest, fold that hash
+   into the `BootstrapNonce` derivation before the first agent call, and
+   because the nonce anchors the entire L1 chain, a bundle produced under a
+   different manifest fails verification regardless of what the header claims.
+   The operator cannot swap the policy after the fact — the whole chain fails.
+
+   Q6 is therefore not "invent a new trust primitive." It is: generalize the
+   commitment mechanism that §3.2 already proves in the narrow case (which
+   functions may be called) to the general case (arbitrary compliance
+   predicates over the full trace), and pair it with a succinct ZK circuit
+   that proves predicate satisfaction without revealing the trace. The trust
+   primitive exists and is already load-bearing in APEX; the open work is the
+   generalization and the disclosure-minimized proof on top of it.
+
+   **Circuit design note (corrected):** The SP1 guest program must read
+   `predicate_bytes` (full predicate, public input) AND `predicate_hash`
+   (public input), assert `SHA256(predicate_bytes) == predicate_hash` inside
+   the circuit, and only then decode and evaluate. Passing only the hash and
+   attempting to derive the predicate from it is not possible (SHA-256 is
+   one-way) and, more importantly, omitting the hash-equality assertion means
+   nothing stops a prover from evaluating against a different predicate than
+   the one committed in the bundle header — the exact swap-P attack Q6 exists
+   to prevent. The `assert_eq` is where the security property lives.
+
+   **Predicate encoding:** use a small fixed-format binary encoding for P,
+   not JSON. JSON canonicalization is a separate spec (RFC 8785) and
+   "two identical predicates serialize to different bytes" is a production
+   bug, not a test failure. Fixed binary fields (positional, not named) are
+   unambiguous by construction and consistent with APEX's own wire format
+   conventions throughout.
+
+   **Prototype result (2026-09-28):** SP1 circuit built and verified. Rust
+   implementation with shared source between non-ZK evaluator and ZK guest
+   (same `apex-predicate-lib` crate in both) — the correctness property holds
+   by construction, not by test coverage of two independent implementations.
+
+   Cycle counts (measured, `cargo run --bin cycles`):
+
+   | n packets | cycles    |
+   |-----------|-----------|
+   | 10        | 30,371    |
+   | 100       | 135,851   |
+   | 1,000     | 1,204,151 |
+   | 10,000    | 12,022,151|
+
+   Scaling is linear at ~1,200 cycles/packet with ~18K fixed overhead (SHA-256
+   predicate commitment check). Linearity confirmed empirically through n=10,000,
+   not just assumed.
+
+   Against the plan's own bar ("1ms/packet → practical primitive, 100ms/packet →
+   research result"): at 1,000 packets, ~1.2M cycles → estimated <30ms on
+   Succinct's proving network (~50M cycles/sec) — well under 1ms/packet, clearing
+   the practical-primitive bar. On CPU (~500K cycles/sec) → ~2.5 min for 1,000
+   packets, ~150ms/packet, research-result territory. The CPU number is expected
+   and not a problem — dedicated proving infrastructure is what this is designed
+   to run on. Outstanding measurement: actual network-proven time against
+   Succinct's prover (requires API key; cycle counts are the primary citable
+   result in the interim).
+
+   Circuit correctness confirmed via mock prover (n=10, 100, 1,000 — all pass,
+   including predicate hash assertion and `evaluate_all` universal quantification).
+   Source at `zk/` in this repository.
+
+   Open: Nova IVC composition (fold the predicate check into the integrity proof
+   step relation), `PredicateHash` field addition to APEX spec (v2.10 candidate),
+   and network-measured proof time when Succinct API access is available.
+
 ## Prior Art: Condrey et al. (arXiv:2603.00178)
 
 David Condrey (a contributing member of C2PA) independently arrives at the same

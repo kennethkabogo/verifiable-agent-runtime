@@ -1,0 +1,20 @@
+[package]
+name = "apex-predicate-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sp1-sdk = "6.8.1"
+apex-predicate-lib = { path = "../lib" }
+sha2 = { version = "0.10" }
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[bin]]
+name = "bench"
+path = "src/bench.rs"
+
+[[bin]]
+name = "cycles"
+path = "src/cycles.rs"
