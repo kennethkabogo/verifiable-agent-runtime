@@ -153,6 +153,20 @@ pub enum Predicate {
     And(Vec<Predicate>),
     Or(Vec<Predicate>),
     Not(Box<Predicate>),
+    // Session-level aggregate predicates — evaluated over the full trace, not per-packet.
+    // SessionSum: sum of a numeric field across matching packets, compared against threshold.
+    // SessionCount: count of matching packets, compared against threshold.
+    SessionSum {
+        field: FieldId,
+        filter: Option<Box<Predicate>>,
+        op: Op,
+        threshold: u64,
+    },
+    SessionCount {
+        filter: Option<Box<Predicate>>,
+        op: Op,
+        threshold: u64,
+    },
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -237,6 +251,29 @@ fn encode_node(pred: &Predicate, out: &mut Vec<u8>) {
             out.push(0x04);
             encode_node(inner, out);
         }
+        Predicate::SessionSum { field, filter, op, threshold } => {
+            out.push(0x05);
+            out.push(field.clone() as u8);
+            if let Some(f) = filter {
+                out.push(1u8);
+                encode_node(f, out);
+            } else {
+                out.push(0u8);
+            }
+            out.push(op.clone() as u8);
+            out.extend_from_slice(&threshold.to_be_bytes());
+        }
+        Predicate::SessionCount { filter, op, threshold } => {
+            out.push(0x06);
+            if let Some(f) = filter {
+                out.push(1u8);
+                encode_node(f, out);
+            } else {
+                out.push(0u8);
+            }
+            out.push(op.clone() as u8);
+            out.extend_from_slice(&threshold.to_be_bytes());
+        }
     }
 }
 
@@ -252,8 +289,74 @@ fn decode_node(buf: &[u8]) -> Result<(Predicate, usize), DecodeError> {
             let (inner, n) = decode_node(&buf[1..])?;
             Ok((Predicate::Not(Box::new(inner)), n + 1))
         }
+        0x05 => decode_session_sum(&buf[1..]).map(|(p, n)| (p, n + 1)),
+        0x06 => decode_session_count(&buf[1..]).map(|(p, n)| (p, n + 1)),
         tag => Err(DecodeError::UnknownTag(tag)),
     }
+}
+
+fn decode_session_sum(buf: &[u8]) -> Result<(Predicate, usize), DecodeError> {
+    if buf.len() < 2 {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let field = match buf[0] {
+        0x01 => FieldId::PacketType,
+        0x02 => FieldId::FunctionName,
+        0x03 => FieldId::Amount,
+        0x04 => FieldId::Endpoint,
+        0x05 => FieldId::StatusCode,
+        b => return Err(DecodeError::UnknownField(b)),
+    };
+    let has_filter = buf[1] != 0;
+    let mut pos = 2;
+    let filter = if has_filter {
+        let (f, n) = decode_node(&buf[pos..])?;
+        pos += n;
+        Some(Box::new(f))
+    } else {
+        None
+    };
+    if pos + 9 > buf.len() {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let op = match buf[pos] {
+        0x01 => Op::Eq,  0x02 => Op::Neq,
+        0x03 => Op::Lt,  0x04 => Op::Lte,
+        0x05 => Op::Gt,  0x06 => Op::Gte,
+        b => return Err(DecodeError::UnknownOp(b)),
+    };
+    pos += 1;
+    let threshold = u64::from_be_bytes(buf[pos..pos + 8].try_into().unwrap());
+    pos += 8;
+    Ok((Predicate::SessionSum { field, filter, op, threshold }, pos))
+}
+
+fn decode_session_count(buf: &[u8]) -> Result<(Predicate, usize), DecodeError> {
+    if buf.is_empty() {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let has_filter = buf[0] != 0;
+    let mut pos = 1;
+    let filter = if has_filter {
+        let (f, n) = decode_node(&buf[pos..])?;
+        pos += n;
+        Some(Box::new(f))
+    } else {
+        None
+    };
+    if pos + 9 > buf.len() {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let op = match buf[pos] {
+        0x01 => Op::Eq,  0x02 => Op::Neq,
+        0x03 => Op::Lt,  0x04 => Op::Lte,
+        0x05 => Op::Gt,  0x06 => Op::Gte,
+        b => return Err(DecodeError::UnknownOp(b)),
+    };
+    pos += 1;
+    let threshold = u64::from_be_bytes(buf[pos..pos + 8].try_into().unwrap());
+    pos += 8;
+    Ok((Predicate::SessionCount { filter, op, threshold }, pos))
 }
 
 fn decode_combinator(buf: &[u8], is_or: bool) -> Result<(Predicate, usize), DecodeError> {

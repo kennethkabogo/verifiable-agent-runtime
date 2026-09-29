@@ -4,14 +4,72 @@ pub fn evaluate(pred: &Predicate, packet: &Packet) -> bool {
     match pred {
         Predicate::And(children) => children.iter().all(|c| evaluate(c, packet)),
         Predicate::Or(children) => children.iter().any(|c| evaluate(c, packet)),
-        Predicate::Not(inner) => !evaluate(inner, packet),
+        Predicate::Not(inner) => {
+            if has_session_aggregate(inner) {
+                true // deferred to session phase — do not negate the deferred sentinel
+            } else {
+                !evaluate(inner, packet)
+            }
+        }
         Predicate::Leaf { field, op, value } => eval_leaf(field, op, value, packet),
+        // Session-level predicates are not per-packet; deferred to evaluate_session_constraints.
+        Predicate::SessionSum { .. } | Predicate::SessionCount { .. } => true,
     }
 }
 
-/// Predicate must hold for ALL packets (universal quantification over the trace).
+/// Predicate must hold for ALL packets AND all session-level aggregate constraints.
 pub fn evaluate_all(pred: &Predicate, packets: &[Packet]) -> bool {
-    packets.iter().all(|p| evaluate(pred, p))
+    packets.iter().all(|p| evaluate(pred, p)) && evaluate_session_constraints(pred, packets)
+}
+
+/// Evaluates session-level aggregate predicates over the full packet trace.
+/// Per-packet leaf predicates return true here — they were already checked by evaluate().
+fn evaluate_session_constraints(pred: &Predicate, packets: &[Packet]) -> bool {
+    match pred {
+        Predicate::Leaf { .. } => true,
+        Predicate::And(children) => children.iter().all(|c| evaluate_session_constraints(c, packets)),
+        Predicate::Or(children) => children.iter().any(|c| evaluate_session_constraints(c, packets)),
+        Predicate::Not(inner) => {
+            // Not(per-packet predicate) is vacuously true at session level — it was checked
+            // per-packet already. Only negate if there is an aggregate node underneath.
+            if has_session_aggregate(inner) {
+                !evaluate_session_constraints(inner, packets)
+            } else {
+                true
+            }
+        }
+        Predicate::SessionSum { field, filter, op, threshold } => {
+            let sum = packets.iter()
+                .filter(|p| filter.as_ref().map_or(true, |f| evaluate(f, p)))
+                .filter_map(|p| extract_numeric(field, p))
+                .fold(0u64, |acc, v| acc.saturating_add(v));
+            cmp_u64(op, sum, *threshold)
+        }
+        Predicate::SessionCount { filter, op, threshold } => {
+            let count = packets.iter()
+                .filter(|p| filter.as_ref().map_or(true, |f| evaluate(f, p)))
+                .count() as u64;
+            cmp_u64(op, count, *threshold)
+        }
+    }
+}
+
+fn has_session_aggregate(pred: &Predicate) -> bool {
+    match pred {
+        Predicate::SessionSum { .. } | Predicate::SessionCount { .. } => true,
+        Predicate::And(c) | Predicate::Or(c) => c.iter().any(|x| has_session_aggregate(x)),
+        Predicate::Not(inner) => has_session_aggregate(inner),
+        Predicate::Leaf { .. } => false,
+    }
+}
+
+fn extract_numeric(field: &FieldId, packet: &Packet) -> Option<u64> {
+    match field {
+        FieldId::Amount => packet.amount,
+        FieldId::StatusCode => packet.status_code.map(|v| v as u64),
+        FieldId::PacketType => Some(packet.packet_type as u64),
+        FieldId::FunctionName | FieldId::Endpoint => None,
+    }
 }
 
 fn eval_leaf(field: &FieldId, op: &Op, value: &Value, packet: &Packet) -> bool {
@@ -66,7 +124,7 @@ fn cmp_bytes(op: &Op, lhs: &[u8], rhs: &[u8]) -> bool {
     match op {
         Op::Eq  => lhs == rhs,
         Op::Neq => lhs != rhs,
-        _ => false, // ordering on variable-length bytes not defined
+        _ => false,
     }
 }
 
@@ -172,7 +230,6 @@ mod tests {
 
     #[test]
     fn absent_field_fails_leaf() {
-        // A packet with no amount evaluated against an Amount predicate should fail.
         let p = Predicate::Leaf {
             field: FieldId::Amount,
             op: Op::Lte,
@@ -230,5 +287,175 @@ mod tests {
         };
         let packets = vec![settlement(100), settlement(1_001), settlement(200)];
         assert!(!evaluate_all(&p, &packets));
+    }
+
+    // ── Session aggregate tests ──────────────────────────────────────────────
+
+    #[test]
+    fn session_sum_under_cap() {
+        let p = Predicate::SessionSum {
+            field: FieldId::Amount,
+            filter: None,
+            op: Op::Lt,
+            threshold: 10_000,
+        };
+        // 2000 + 3000 + 4000 = 9000 < 10000
+        let packets = vec![settlement(2_000), settlement(3_000), settlement(4_000)];
+        assert!(evaluate_all(&p, &packets));
+    }
+
+    #[test]
+    fn session_sum_over_cap() {
+        let p = Predicate::SessionSum {
+            field: FieldId::Amount,
+            filter: None,
+            op: Op::Lt,
+            threshold: 10_000,
+        };
+        // 4000 + 4000 + 4000 = 12000 >= 10000
+        let packets = vec![settlement(4_000), settlement(4_000), settlement(4_000)];
+        assert!(!evaluate_all(&p, &packets));
+    }
+
+    #[test]
+    fn session_sum_exactly_at_cap_lte() {
+        let p = Predicate::SessionSum {
+            field: FieldId::Amount,
+            filter: None,
+            op: Op::Lte,
+            threshold: 10_000,
+        };
+        // 5000 + 5000 = 10000 <= 10000
+        let packets = vec![settlement(5_000), settlement(5_000)];
+        assert!(evaluate_all(&p, &packets));
+    }
+
+    #[test]
+    fn session_count_under_limit() {
+        let p = Predicate::SessionCount {
+            filter: None,
+            op: Op::Lt,
+            threshold: 10,
+        };
+        let packets: Vec<Packet> = (0..5).map(|_| settlement(100)).collect();
+        assert!(evaluate_all(&p, &packets));
+    }
+
+    #[test]
+    fn session_count_over_limit() {
+        let p = Predicate::SessionCount {
+            filter: None,
+            op: Op::Lt,
+            threshold: 4,
+        };
+        // 5 packets, limit < 4 → fails
+        let packets: Vec<Packet> = (0..5).map(|_| settlement(100)).collect();
+        assert!(!evaluate_all(&p, &packets));
+    }
+
+    #[test]
+    fn session_count_with_filter() {
+        // Count only packets where packet_type == 0x05 (settlement)
+        let filter = Predicate::Leaf {
+            field: FieldId::PacketType,
+            op: Op::Eq,
+            value: Value::Scalar(ScalarValue::U8(0x05)),
+        };
+        let p = Predicate::SessionCount {
+            filter: Some(Box::new(filter)),
+            op: Op::Lt,
+            threshold: 4,
+        };
+        // 3 settlements + 2 tool calls → count = 3 < 4
+        let packets = vec![
+            settlement(100), settlement(200), settlement(300),
+            tool_call("fn_a"), tool_call("fn_b"),
+        ];
+        assert!(evaluate_all(&p, &packets));
+    }
+
+    #[test]
+    fn and_per_packet_and_session_sum() {
+        // Each settlement must be <= 5000 AND total must be < 10000
+        let p = Predicate::And(vec![
+            Predicate::Leaf {
+                field: FieldId::Amount,
+                op: Op::Lte,
+                value: Value::Scalar(ScalarValue::U64(5_000)),
+            },
+            Predicate::SessionSum {
+                field: FieldId::Amount,
+                filter: None,
+                op: Op::Lt,
+                threshold: 10_000,
+            },
+        ]);
+        // 3000 + 4000 = 7000 < 10000, both <= 5000 → passes
+        assert!(evaluate_all(&p, &vec![settlement(3_000), settlement(4_000)]));
+        // 5000 + 5000 = 10000, not < 10000 → fails session constraint
+        assert!(!evaluate_all(&p, &vec![settlement(5_000), settlement(5_000)]));
+        // 6000 > 5000 → fails per-packet constraint
+        assert!(!evaluate_all(&p, &vec![settlement(6_000), settlement(2_000)]));
+    }
+
+    // Negation wrapping an aggregate: verify the dangerous direction.
+    // If the Not guard skipped negation, a noncompliant trace (inner = true) would
+    // falsely evaluate as compliant (outer = true).  This test is constructed so
+    // that a broken guard causes assert!(!...) to panic, not just an overly
+    // conservative rejection.
+    #[test]
+    fn not_session_sum_does_not_false_positive() {
+        // NOT (session_sum < 10_000) means sum must be >= 10_000 to pass.
+        let p = Predicate::Not(Box::new(Predicate::SessionSum {
+            field: FieldId::Amount,
+            filter: None,
+            op: Op::Lt,
+            threshold: 10_000,
+        }));
+        // sum = 5_000 < 10_000 → inner = true → Not = false (non-compliant).
+        // A broken guard returning true here would be a live security bug.
+        assert!(!evaluate_all(&p, &[settlement(2_000), settlement(3_000)]));
+        // sum = 12_000 >= 10_000 → inner = false → Not = true (compliant).
+        assert!(evaluate_all(&p, &[settlement(6_000), settlement(6_000)]));
+    }
+
+    #[test]
+    fn not_session_count_does_not_false_positive() {
+        // NOT (session_count < 5) means count must be >= 5 to pass.
+        let p = Predicate::Not(Box::new(Predicate::SessionCount {
+            filter: None,
+            op: Op::Lt,
+            threshold: 5,
+        }));
+        // 3 packets: count = 3 < 5 → inner = true → Not = false (non-compliant).
+        let few: Vec<Packet> = (0..3).map(|_| settlement(100)).collect();
+        assert!(!evaluate_all(&p, &few));
+        // 7 packets: count = 7 >= 5 → inner = false → Not = true (compliant).
+        let many: Vec<Packet> = (0..7).map(|_| settlement(100)).collect();
+        assert!(evaluate_all(&p, &many));
+    }
+
+    #[test]
+    fn session_sum_roundtrip_encode_decode() {
+        let p = Predicate::And(vec![
+            Predicate::SessionSum {
+                field: FieldId::Amount,
+                filter: Some(Box::new(Predicate::Leaf {
+                    field: FieldId::PacketType,
+                    op: Op::Eq,
+                    value: Value::Scalar(ScalarValue::U8(0x05)),
+                })),
+                op: Op::Lt,
+                threshold: 10_000,
+            },
+            Predicate::SessionCount {
+                filter: None,
+                op: Op::Lte,
+                threshold: 100,
+            },
+        ]);
+        let encoded = p.encode();
+        let decoded = Predicate::decode(&encoded).expect("roundtrip failed");
+        assert_eq!(p, decoded);
     }
 }

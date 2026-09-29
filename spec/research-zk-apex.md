@@ -276,16 +276,20 @@ achievable with batch ZK systems.
 
    Cycle counts (measured, `cargo run --bin cycles`):
 
-   | n packets | cycles    |
-   |-----------|-----------|
-   | 10        | 30,371    |
-   | 100       | 135,851   |
-   | 1,000     | 1,204,151 |
-   | 10,000    | 12,022,151|
+   | n packets | per-packet `And[Leaf,Leaf]` | aggregate `And[Leaf,SessionSum]` |
+   |-----------|----------------------------|----------------------------------|
+   | 10        | 30,593                     | 29,743                           |
+   | 100       | 136,433                    | 134,233                          |
+   | 1,000     | 1,208,333                  | —                                |
+   | 10,000    | 12,062,333                 | —                                |
 
    Scaling is linear at ~1,200 cycles/packet with ~18K fixed overhead (SHA-256
-   predicate commitment check). Linearity confirmed empirically through n=10,000,
-   not just assumed.
+   predicate commitment check). Linearity confirmed empirically through n=10,000
+   for per-packet predicates. Aggregate predicates (`SessionSum`, `SessionCount`)
+   add negligible overhead: at both measured sizes (n=10, n=100), aggregate cycle
+   counts are indistinguishable from per-packet within measurement variance (~1%).
+   The second-pass accumulator fold is cheap relative to the per-packet ZKVM work;
+   the architecture generalizes cleanly.
 
    Against the plan's own bar ("1ms/packet → practical primitive, 100ms/packet →
    research result"): at 1,000 packets, ~1.2M cycles → estimated <30ms on
@@ -304,6 +308,39 @@ achievable with batch ZK systems.
    Open: Nova IVC composition (fold the predicate check into the integrity proof
    step relation), `PredicateHash` field addition to APEX spec (v2.10 candidate),
    and network-measured proof time when Succinct API access is available.
+
+   **Future work (beyond Nova IVC):** A common question is whether advances in
+   cryptography could eventually eliminate the TEE trust assumption. The answer
+   requires being precise about which problem each primitive solves, because they
+   are distinct.
+
+   Hardware attestation (the TEE) solves packet authenticity: it establishes that
+   a given evidence packet is a faithful, tamper-evident record of what the agent
+   actually did. That problem is about the evidentiary root of trust, and no
+   purely cryptographic primitive substitutes for it — even in a world with
+   practical iO, you still need some root of trust vouching that the packets fed
+   into the predicate-checker are real.
+
+   Indistinguishability obfuscation (iO) solves a different, narrower problem:
+   it would allow the compliance rule itself to stay hidden while still being
+   cryptographically guaranteed to have been applied consistently. The correct
+   scoped claim is: a regulator could verify "this compliance rule was satisfied,
+   provably, consistently" without ever learning what the rule checks for —
+   confidentiality of the policy, not a replacement for the evidentiary layer
+   underneath it. Note that Q6 as designed has `predicate_bytes` as a *public*
+   input — that is the security property (the rule must be committed and
+   inspectable), not a limitation iO would "fix." iO would enable a meaningfully
+   different capability: a compliance regime where the policy itself is
+   proprietary.
+
+   Practical efficient iO for real programs does not exist today, and the gap
+   from theory (Jain–Lin–Sahai et al.) to practice remains large. This is
+   future-work-section material for a paper, not something on a realistic near-
+   term build sequence. Functional encryption (FE) is a closer, more tractable
+   intermediate primitive — iO is constructible from strong-enough FE, and weaker
+   FE variants meaningful for selective disclosure already exist — and is the
+   more useful "next primitive to name" in a future-work framing if the question
+   comes up.
 
 ## Prior Art: Condrey et al. (arXiv:2603.00178)
 
