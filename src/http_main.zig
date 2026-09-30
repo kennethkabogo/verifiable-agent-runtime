@@ -207,6 +207,31 @@ pub fn main() !void {
         std.log.warn("[VAR-gateway] VAR_API_TOKEN not set — API auth disabled (loopback only, dev mode)", .{});
     }
 
+    // 5b. Load compliance policy file if VAR_POLICY_PATH is set.
+    //     Must happen before hardenProcess() — seccomp blocks openat(257) and
+    //     the sandbox scrubs the environment after that point.
+    //     policy_hash = SHA-256(raw_policy_bytes as loaded from disk).
+    //     Zero-filled (0x00×32) when no policy path is set — unconstrained session.
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var policy_hash: [32]u8 = [_]u8{0} ** 32;
+    if (std.posix.getenv("VAR_POLICY_PATH")) |policy_path| {
+        const policy_file = std.fs.openFileAbsolute(policy_path, .{}) catch |err| {
+            std.log.err("[VAR-gateway] VAR_POLICY_PATH={s}: open failed: {}", .{ policy_path, err });
+            return error.PolicyFileOpenFailed;
+        };
+        defer policy_file.close();
+        const policy_bytes = policy_file.readToEndAlloc(allocator, 1 << 20) catch |err| {
+            std.log.err("[VAR-gateway] VAR_POLICY_PATH={s}: read failed: {}", .{ policy_path, err });
+            return error.PolicyFileReadFailed;
+        };
+        defer {
+            std.crypto.secureZero(u8, policy_bytes);
+            allocator.free(policy_bytes);
+        }
+        Sha256.hash(policy_bytes, &policy_hash, .{});
+        std.log.info("[VAR-gateway] Policy bound: sha256={s}", .{std.fmt.fmtSliceHexLower(&policy_hash)});
+    }
+
     // 6a. Capture KMS config and warm NSM cache before the sandbox scrubs the
     //     environment and before seccomp blocks openat(257).  sealDek() reads
     //     from these cached values instead of the environment at request time.
@@ -237,5 +262,8 @@ pub fn main() !void {
         protocol.enc_public,
         exec_worker,
     );
+    // Commit the policy hash so every sealBundle() call includes it.
+    // policy_hash is zero-filled when no VAR_POLICY_PATH was set.
+    gw.logger.setPolicyHash(policy_hash);
     try gw.serve();
 }

@@ -435,6 +435,10 @@ Emitted once, after the final Evidence Packet (and Settlement Block if present).
 
 The policy bytes themselves are not transmitted in the bundle. The verifier is expected to hold the canonical policy bytes out-of-band and recompute `SHA-256(policy_bytes)` for comparison. This is the same trust model as `AllowedFunctionsHash` in §3.2.
 
+**Canonical serialization requirement**: `policy_bytes` MUST be the raw bytes of the policy document as loaded from disk or received from the operator — not any parsed or re-serialized form. The enclave and the operator hash the same byte sequence, so both can verify independently without agreeing on a serialization format.
+
+**Magic byte disambiguation**: The `BUNDLE_SEAL` protocol line carries `magic=APXZ` as a line-type discriminator (distinct from the `BUNDLE_HEADER` magic `APXB`). The `BundleHash` preimage uses `"APXB"` unconditionally — implementations MUST take the preimage prefix from the `BUNDLE_HEADER` tag, not from the `BUNDLE_SEAL` line. Deriving the preimage prefix from `APXZ` produces an invalid `BundleHash`. The three distinct magic values in one bundle record (`APXB` in the header and preimage, `APXZ` on the seal line, `APXT` on the settlement line) each serve a different purpose; only the header magic enters any cryptographic computation.
+
 **Verifier check (optional, for policy-gated flows):**
 ```
 if expected_policy_hash is set:
