@@ -95,6 +95,11 @@ pub const SecureLogger = struct {
     /// the L1 hash chain.  Persisted in the sealed payload so verifiers and
     /// audit tooling can label segments without counting resume boundaries.
     segment_index: u32 = 0,
+    /// SHA-256(policy_bytes) when a compliance policy governed this session;
+    /// 0x00×32 (zero-filled) when none.  Committed into BundleHash (v2.10+,
+    /// §7.1) so the seal proves which specific policy passed, not just that
+    /// some policy passed.  Set once via setPolicyHash() before sealBundle().
+    policy_hash: [32]u8 = [_]u8{0} ** 32,
     /// Ordered log of every subprocess execution this session.
     /// Each runAndLog call appends one entry; nothing is ever removed.
     /// Verifiers iterate the full list to confirm that no command was hidden
@@ -890,12 +895,21 @@ pub const SecureLogger = struct {
         return line;
     }
 
-    /// Emits a Bundle Seal line (spec §7).
+    /// Records the policy hash for inclusion in the Bundle Seal (v2.10+, §7.1).
+    /// Must be called before sealBundle(). A zero-filled hash means no policy.
+    /// Safe to call from any thread — acquires the mutex internally.
+    pub fn setPolicyHash(self: *SecureLogger, ph: [32]u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.policy_hash = ph;
+    }
+
+    /// Emits a Bundle Seal line (spec §7, v2.10+).
     ///
-    ///   BUNDLE_SEAL:magic=APXZ:terminal_digest=<hex>:bundle_hash=<hex>:seal_sig=<hex>
+    ///   BUNDLE_SEAL:magic=APXZ:terminal_digest=<hex>:policy_hash=<hex>:bundle_hash=<hex>:seal_sig=<hex>
     ///
     /// TerminalDigest = SHA-256(all packet signatures in order)
-    /// BundleHash     = SHA-256("APXB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest)
+    /// BundleHash     = SHA-256("APXB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest ‖ PolicyHash)
     /// SealSig        = Ed25519(session_keypair, BundleHash)
     pub fn sealBundle(self: *SecureLogger, allocator: std.mem.Allocator) ![]u8 {
         self.mutex.lock();
@@ -910,6 +924,7 @@ pub const SecureLogger = struct {
         bh_hasher.update(&self.bootstrap_nonce);
         bh_hasher.update(&signing_pub);
         bh_hasher.update(&terminal_digest);
+        bh_hasher.update(&self.policy_hash);
         var bundle_hash: [32]u8 = undefined;
         bh_hasher.final(&bundle_hash);
 
@@ -918,6 +933,8 @@ pub const SecureLogger = struct {
 
         const td_h = try hex(allocator, &terminal_digest);
         defer allocator.free(td_h);
+        const ph_h = try hex(allocator, &self.policy_hash);
+        defer allocator.free(ph_h);
         const bh_h = try hex(allocator, &bundle_hash);
         defer allocator.free(bh_h);
         const ss_h = try hex(allocator, &seal_sig_bytes);
@@ -925,8 +942,8 @@ pub const SecureLogger = struct {
 
         return std.fmt.allocPrint(
             allocator,
-            "BUNDLE_SEAL:magic=APXZ:terminal_digest={s}:bundle_hash={s}:seal_sig={s}",
-            .{ td_h, bh_h, ss_h },
+            "BUNDLE_SEAL:magic=APXZ:terminal_digest={s}:policy_hash={s}:bundle_hash={s}:seal_sig={s}",
+            .{ td_h, ph_h, bh_h, ss_h },
         );
     }
 
@@ -997,7 +1014,7 @@ pub const SettlementParams = struct {
 
 test "executions: empty before any EXEC" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1006,7 +1023,7 @@ test "executions: empty before any EXEC" {
 
 test "executions: appends in order across multiple EXEC calls" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1031,7 +1048,7 @@ test "executions: appends in order across multiple EXEC calls" {
 
 test "executions: JSON bundle contains all records" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1052,7 +1069,7 @@ test "executions: JSON bundle contains all records" {
 
 test "sealBundle: terminal_digest is sha256 of accumulated packet signatures" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1087,7 +1104,7 @@ test "sealBundle: terminal_digest is sha256 of accumulated packet signatures" {
 
 test "sealBundle: seal_sig verifies against bundle_hash with session public key" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1116,9 +1133,104 @@ test "sealBundle: seal_sig verifies against bundle_hash with session public key"
     try sig.verify(&bundle_hash, kp.public_key);
 }
 
+test "sealBundle: policy_hash field present in output, zero-filled when none set" {
+    const allocator = std.testing.allocator;
+    const kp = Ed25519.KeyPair.generate();
+    var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger.deinit();
+
+    const e1 = try logger.getEvidenceBundle();
+    allocator.free(e1);
+
+    const seal = try logger.sealBundle(allocator);
+    defer allocator.free(seal);
+
+    // policy_hash field must appear in the line.
+    try std.testing.expect(std.mem.indexOf(u8, seal, "policy_hash=") != null);
+
+    // When no policy was set the field must be 64 zeroes.
+    const ph_prefix = "policy_hash=";
+    const ph_start = (std.mem.indexOf(u8, seal, ph_prefix) orelse return error.MissingPolicyHash) + ph_prefix.len;
+    const ph_end = std.mem.indexOfScalarPos(u8, seal, ph_start, ':') orelse seal.len;
+    const ph_hex = seal[ph_start..ph_end];
+    try std.testing.expectEqualStrings("0" ** 64, ph_hex);
+}
+
+test "sealBundle: bundle_hash preimage includes policy_hash" {
+    const allocator = std.testing.allocator;
+    const kp = Ed25519.KeyPair.generate();
+    const bootstrap_nonce = [_]u8{0xAB} ** 32;
+    const session_id = [_]u8{0xCD} ** 16;
+    var logger = try SecureLogger.init(allocator, bootstrap_nonce, session_id, kp);
+    defer logger.deinit();
+
+    const e1 = try logger.getEvidenceBundle();
+    allocator.free(e1);
+
+    const policy_hash = [_]u8{0x42} ** 32;
+    logger.setPolicyHash(policy_hash);
+
+    const seal = try logger.sealBundle(allocator);
+    defer allocator.free(seal);
+
+    // Extract bundle_hash from the line.
+    const bh_prefix = "bundle_hash=";
+    const bh_start = (std.mem.indexOf(u8, seal, bh_prefix) orelse return error.MissingBundleHash) + bh_prefix.len;
+    const bh_end = std.mem.indexOfScalarPos(u8, seal, bh_start, ':') orelse seal.len;
+    var actual_bh: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&actual_bh, seal[bh_start..bh_end]);
+
+    // Recompute independently: include policy_hash in preimage.
+    const terminal_digest = logger.computeTerminalDigestLocked();
+    const signing_pub = kp.public_key.toBytes();
+    var hasher = Sha256.init(.{});
+    hasher.update("APXB");
+    hasher.update(&session_id);
+    hasher.update(&bootstrap_nonce);
+    hasher.update(&signing_pub);
+    hasher.update(&terminal_digest);
+    hasher.update(&policy_hash);
+    var expected_bh: [32]u8 = undefined;
+    hasher.final(&expected_bh);
+
+    try std.testing.expectEqualSlices(u8, &expected_bh, &actual_bh);
+}
+
+test "sealBundle: non-zero policy_hash produces different bundle_hash than zero" {
+    const allocator = std.testing.allocator;
+    const kp = Ed25519.KeyPair.generate();
+    var logger_a = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger_a.deinit();
+    var logger_b = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
+    defer logger_b.deinit();
+
+    // Same chain state up to the seal.
+    const e1a = try logger_a.getEvidenceBundle();
+    allocator.free(e1a);
+    const e1b = try logger_b.getEvidenceBundle();
+    allocator.free(e1b);
+
+    // logger_b gets a non-zero policy hash.
+    logger_b.setPolicyHash([_]u8{0xFF} ** 32);
+
+    const seal_a = try logger_a.sealBundle(allocator);
+    defer allocator.free(seal_a);
+    const seal_b = try logger_b.sealBundle(allocator);
+    defer allocator.free(seal_b);
+
+    const bh_prefix = "bundle_hash=";
+
+    const bh_start_a = (std.mem.indexOf(u8, seal_a, bh_prefix) orelse return error.MissingBundleHashA) + bh_prefix.len;
+    const bh_end_a = std.mem.indexOfScalarPos(u8, seal_a, bh_start_a, ':') orelse seal_a.len;
+    const bh_start_b = (std.mem.indexOf(u8, seal_b, bh_prefix) orelse return error.MissingBundleHashB) + bh_prefix.len;
+    const bh_end_b = std.mem.indexOfScalarPos(u8, seal_b, bh_start_b, ':') orelse seal_b.len;
+
+    try std.testing.expect(!std.mem.eql(u8, seal_a[bh_start_a..bh_end_a], seal_b[bh_start_b..bh_end_b]));
+}
+
 test "settleBundle: settlement_sig verifies against escrow_id+amount+currency+terminal_digest" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1167,7 +1279,7 @@ test "settleBundle: settlement_sig verifies against escrow_id+amount+currency+te
 
 test "settleBundle: amount longer than 31 bytes returns AmountTooLong" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1182,7 +1294,7 @@ test "settleBundle: amount longer than 31 bytes returns AmountTooLong" {
 
 test "evidence_log: records one entry per emission" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1203,7 +1315,7 @@ test "evidence_log: records one entry per emission" {
 
 test "getEvidenceRange: returns only packets within [from, to]" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1227,7 +1339,7 @@ test "getEvidenceRange: returns only packets within [from, to]" {
 
 test "getEvidenceRange: empty result for out-of-range query" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1243,7 +1355,7 @@ test "getEvidenceRange: empty result for out-of-range query" {
 
 test "getEvidenceRange: skill_ids propagated into range response" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1263,7 +1375,7 @@ test "getEvidenceRange: skill_ids propagated into range response" {
 
 test "pollEvidenceSince: returns existing records immediately" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1287,7 +1399,7 @@ test "pollEvidenceSince: returns existing records immediately" {
 
 test "pollEvidenceSince: times out with no new records" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1303,7 +1415,7 @@ test "pollEvidenceSince: times out with no new records" {
 
 test "pollEvidenceSince: wakes on emission from another thread" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
@@ -1330,7 +1442,7 @@ test "pollEvidenceSince: wakes on emission from another thread" {
 
 test "emitSessionResume: advances sequence and emits correct wire format" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     const bootstrap_nonce = [_]u8{0xAB} ** 32;
     const session_id = [_]u8{0xCD} ** 16;
     var logger = try SecureLogger.init(allocator, bootstrap_nonce, session_id, kp);
@@ -1365,7 +1477,7 @@ test "emitSessionResume: advances sequence and emits correct wire format" {
 
 test "emitSessionResume: prev_stream matches stream of prior TEMPORAL_PROOF" {
     const allocator = std.testing.allocator;
-    const kp = try Ed25519.KeyPair.create(null);
+    const kp = Ed25519.KeyPair.generate();
     var logger = try SecureLogger.init(allocator, [_]u8{0} ** 32, [_]u8{0} ** 16, kp);
     defer logger.deinit();
 
