@@ -433,8 +433,8 @@ def main():
     # Two-packet TerminalDigest: SHA-256(Sig[1] ‖ Sig[2])
     TERMINAL_DIGEST_2 = sha256(PACKET_SIG + PACKET_SIG_2)
 
-    # BundleHash and SealSig for two-packet session
-    BUNDLE_HASH_2 = sha256(b"VARB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + TERMINAL_DIGEST_2)
+    # BundleHash and SealSig for two-packet session (v2.10 formula includes PolicyHash)
+    BUNDLE_HASH_2 = sha256(b"VARB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + TERMINAL_DIGEST_2 + POLICY_HASH)
     SEAL_SIG_2    = SIGNING_KEY.sign(BUNDLE_HASH_2)
 
     # Settlement scope: EscrowID(16) | Amount(32) | Currency(8) | TerminalDigest(32) = 88 bytes

@@ -152,23 +152,32 @@ def _parse_kv_line(line: str) -> dict:
 
 # ── Ed25519 verification ─────────────────────────────────────────────────────
 
-def _build_signed_message(evidence: dict, session_id_hex: str) -> bytes:
+def _build_signed_message(
+    evidence: dict,
+    session_id_hex: str,
+    bundle_magic: str = "VARB",
+) -> bytes:
     """Reconstruct the 161-byte message VAR signs over (spec §3.1).
 
     Must match signEvidence() in shell.zig exactly.
+    bundle_magic selects the scope magic: VARB→VARE, APXB→APXE (apex_verify.py §_scope_magic).
     """
-    empty_payload_hash = hashlib.sha256(b"").digest()
-    session_id = bytes.fromhex(session_id_hex)
+    # Mirror apex_verify.py _scope_magic(): VARB bundles use VARE scope, APXB bundles use APXE.
+    scope_magic = b"VARE" if bundle_magic == "VARB" else b"APXE"
+
+    payload_hash = bytes.fromhex(evidence["payload_hash"]) if evidence.get("payload_hash") else hashlib.sha256(b"").digest()
+    payload_len  = int(evidence.get("payload_len", 0))
+    session_id   = bytes.fromhex(session_id_hex)
 
     msg = bytearray()
-    msg += b"APXE"                                          # magic (4)
+    msg += scope_magic                                      # magic (4)
     msg += b"\x01"                                          # format version (1)
     msg += struct.pack("<Q", evidence["sequence"])          # sequence u64 LE (8)
     msg += bytes.fromhex(evidence["prev_stream"])           # PrevL1Hash (32)
     msg += bytes.fromhex(evidence["stream"])                # L1Hash (32)
     msg += bytes.fromhex(evidence["state"])                 # L2Hash (32)
-    msg += struct.pack("<I", 0)                             # PayloadLen = 0 (4)
-    msg += empty_payload_hash                               # SHA-256("") (32)
+    msg += struct.pack("<I", payload_len)                   # PayloadLen (4)
+    msg += payload_hash                                     # SHA-256(payload) or SHA-256("") (32)
     msg += session_id                                       # SessionID (16)
 
     assert len(msg) == 161, f"message length {len(msg)} != 161"
@@ -180,10 +189,12 @@ def _verify_signature(evidence: dict, attestation: dict, session_id_hex: str) ->
     if not HAS_CRYPTOGRAPHY:
         return False, "pip install cryptography required for signature verification"
 
+    # bundle_magic drives scope magic selection (VARB→VARE, APXB→APXE); default VARB.
+    bundle_magic = attestation.get("bundle_magic", "VARB")
     try:
         pub_bytes = bytes.fromhex(attestation["public_key"])
         sig_bytes  = bytes.fromhex(evidence["sig"])
-        msg        = _build_signed_message(evidence, session_id_hex)
+        msg        = _build_signed_message(evidence, session_id_hex, bundle_magic)
         pub_key    = Ed25519PublicKey.from_public_bytes(pub_bytes)
         pub_key.verify(sig_bytes, msg)
         return True, "Ed25519 packet signature valid"
