@@ -1,5 +1,5 @@
 # APEX — Attested Proof of EXecution
-## Specification v2.9.1
+## Specification v2.10.0
 
 **Status:** Draft  
 **Authors:** Kenneth Kabogo  
@@ -422,8 +422,25 @@ Emitted once, after the final Evidence Packet (and Settlement Block if present).
 |:---|:---|:---|
 | Magic | `[4]u8` | `"APXZ"` (`0x41 0x50 0x58 0x5A`) |
 | TerminalDigest | `[32]u8` | SHA-256 of all Packet Signatures in sequence order |
-| BundleHash | `[32]u8` | SHA-256(`"APXB"` ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ TerminalDigest) |
+| PolicyHash | `[32]u8` | SHA-256(policy_bytes) if a compliance policy was evaluated; zero-filled (`0x00 × 32`) if none (v2.10+; absent in v2.9 and below) |
+| BundleHash | `[32]u8` | v2.10+: SHA-256(`"APXB"` ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ TerminalDigest ‖ PolicyHash); v2.9 and below: SHA-256(`"APXB"` ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ TerminalDigest) |
 | SealSig | `[64]u8` | Ed25519(last_segment_secret_key, BundleHash) |
+
+### §7.1 PolicyHash Semantics
+
+`PolicyHash` records which compliance policy the enclave evaluated against the execution trace. It is committed into `BundleHash` before `SealSig` is computed, making it tamper-evident: any change to the policy hash invalidates the seal signature.
+
+- **Non-zero**: the enclave evaluated a policy with this SHA-256 digest. A verifier MAY compare this value against an expected policy hash to confirm that a specific policy — not an arbitrary or swapped one — governed the session.
+- **Zero-filled** (`0x00 × 32`): no policy was evaluated. Verifiers MUST NOT treat a zero-filled PolicyHash as satisfying a non-zero expected hash. Verifiers MAY emit a warning on zero-filled PolicyHash when a policy was expected.
+
+The policy bytes themselves are not transmitted in the bundle. The verifier is expected to hold the canonical policy bytes out-of-band and recompute `SHA-256(policy_bytes)` for comparison. This is the same trust model as `AllowedFunctionsHash` in §3.2.
+
+**Verifier check (optional, for policy-gated flows):**
+```
+if expected_policy_hash is set:
+    assert BundleSeal.PolicyHash != 0x00 × 32          // policy must have been evaluated
+    assert BundleSeal.PolicyHash == expected_policy_hash  // correct policy was used
+```
 
 ---
 
@@ -499,8 +516,20 @@ assert BundleSeal.TerminalDigest == SHA-256(concat(Packet[1..N].Signature))
 ```
 
 ### Step 7 — Verify the Bundle Seal
+
+Select the BundleHash preimage based on SpecVersion:
+
+- If SpecVersion MINOR >= 10 (v2.10+):
+```
+assert BundleSeal.BundleHash == SHA-256("APXB" ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ BundleSeal.TerminalDigest ‖ BundleSeal.PolicyHash)
+```
+- If SpecVersion MINOR < 10 (v2.9 and below):
 ```
 assert BundleSeal.BundleHash == SHA-256("APXB" ‖ SessionID ‖ BootstrapNonce ‖ SessionPub ‖ BundleSeal.TerminalDigest)
+```
+
+Then in both cases:
+```
 Ed25519_Verify(last_segment.SessionPub, BundleSeal.BundleHash, BundleSeal.SealSig)
 ```
 
@@ -1628,6 +1657,7 @@ inputs plus the §15.2 additional inputs:
 
 | Version | Changes |
 |:---|:---|
+| 2.10.0 | §7 Bundle Seal gains `PolicyHash` field (`[32]u8`): SHA-256 of the compliance policy evaluated during the session, or zero-filled if none; §7.1 PolicyHash Semantics added; §8 Step 7 updated with version-conditional BundleHash preimage (v2.10+ includes PolicyHash; v2.9 and below unchanged); closes the swap-P attack surface for compliance-gated settlement flows |
 | 2.9.1 | §5.8 security fixes: (1) `ProviderSigAlg` added to `provider_signed_scope` (§5.8.3) — algorithm identifier was previously unsigned, enabling algorithm-confusion attacks; (2) §5.8.5 Integration Completeness Requirement added — conformant enclaves MUST originate the credential request directly rather than accepting agent-relayed provider receipts, closing the packet-suppression gap that §5.3 no-gaps alone cannot address; (3) version header corrected to v2.9.1 (was v2.8.1) |
 | 2.9.0 | §5.8 External Decision Payload added for `SECRET_ACCESS` (`0x03`) packets: ExternalDecision schema (§5.8.2), provider signature scope (§5.8.3), verifier requirements (§5.8.4); explicit witnessed/self-reported evidentiary tier split (§5.8.1); provider-agnostic `ProviderRef` + self-describing `ProviderSigAlg`; session-binding via `SessionID ‖ PrevL1Hash` in provider signature scope; DENY decision preserved in chain without invalidating verification; open question noted for human-in-the-loop approval channels; §5.4 `SECRET_ACCESS` row updated to reference §5.8 |
 | 2.8.1 | §8 Step 3.6 added: Attestation Timestamp — verifier extracts `AttestationDoc.timestamp` (ms, TEE-vendor-signed), converts to ns, and asserts `\|attest_ns − BundleHeader.CreatedAt\| ≤ 30,000,000,000 ns`; upgrades wall-clock freshness from available-but-unchecked to normative; §18 Conformance updated |

@@ -193,8 +193,16 @@ def _verify_signature(evidence: dict, attestation: dict, session_id_hex: str) ->
         return False, f"Verification error: {exc}"
 
 
-def _verify_seal(bundle_seal_line: str, attestation: dict) -> tuple[bool, str]:
-    """Verify the SealSig in the BUNDLE_SEAL line against the attested public key."""
+def _verify_seal(
+    bundle_seal_line: str,
+    attestation: dict,
+    expected_policy_hash: str | None = None,
+) -> tuple[bool, str]:
+    """Verify the SealSig in the BUNDLE_SEAL line against the attested public key.
+
+    For v2.10+ bundles the policy_hash field is present.  Pass expected_policy_hash
+    (hex string) to assert that a specific compliance policy governed the session.
+    """
     if not HAS_CRYPTOGRAPHY:
         return False, "pip install cryptography required for SealSig verification"
 
@@ -205,10 +213,24 @@ def _verify_seal(bundle_seal_line: str, attestation: dict) -> tuple[bool, str]:
     if not bundle_hash_hex or not seal_sig_hex:
         return False, "malformed BUNDLE_SEAL line"
 
+    # Policy hash check (v2.10+)
+    if expected_policy_hash is not None:
+        ph_hex = fields.get("policy_hash", "")
+        if not ph_hex or ph_hex == "00" * 32:
+            return False, "policy_hash absent or zero-filled — no policy was evaluated"
+        if ph_hex.lower() != expected_policy_hash.lower():
+            return False, (
+                f"PolicyHash MISMATCH — wrong policy governed this session\n"
+                f"  expected: {expected_policy_hash}\n"
+                f"  got     : {ph_hex}"
+            )
+
     try:
         pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(attestation["public_key"]))
         pub_key.verify(bytes.fromhex(seal_sig_hex), bytes.fromhex(bundle_hash_hex))
-        return True, "SealSig valid — bundle covers all session packets"
+        ph_hex = fields.get("policy_hash", "")
+        ph_note = f"  policy_hash={ph_hex[:16]}…" if ph_hex and ph_hex != "00" * 32 else ""
+        return True, f"SealSig valid — bundle covers all session packets{ph_note}"
     except InvalidSignature:
         return False, "SealSig INVALID — bundle may be tampered"
     except Exception as exc:

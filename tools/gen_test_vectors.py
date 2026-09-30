@@ -164,9 +164,12 @@ PACKET_SIG = SIGNING_KEY.sign(SIG_SCOPE)
 # TerminalDigest = SHA-256(Packet[1].Signature)  (single-packet session)
 TERMINAL_DIGEST = sha256(PACKET_SIG)
 
-# BundleHash (VAR reference implementation formula):
-# SHA-256("VARB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest)
-BUNDLE_HASH = sha256(b"VARB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + TERMINAL_DIGEST)
+# PolicyHash (v2.10+): zero-filled for unconstrained test vectors
+POLICY_HASH = bytes(32)
+
+# BundleHash (v2.10 formula):
+# SHA-256("VARB" ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ TerminalDigest ‖ PolicyHash)
+BUNDLE_HASH = sha256(b"VARB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + TERMINAL_DIGEST + POLICY_HASH)
 
 # SealSig = Ed25519(keypair, BundleHash)
 SEAL_SIG = SIGNING_KEY.sign(BUNDLE_HASH)
@@ -360,7 +363,8 @@ def main():
     out.append("")
     out.append("```")
     out.append("TerminalDigest = SHA-256(Packet[1].Signature)")
-    out.append("BundleHash     = SHA-256(\"VARB\" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest)")
+    out.append("PolicyHash     = 0x00 × 32  (zero-filled — no policy; SHA-256(policy_bytes) when constrained)")
+    out.append("BundleHash     = SHA-256(\"VARB\" ‖ SessionID ‖ BootstrapNonce ‖ SigningPub ‖ TerminalDigest ‖ PolicyHash)")
     out.append("SealSig        = Ed25519_Sign(signing_key, BundleHash)")
     out.append("```")
     out.append("")
@@ -368,6 +372,7 @@ def main():
     out.append("|:------|:------|")
     out.append(f"| Packet[1].Signature | `{PACKET_SIG.hex()}` |")
     out.append(f"| **TerminalDigest** | **`{TERMINAL_DIGEST.hex()}`** |")
+    out.append(f"| **PolicyHash** | **`{POLICY_HASH.hex()}`** |")
     out.append(f"| `\"VARB\"` prefix | `56415242` |")
     out.append(f"| SessionID | `{SESSION_ID.hex()}` |")
     out.append(f"| BootstrapNonce | `{BOOTSTRAP_NONCE.hex()}` |")
@@ -388,6 +393,7 @@ def main():
     out.append(f"| L2Hash | `{L2_HASH.hex()}` |")
     out.append(f"| Packet[1].Signature | `{PACKET_SIG.hex()}` |")
     out.append(f"| TerminalDigest | `{TERMINAL_DIGEST.hex()}` |")
+    out.append(f"| PolicyHash | `{POLICY_HASH.hex()}` |")
     out.append(f"| BundleHash | `{BUNDLE_HASH.hex()}` |")
     out.append(f"| SealSig | `{SEAL_SIG.hex()}` |")
     out.append("")

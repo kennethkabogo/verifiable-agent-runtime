@@ -129,6 +129,7 @@ class SessionResumePacket:
 class BundleSeal:
     raw:             str
     terminal_digest: bytes  # 32 bytes  SHA-256(all signatures concatenated)
+    policy_hash:     bytes  # 32 bytes  SHA-256(policy_bytes), or 0x00×32 if none (v2.10+)
     bundle_hash:     bytes  # 32 bytes
     seal_sig:        bytes  # 64 bytes
 
@@ -269,9 +270,12 @@ def parse_session_resume(line: str) -> SessionResumePacket:
 
 def parse_bundle_seal(line: str) -> BundleSeal:
     f = _fields(line)
+    ph_raw = f.get("policy_hash", "")
+    policy_hash = _unhex(ph_raw, "policy_hash", 32) if ph_raw else bytes(32)
     return BundleSeal(
         raw             = line,
         terminal_digest = _unhex(f["terminal_digest"], "terminal_digest", 32),
+        policy_hash     = policy_hash,
         bundle_hash     = _unhex(f["bundle_hash"],     "bundle_hash",     32),
         seal_sig        = _unhex(f["seal_sig"],        "seal_sig",        64),
     )
@@ -757,7 +761,7 @@ def step_6_terminal_digest(bundle: Bundle) -> CheckResult:
 
 
 def step_7_bundle_seal(bundle: Bundle) -> CheckResult:
-    """Step 7 — Verify BundleHash computation and SealSig."""
+    """Step 7 — Verify BundleHash computation and SealSig (§8, v2.10+ includes PolicyHash)."""
     if bundle.bundle_seal is None:
         return _fail("Step 7 Bundle Seal", "no BUNDLE_SEAL found in bundle")
 
@@ -768,8 +772,20 @@ def step_7_bundle_seal(bundle: Bundle) -> CheckResult:
     last_pub   = last_seg.header.signing_pub
     td         = seal.terminal_digest
 
-    bundle_magic  = bundle.segments[0].header.magic.encode()
-    expected_hash = hashlib.sha256(bundle_magic + session_id + nonce + last_pub + td).digest()
+    # Version-conditional BundleHash preimage (§8 Step 7)
+    try:
+        ver_str = bundle.segments[0].header.version.lstrip("0") or "0"
+        minor   = int(ver_str.split(".")[1])
+    except (ValueError, IndexError, AttributeError):
+        minor = 0
+
+    bundle_magic = bundle.segments[0].header.magic.encode()
+    if minor >= 10:
+        preimage = bundle_magic + session_id + nonce + last_pub + td + seal.policy_hash
+    else:
+        preimage = bundle_magic + session_id + nonce + last_pub + td
+
+    expected_hash = hashlib.sha256(preimage).digest()
     if expected_hash != seal.bundle_hash:
         return _fail("Step 7 Bundle Seal",
                      f"BundleHash MISMATCH\n"
@@ -783,8 +799,9 @@ def step_7_bundle_seal(bundle: Bundle) -> CheckResult:
     if not _ed25519_verify(last_pub, seal.bundle_hash, seal.seal_sig):
         return _fail("Step 7 Bundle Seal", "SealSig INVALID — does not verify over BundleHash")
 
+    ph_note = "" if seal.policy_hash == bytes(32) else f"  PolicyHash={seal.policy_hash.hex()[:16]}…"
     return _pass("Step 7 Bundle Seal",
-                 f"BundleHash={seal.bundle_hash.hex()[:16]}…  SealSig valid (last-segment keypair)")
+                 f"BundleHash={seal.bundle_hash.hex()[:16]}…  SealSig valid (last-segment keypair){ph_note}")
 
 
 def step_8_settlement(bundle: Bundle) -> CheckResult:
