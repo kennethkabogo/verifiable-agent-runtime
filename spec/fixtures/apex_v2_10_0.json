@@ -74,5 +74,82 @@
       "scope_88_hex": "deadbeefdead40008000deadbeef00013130303030303000000000000000000000000000000000000000000000000000555344432020202088e004ad67bf28c7a00d6c097ba8a6a09a11508af30b816dff692429b3c33c3d",
       "settlement_sig_hex": "101f4cf36ec03be2ed7289b4acc664ed2353053a7f336f0094572a6dbb644b91980f7646defb52b4530a8855b4b780d9551375effa9f38b5a251aa861c43880b"
     }
+  },
+  "apxb": {
+    "_note": "Production family (APXB/APXE). src/runtime/shell.zig emits APXE scope magic and seals under APXB. Same inputs as top-level varb section; only magic bytes differ. SYNTHETIC / TEST-ONLY.",
+    "bundle_magic": "APXB",
+    "scope_magic": "APXE",
+    "section_14": {
+      "_note": "Single-packet session, zero PolicyHash",
+      "packet_1": {
+        "sequence": 1,
+        "prev_l1_hash_hex": "b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63",
+        "l1_hash_hex": "a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b",
+        "payload_len": 5,
+        "payload_hash_hex": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "scope_161_hex": "41505845010100000000000000b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64bd416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71050000002cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b982400000000000040008000000000000001",
+        "signature_hex": "aacb74fddf9bd1c4d759a600e080f1fb3798793dfa18adb701236c823c487dddf86a08920340f62d3b4f1e0e64873f36be633a1fa44bf2659ef3b4680d6c2200"
+      },
+      "bundle_seal": {
+        "terminal_digest_hex": "e413a0e508a058ecd6238aa23176fc3624c85be8d5cb559f3b8b3e0ea5897258",
+        "policy_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "bundle_hash_hex": "e32ea81edc31a63d82f7b4f1eb245e796ba57fc9006fe437bf2708c934353281",
+        "seal_sig_hex": "c5922a54d24b700652698dc5ee0e829aa1b35da23f4f6fa00ce64870d29a4f7f9a879109111730881184dd92474d6e63669e099b2c4656487cee43e8cf452604"
+      }
+    },
+    "section_14_with_policy": {
+      "_note": "Single-packet session, non-zero PolicyHash = SHA-256(b'test_policy_v1'). Packets are identical to section_14; only the seal changes.",
+      "policy_bytes_ascii": "test_policy_v1",
+      "packet_1": {
+        "sequence": 1,
+        "prev_l1_hash_hex": "b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63",
+        "l1_hash_hex": "a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b",
+        "payload_len": 5,
+        "payload_hash_hex": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "scope_161_hex": "41505845010100000000000000b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64bd416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71050000002cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b982400000000000040008000000000000001",
+        "signature_hex": "aacb74fddf9bd1c4d759a600e080f1fb3798793dfa18adb701236c823c487dddf86a08920340f62d3b4f1e0e64873f36be633a1fa44bf2659ef3b4680d6c2200"
+      },
+      "bundle_seal": {
+        "terminal_digest_hex": "e413a0e508a058ecd6238aa23176fc3624c85be8d5cb559f3b8b3e0ea5897258",
+        "policy_hash_hex": "bc3e0a9c16c1ebf7ef16fec24508ed8b024b6bb3138b9ff227818be44ef12beb",
+        "bundle_hash_hex": "dbabc6583a381cf0b2634c68a665b936e3c24dc57fa0d0b6ed12b3a59001c52e",
+        "seal_sig_hex": "7e7b545b1dda11a1eb20d96cc41e272723ce08d0b6729d473f1107ca62949bbcbc95a982cf746f3ea80e43aab2a0eea711c84614d1c9879f9d8279cde44eb20a"
+      }
+    },
+    "section_15": {
+      "_note": "Two-packet session with settlement, zero PolicyHash",
+      "packet_1": {
+        "sequence": 1,
+        "prev_l1_hash_hex": "b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63",
+        "l1_hash_hex": "a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b",
+        "payload_len": 5,
+        "payload_hash_hex": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "scope_161_hex": "41505845010100000000000000b751e786086c23135123cf486ad463349febe308f9c54c58c04478a453af0e63a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64bd416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab71050000002cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b982400000000000040008000000000000001",
+        "signature_hex": "aacb74fddf9bd1c4d759a600e080f1fb3798793dfa18adb701236c823c487dddf86a08920340f62d3b4f1e0e64873f36be633a1fa44bf2659ef3b4680d6c2200"
+      },
+      "packet_2": {
+        "sequence": 2,
+        "prev_l1_hash_hex": "a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64b",
+        "l1_hash_hex": "cd84b951c893096829a4c78ac9d3efc65f4dc9b3c3896df0653ea887d50142fe",
+        "payload_len": 5,
+        "payload_hash_hex": "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7",
+        "scope_161_hex": "41505845010200000000000000a231fcd1c04fef6e333954f22b311425d7d55ce3994b9a6d38a7cb72eedce64bcd84b951c893096829a4c78ac9d3efc65f4dc9b3c3896df0653ea887d50142fed416434244a2ce8276e6f3d72cc53f953f5e3f581f2e6862e5e36fadbe10ab7105000000486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a700000000000040008000000000000001",
+        "signature_hex": "1a5cefd8b7b320d582e6d763187b05b1ec499108f1d8d7357bc24a5c7b5e17982d460e8a6c7990e4458812f9ece7d2e18a3608b9a48d09b52b2f8fab47fcb402"
+      },
+      "bundle_seal": {
+        "terminal_digest_hex": "b4d8cd5d6a7ecbe3ce8898bf111031fa70b3fd5426f9119cfa114d374236cc85",
+        "policy_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "bundle_hash_hex": "6ba3ba4faebb9e35a43c717e594b3ca174ac6a9ebfcaf7732abc3b5a8c6cc03c",
+        "seal_sig_hex": "c640f85cdafdabdd0f480d2ada596a52922e230a6d32605f14ffda9c27021d120eb3c327ec0d430c51d11b65cf81f42dc31f281d649575a7cdd1bdc3e0a67102"
+      },
+      "settlement": {
+        "escrow_id_hex": "deadbeefdead40008000deadbeef0001",
+        "amount_hex": "3130303030303000000000000000000000000000000000000000000000000000",
+        "currency_hex": "5553444320202020",
+        "terminal_digest_hex": "b4d8cd5d6a7ecbe3ce8898bf111031fa70b3fd5426f9119cfa114d374236cc85",
+        "scope_88_hex": "deadbeefdead40008000deadbeef000131303030303030000000000000000000000000000000000000000000000000005553444320202020b4d8cd5d6a7ecbe3ce8898bf111031fa70b3fd5426f9119cfa114d374236cc85",
+        "settlement_sig_hex": "e105775ff46ee34b88165415dd2bcb131b5ca0a7b9ff08644aef3103f646bb6d7a2b44e389e57caa07ad187c4b49ed898bdc1e376216ca271959c9b9dfe21a09"
+      }
+    }
   }
 }

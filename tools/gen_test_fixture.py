@@ -111,6 +111,50 @@ SETTLE_SCOPE   = ESCROW_ID + AMOUNT_BYTES + CURRENCY_BYTES + TERMINAL_DIGEST_2
 assert len(SETTLE_SCOPE) == 88
 SETTLE_SIG     = SIGNING_KEY.sign(SETTLE_SCOPE)
 
+# ── APXB/APXE production family (matches src/runtime/shell.zig) ───────────────
+#
+# Identical inputs; scope magic is APXE (production runtime) instead of VARE.
+# BundleHash preimage prefix is "APXB" instead of "VARB".
+
+def build_scope_apxe(seq: int, prev_l1: bytes, l1: bytes, payload: bytes) -> bytes:
+    msg = bytearray(161)
+    msg[0:4] = b"APXE"
+    msg[4] = 0x01
+    struct.pack_into("<Q", msg, 5, seq)
+    msg[13:45]  = prev_l1
+    msg[45:77]  = l1
+    msg[77:109] = L2_HASH
+    struct.pack_into("<I", msg, 109, len(payload))
+    msg[113:145] = sha256(payload)
+    msg[145:161] = SESSION_ID
+    assert len(msg) == 161
+    return bytes(msg)
+
+APXE_SCOPE_1 = build_scope_apxe(1, L1_0, L1_1, PAYLOAD_1)
+APXE_SCOPE_2 = build_scope_apxe(2, L1_1, L1_2, PAYLOAD_2)
+
+APXE_SIG_1 = SIGNING_KEY.sign(APXE_SCOPE_1)
+APXE_SIG_2 = SIGNING_KEY.sign(APXE_SCOPE_2)
+
+# APXB seal — zero PolicyHash (unconstrained session)
+APXB_TD_1       = sha256(APXE_SIG_1)
+APXB_HASH_1     = sha256(b"APXB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + APXB_TD_1 + POLICY_HASH)
+APXB_SEAL_SIG_1 = SIGNING_KEY.sign(APXB_HASH_1)
+
+APXB_TD_2       = sha256(APXE_SIG_1 + APXE_SIG_2)
+APXB_HASH_2     = sha256(b"APXB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + APXB_TD_2 + POLICY_HASH)
+APXB_SEAL_SIG_2 = SIGNING_KEY.sign(APXB_HASH_2)
+
+APXB_SETTLE_SCOPE = ESCROW_ID + AMOUNT_BYTES + CURRENCY_BYTES + APXB_TD_2
+assert len(APXB_SETTLE_SCOPE) == 88
+APXB_SETTLE_SIG = SIGNING_KEY.sign(APXB_SETTLE_SCOPE)
+
+# APXB seal — non-zero PolicyHash (policy-bound session)
+# SHA-256(b"test_policy_v1") — deterministic synthetic policy hash.
+POLICY_HASH_NZ  = sha256(b"test_policy_v1")
+APXB_HASH_1_POL = sha256(b"APXB" + SESSION_ID + BOOTSTRAP_NONCE + SIGNING_PUB + APXB_TD_1 + POLICY_HASH_NZ)
+APXB_SEAL_SIG_1_POL = SIGNING_KEY.sign(APXB_HASH_1_POL)
+
 # ── Serialize ─────────────────────────────────────────────────────────────────
 
 fixture = {
@@ -192,6 +236,94 @@ fixture = {
             "terminal_digest_hex": TERMINAL_DIGEST_2.hex(),
             "scope_88_hex":        SETTLE_SCOPE.hex(),
             "settlement_sig_hex":  SETTLE_SIG.hex(),
+        },
+    },
+}
+
+fixture["apxb"] = {
+    "_note": (
+        "Production family (APXB/APXE). src/runtime/shell.zig emits APXE scope magic "
+        "and seals under APXB. Same inputs as top-level varb section; "
+        "only magic bytes differ. SYNTHETIC / TEST-ONLY."
+    ),
+    "bundle_magic": "APXB",
+    "scope_magic":  "APXE",
+
+    "section_14": {
+        "_note": "Single-packet session, zero PolicyHash",
+        "packet_1": {
+            "sequence":         1,
+            "prev_l1_hash_hex": L1_0.hex(),
+            "l1_hash_hex":      L1_1.hex(),
+            "payload_len":      len(PAYLOAD_1),
+            "payload_hash_hex": sha256(PAYLOAD_1).hex(),
+            "scope_161_hex":    APXE_SCOPE_1.hex(),
+            "signature_hex":    APXE_SIG_1.hex(),
+        },
+        "bundle_seal": {
+            "terminal_digest_hex": APXB_TD_1.hex(),
+            "policy_hash_hex":     POLICY_HASH.hex(),
+            "bundle_hash_hex":     APXB_HASH_1.hex(),
+            "seal_sig_hex":        APXB_SEAL_SIG_1.hex(),
+        },
+    },
+
+    "section_14_with_policy": {
+        "_note": (
+            "Single-packet session, non-zero PolicyHash = SHA-256(b'test_policy_v1'). "
+            "Packets are identical to section_14; only the seal changes."
+        ),
+        "policy_bytes_ascii": "test_policy_v1",
+        "packet_1": {
+            "sequence":         1,
+            "prev_l1_hash_hex": L1_0.hex(),
+            "l1_hash_hex":      L1_1.hex(),
+            "payload_len":      len(PAYLOAD_1),
+            "payload_hash_hex": sha256(PAYLOAD_1).hex(),
+            "scope_161_hex":    APXE_SCOPE_1.hex(),
+            "signature_hex":    APXE_SIG_1.hex(),
+        },
+        "bundle_seal": {
+            "terminal_digest_hex": APXB_TD_1.hex(),
+            "policy_hash_hex":     POLICY_HASH_NZ.hex(),
+            "bundle_hash_hex":     APXB_HASH_1_POL.hex(),
+            "seal_sig_hex":        APXB_SEAL_SIG_1_POL.hex(),
+        },
+    },
+
+    "section_15": {
+        "_note": "Two-packet session with settlement, zero PolicyHash",
+        "packet_1": {
+            "sequence":         1,
+            "prev_l1_hash_hex": L1_0.hex(),
+            "l1_hash_hex":      L1_1.hex(),
+            "payload_len":      len(PAYLOAD_1),
+            "payload_hash_hex": sha256(PAYLOAD_1).hex(),
+            "scope_161_hex":    APXE_SCOPE_1.hex(),
+            "signature_hex":    APXE_SIG_1.hex(),
+        },
+        "packet_2": {
+            "sequence":         2,
+            "prev_l1_hash_hex": L1_1.hex(),
+            "l1_hash_hex":      L1_2.hex(),
+            "payload_len":      len(PAYLOAD_2),
+            "payload_hash_hex": sha256(PAYLOAD_2).hex(),
+            "scope_161_hex":    APXE_SCOPE_2.hex(),
+            "signature_hex":    APXE_SIG_2.hex(),
+        },
+        "bundle_seal": {
+            "terminal_digest_hex": APXB_TD_2.hex(),
+            "policy_hash_hex":     POLICY_HASH.hex(),
+            "bundle_hash_hex":     APXB_HASH_2.hex(),
+            "seal_sig_hex":        APXB_SEAL_SIG_2.hex(),
+        },
+        "settlement": {
+            "escrow_id_hex":       ESCROW_ID.hex(),
+            "amount_hex":          AMOUNT_BYTES.hex(),
+            "currency_hex":        CURRENCY_BYTES.hex(),
+            "terminal_digest_hex": APXB_TD_2.hex(),
+            "scope_88_hex":        APXB_SETTLE_SCOPE.hex(),
+            "settlement_sig_hex":  APXB_SETTLE_SIG.hex(),
         },
     },
 }

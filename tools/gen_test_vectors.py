@@ -102,12 +102,12 @@ L2_HASH = sha256(L2_META + L2_CELL_DIGEST)
 # SHA-256(Payload)
 PAYLOAD_HASH = sha256(PAYLOAD)
 
-# ── Signature scope (161 bytes, matching VAR reference implementation) ──────────
+# ── Signature scope (161 bytes, VARB/VARE legacy family) ─────────────────────────
 #
-# NOTE: The VAR reference implementation (src/runtime/shell.zig) uses:
-#   - Magic "VARE" (0x56 0x41 0x52 0x45) instead of the spec's "APXE"
-#   - 161-byte scope omitting the ActionType byte
-# These test vectors match the reference implementation exactly.
+# NOTE: These vectors use the VARB/VARE legacy family.  The production runtime
+# (src/runtime/shell.zig) uses the APXB/APXE family — scope magic "APXE"
+# (0x41 0x50 0x58 0x45) and bundle preimage prefix "APXB".  Conformance suites
+# MUST have APXB/APXE vectors; this section covers the legacy family only.
 # See §14.1 note for details.
 
 def build_sig_scope() -> bytes:
@@ -227,11 +227,11 @@ def main():
     out.append("- `u64 LE` / `u32 LE` = little-endian unsigned integer.")
     out.append("- Values labelled **SYNTHETIC / TEST-ONLY** MUST NOT appear in production bundles.")
     out.append("")
-    out.append("> **Implementation note.** The VAR reference implementation")
-    out.append("> (`src/runtime/shell.zig`) uses magic bytes `VARE` (0x56 0x41 0x52 0x45)")
-    out.append("> and a **161-byte** signature scope (ActionType byte omitted).")
-    out.append("> These test vectors match that behaviour. A future APEX 3.0 revision")
-    out.append("> will unify the magic bytes across all packet types under the `APX*` prefix.")
+    out.append("> **Implementation note.** These vectors use the **VARB/VARE legacy family**.")
+    out.append("> The production VAR runtime (`src/runtime/shell.zig`) emits the **APXB/APXE**")
+    out.append("> family: scope magic `APXE` (0x41 0x50 0x58 0x45) and bundle seal preimage")
+    out.append("> prefix `APXB`. Conformance suites targeting real production bundles must use")
+    out.append("> the APXB/APXE vectors in `spec/fixtures/apex_v2_10_0.json` under the `apxb` key.")
     out.append("")
     out.append("---")
     out.append("")
