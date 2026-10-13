@@ -1,0 +1,91 @@
+label,n,total_bytes,leaves,inset,predicted,actual,delta_pct
+"And[Amount<=1M, FnName!=withdraw]",1,20,2,0,19202,20045,4.3902
+"And[Amount<=1M, FnName!=withdraw]",5,100,2,0,24010,24733,3.0112
+"And[Amount<=1M, FnName!=withdraw]",10,200,2,0,30020,30593,1.9087
+"And[Amount<=1M, FnName!=withdraw]",50,1040,2,0,78140,77633,-0.6488
+"And[Amount<=1M, FnName!=withdraw]",100,2090,2,0,138290,136433,-1.3428
+"And[Amount<=1M, FnName!=withdraw]",500,10890,2,0,619890,612833,-1.1384
+"And[Amount<=1M, FnName!=withdraw]",1000,21890,2,0,1221890,1208333,-1.1095
+"And[Amount<=1M, FnName!=withdraw]",5000,113890,2,0,6041890,6032333,-0.1582
+"And[Amount<=1M, FnName!=withdraw]",10000,228890,2,0,12066890,12062333,-0.0378
+"Or[Amount<=1M, FnName!=withdraw] sc",1,20,2,0,19202,19922,3.7496
+"Or[Amount<=1M, FnName!=withdraw] sc",5,100,2,0,24010,24310,1.2495
+"Or[Amount<=1M, FnName!=withdraw] sc",10,200,2,0,30020,29795,-0.7495
+"Or[Amount<=1M, FnName!=withdraw] sc",50,1000,2,0,78100,73675,-5.6658
+"Or[Amount<=1M, FnName!=withdraw] sc",100,2000,2,0,138200,128525,-7.0007
+"Or[Amount<=1M, FnName!=withdraw] sc",500,10000,2,0,619000,567325,-8.3481
+"Or[Amount<=1M, FnName!=withdraw] sc",1000,20000,2,0,1220000,1115825,-8.5389
+"Or[Amount<=1M, FnName!=withdraw] sc",5000,100000,2,0,6028000,5503825,-8.6957
+"Or[Amount<=1M, FnName!=withdraw] sc",10000,200000,2,0,12038000,10988825,-8.7155
+"Or[Amount<=1M, FnName!=withdraw] full",1,20,2,0,19202,19996,4.1350
+"Or[Amount<=1M, FnName!=withdraw] full",5,100,2,0,24010,24680,2.7905
+"Or[Amount<=1M, FnName!=withdraw] full",10,200,2,0,30020,30535,1.7155
+"Or[Amount<=1M, FnName!=withdraw] full",50,1040,2,0,78140,77535,-0.7743
+"Or[Amount<=1M, FnName!=withdraw] full",100,2090,2,0,138290,136285,-1.4499
+"Or[Amount<=1M, FnName!=withdraw] full",500,10890,2,0,619890,612285,-1.2268
+"Or[Amount<=1M, FnName!=withdraw] full",1000,21890,2,0,1221890,1207285,-1.1953
+"Or[Amount<=1M, FnName!=withdraw] full",5000,113890,2,0,6041890,6027285,-0.2417
+"Or[Amount<=1M, FnName!=withdraw] full",10000,228890,2,0,12066890,12052285,-0.1210
+"Not[FnName==withdraw]",1,20,1,0,19096,19185,0.4661
+"Not[FnName==withdraw]",5,100,1,0,23480,23437,-0.1831
+"Not[FnName==withdraw]",10,200,1,0,28960,28752,-0.7182
+"Not[FnName==withdraw]",50,1040,1,0,72840,71472,-1.8781
+"Not[FnName==withdraw]",100,2090,1,0,127690,124872,-2.2069
+"Not[FnName==withdraw]",500,10890,1,0,566890,558072,-1.5555
+"Not[FnName==withdraw]",1000,21890,1,0,1115890,1099572,-1.4623
+"Not[FnName==withdraw]",5000,113890,1,0,5511890,5491572,-0.3686
+"Not[FnName==withdraw]",10000,228890,1,0,11006890,10981572,-0.2300
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",1,20,3,0,19308,21462,11.1560
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",5,100,3,0,24540,26338,7.3268
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",10,200,3,0,31080,32433,4.3533
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",50,1040,3,0,83440,81353,-2.5012
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",100,2090,3,0,148890,142503,-4.2897
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",500,10890,3,0,672890,637703,-5.2292
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",1000,21890,3,0,1327890,1256703,-5.3609
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",5000,113890,3,0,6571890,6268703,-4.6134
+"And[Or[Amount<=1M, Amount>500K], FnName!=withdraw]",10000,228890,3,0,13126890,12533703,-4.5189
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",1,20,4,0,19414,23388,20.4698
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",5,100,4,0,25070,28264,12.7403
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",10,200,4,0,32140,34359,6.9042
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",50,1040,4,0,88740,83279,-6.1539
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",100,2090,4,0,159490,144429,-9.4432
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",500,10890,4,0,725890,639629,-11.8835
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",1000,21890,4,0,1433890,1258629,-12.2228
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",5000,113890,4,0,7101890,6270629,-11.7048
+"Or[And[Amount<=1M,FnName!=wd], And[Amount>0,FnName==settle]]",10000,228890,4,0,14186890,12535629,-11.6393
+"And[Amount<=1M, SessionSum<cap]",1,20,2,0,19202,19429,1.1822
+"And[Amount<=1M, SessionSum<cap]",5,100,2,0,24010,24013,0.0125
+"And[Amount<=1M, SessionSum<cap]",10,200,2,0,30020,29743,-0.9227
+"And[Amount<=1M, SessionSum<cap]",50,1040,2,0,78140,76183,-2.5045
+"And[Amount<=1M, SessionSum<cap]",100,2090,2,0,138290,134233,-2.9337
+"And[Amount<=1M, SessionSum<cap]",500,10890,2,0,619890,604633,-2.4612
+"And[Amount<=1M, SessionSum<cap]",1000,21890,2,0,1221890,1192633,-2.3944
+"And[Amount<=1M, SessionSum<cap]",5000,113890,2,0,6041890,5956633,-1.4111
+"And[Amount<=1M, SessionSum<cap]",10000,228890,2,0,12066890,11911633,-1.2866
+"InSet[fname, 2 elems] miss",1,20,1,2,19112,19804,3.6208
+"InSet[fname, 2 elems] miss",5,100,1,2,23560,23732,0.7301
+"InSet[fname, 2 elems] miss",10,200,1,2,29120,28642,-1.6415
+"InSet[fname, 2 elems] miss",50,1040,1,2,73640,68522,-6.9500
+"InSet[fname, 2 elems] miss",100,2090,1,2,129290,118372,-8.4446
+"InSet[fname, 2 elems] miss",500,10890,1,2,574890,523172,-8.9962
+"InSet[fname, 2 elems] miss",1000,21890,1,2,1131890,1029172,-9.0749
+"InSet[fname, 2 elems] miss",5000,113890,1,2,5591890,5137172,-8.1317
+"InSet[fname, 2 elems] miss",10000,228890,1,2,11166890,10272172,-8.0122
+"InSet[fname, 5 elems] miss",1,20,1,5,19136,22304,16.5552
+"InSet[fname, 5 elems] miss",5,100,1,5,23680,26232,10.7770
+"InSet[fname, 5 elems] miss",10,200,1,5,29360,31142,6.0695
+"InSet[fname, 5 elems] miss",50,1040,1,5,74840,71022,-5.1015
+"InSet[fname, 5 elems] miss",100,2090,1,5,131690,120872,-8.2147
+"InSet[fname, 5 elems] miss",500,10890,1,5,586890,525672,-10.4309
+"InSet[fname, 5 elems] miss",1000,21890,1,5,1155890,1031672,-10.7465
+"InSet[fname, 5 elems] miss",5000,113890,1,5,5711890,5139672,-10.0180
+"InSet[fname, 5 elems] miss",10000,228890,1,5,11406890,10274672,-9.9257
+"InSet[fname, 20 elems] miss",1,20,1,20,19256,42127,118.7734
+"InSet[fname, 20 elems] miss",5,100,1,20,24280,46055,89.6829
+"InSet[fname, 20 elems] miss",10,200,1,20,30560,50965,66.7703
+"InSet[fname, 20 elems] miss",50,1040,1,20,80840,90845,12.3763
+"InSet[fname, 20 elems] miss",100,2090,1,20,143690,140695,-2.0843
+"InSet[fname, 20 elems] miss",500,10890,1,20,646890,545495,-15.6742
+"InSet[fname, 20 elems] miss",1000,21890,1,20,1275890,1051495,-17.5873
+"InSet[fname, 20 elems] miss",5000,113890,1,20,6311890,5159495,-18.2575
+"InSet[fname, 20 elems] miss",10000,228890,1,20,12606890,10294495,-18.3423
