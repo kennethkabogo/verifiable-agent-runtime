@@ -229,7 +229,8 @@ pub fn main() !void {
             allocator.free(policy_bytes);
         }
         Sha256.hash(policy_bytes, &policy_hash, .{});
-        std.log.info("[VAR-gateway] Policy bound: sha256={s}", .{std.fmt.fmtSliceHexLower(&policy_hash)});
+        const hash_hex = std.fmt.bytesToHex(policy_hash, .lower);
+        std.log.info("[VAR-gateway] Policy bound: sha256={s}", .{hash_hex});
     }
 
     // 6a. Capture KMS config and warm NSM cache before the sandbox scrubs the
