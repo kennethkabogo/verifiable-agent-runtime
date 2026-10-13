@@ -18,7 +18,13 @@ pub fn evaluate(pred: &Predicate, packet: &Packet) -> bool {
 }
 
 /// Predicate must hold for ALL packets AND all session-level aggregate constraints.
+///
+/// Panics if the predicate shape is invalid (e.g., Or mixing aggregate and per-packet
+/// children). Call `validate_predicate_shape` at decode time to catch this earlier.
 pub fn evaluate_all(pred: &Predicate, packets: &[Packet]) -> bool {
+    if let Err(e) = validate_predicate_shape(pred) {
+        panic!("invalid predicate shape: {e}");
+    }
     packets.iter().all(|p| evaluate(pred, p)) && evaluate_session_constraints(pred, packets)
 }
 
@@ -61,6 +67,50 @@ fn has_session_aggregate(pred: &Predicate) -> bool {
         Predicate::Not(inner) => has_session_aggregate(inner),
         Predicate::Leaf { .. } => false,
     }
+}
+
+fn has_per_packet_leaf(pred: &Predicate) -> bool {
+    match pred {
+        Predicate::Leaf { .. } => true,
+        Predicate::And(c) | Predicate::Or(c) => c.iter().any(|x| has_per_packet_leaf(x)),
+        Predicate::Not(inner) => has_per_packet_leaf(inner),
+        Predicate::SessionSum { .. } | Predicate::SessionCount { .. } => false,
+    }
+}
+
+/// Returns Err if the predicate contains a node that mixes session-aggregate and
+/// per-packet sub-predicates under Or or Not.
+///
+/// The two-phase evaluator uses `true` as a sentinel for per-packet leaves in the
+/// session phase and for session aggregates in the per-packet phase. `Or` with `any()`
+/// short-circuits on a `true` sentinel, silently bypassing the other arm. `Not` defers
+/// the entire inner subtree to the session phase when any aggregate is present, dropping
+/// per-packet leaf checks inside that subtree entirely.
+///
+/// The check uses `has_per_packet_leaf` (not `!has_session_aggregate`) to catch
+/// children that internally mix both kinds, e.g. `And(Leaf, SessionSum)`.
+pub fn validate_predicate_shape(p: &Predicate) -> Result<(), &'static str> {
+    match p {
+        Predicate::Or(children) => {
+            let has_agg  = children.iter().any(|c| has_session_aggregate(c));
+            let has_leaf = children.iter().any(|c| has_per_packet_leaf(c));
+            if has_agg && has_leaf {
+                return Err("Or may not mix session-aggregate and per-packet children");
+            }
+            for c in children { validate_predicate_shape(c)?; }
+        }
+        Predicate::Not(inner) => {
+            if has_session_aggregate(inner) && has_per_packet_leaf(inner) {
+                return Err("Not may not wrap a subtree that mixes session-aggregate and per-packet children");
+            }
+            validate_predicate_shape(inner)?;
+        }
+        Predicate::And(children) => {
+            for c in children { validate_predicate_shape(c)?; }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn extract_numeric(field: &FieldId, packet: &Packet) -> Option<u64> {
@@ -433,6 +483,124 @@ mod tests {
         // 7 packets: count = 7 >= 5 → inner = false → Not = true (compliant).
         let many: Vec<Packet> = (0..7).map(|_| settlement(100)).collect();
         assert!(evaluate_all(&p, &many));
+    }
+
+    // ── validate_predicate_shape tests ──────────────────────────────────────
+
+    #[test]
+    fn or_mixed_session_aggregate_is_rejected() {
+        // Or(per-packet leaf, SessionSum) — the session aggregate is silently bypassed
+        // by the per-packet true-sentinel in evaluate_session_constraints.
+        let p = Predicate::Or(vec![
+            Predicate::Leaf {
+                field: FieldId::Amount,
+                op: Op::Lte,
+                value: Value::Scalar(ScalarValue::U64(1_000_000)),
+            },
+            Predicate::SessionSum {
+                field: FieldId::Amount,
+                filter: None,
+                op: Op::Lt,
+                threshold: 10_000,
+            },
+        ]);
+        assert!(validate_predicate_shape(&p).is_err());
+    }
+
+    #[test]
+    fn or_child_with_mixed_internals_is_rejected() {
+        // Or(And(Leaf, SessionSum), SessionSum) — the And child has both types internally.
+        // The per-packet leaf inside the And is bypassed because the sibling SessionSum
+        // sentinel short-circuits the Or in the per-packet phase. The original fix used
+        // `!has_session_aggregate(c)` and missed this; the corrected fix uses
+        // `has_per_packet_leaf(c)` to detect the leaf inside the And child.
+        let p = Predicate::Or(vec![
+            Predicate::And(vec![
+                Predicate::Leaf {
+                    field: FieldId::Amount,
+                    op: Op::Lte,
+                    value: Value::Scalar(ScalarValue::U64(1_000_000)),
+                },
+                Predicate::SessionSum {
+                    field: FieldId::Amount,
+                    filter: None,
+                    op: Op::Lt,
+                    threshold: 10_000,
+                },
+            ]),
+            Predicate::SessionSum {
+                field: FieldId::Amount,
+                filter: None,
+                op: Op::Lt,
+                threshold: 50_000,
+            },
+        ]);
+        assert!(validate_predicate_shape(&p).is_err());
+    }
+
+    #[test]
+    fn not_wrapping_mixed_subtree_is_rejected() {
+        // Not(And(Leaf, SessionSum)) — the Not arm defers the entire inner subtree to the
+        // session phase when any aggregate is present, silently dropping the per-packet
+        // leaf check inside the And.
+        let p = Predicate::Not(Box::new(Predicate::And(vec![
+            Predicate::Leaf {
+                field: FieldId::Amount,
+                op: Op::Lte,
+                value: Value::Scalar(ScalarValue::U64(1_000_000)),
+            },
+            Predicate::SessionSum {
+                field: FieldId::Amount,
+                filter: None,
+                op: Op::Lt,
+                threshold: 10_000,
+            },
+        ])));
+        assert!(validate_predicate_shape(&p).is_err());
+    }
+
+    #[test]
+    fn or_of_session_aggregates_is_allowed() {
+        // Or(SessionSum, SessionCount) — both children are session-level; no sentinel
+        // interference. Evaluated correctly: Or passes if either aggregate holds.
+        let p = Predicate::Or(vec![
+            Predicate::SessionSum {
+                field: FieldId::Amount,
+                filter: None,
+                op: Op::Lt,
+                threshold: 5_000,
+            },
+            Predicate::SessionCount {
+                filter: None,
+                op: Op::Lt,
+                threshold: 10,
+            },
+        ]);
+        assert!(validate_predicate_shape(&p).is_ok());
+        // sum = 6000 >= 5000 (first arm false), count = 3 < 10 (second arm true) → passes
+        let packets = vec![settlement(2_000), settlement(2_000), settlement(2_000)];
+        assert!(evaluate_all(&p, &packets));
+        // sum = 6000, count = 12 >= 10 → both arms false → fails
+        let many: Vec<Packet> = (0..12).map(|_| settlement(600)).collect();
+        assert!(!evaluate_all(&p, &many));
+    }
+
+    #[test]
+    fn or_of_leaves_is_allowed() {
+        // Pure per-packet Or — unaffected by the validation rule.
+        let p = Predicate::Or(vec![
+            Predicate::Leaf {
+                field: FieldId::Amount,
+                op: Op::Lte,
+                value: Value::Scalar(ScalarValue::U64(1_000_000)),
+            },
+            Predicate::Leaf {
+                field: FieldId::Amount,
+                op: Op::Gte,
+                value: Value::Scalar(ScalarValue::U64(0)),
+            },
+        ]);
+        assert!(validate_predicate_shape(&p).is_ok());
     }
 
     #[test]

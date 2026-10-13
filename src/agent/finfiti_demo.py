@@ -207,26 +207,36 @@ def _verify_signature(evidence: dict, attestation: dict, session_id_hex: str) ->
 def _verify_seal(
     bundle_seal_line: str,
     attestation: dict,
+    session_id_hex: str,
     expected_policy_hash: str | None = None,
 ) -> tuple[bool, str]:
     """Verify the SealSig in the BUNDLE_SEAL line against the attested public key.
 
     For v2.10+ bundles the policy_hash field is present.  Pass expected_policy_hash
     (hex string) to assert that a specific compliance policy governed the session.
+
+    Recomputes bundle_hash locally from its components (including policy_hash)
+    before trusting the signature over it. Checking policy_hash and seal_sig as
+    two independent checks, without this recomputation, is the swap-P attack
+    (docs/draft-swap-p-attack.md): neither check alone proves bundle_hash was
+    actually computed from the policy_hash presented alongside it, so an attacker
+    can swap policy_hash while leaving a genuinely-signed bundle_hash/seal_sig
+    pair untouched and pass both checks with the wrong policy accepted.
     """
     if not HAS_CRYPTOGRAPHY:
         return False, "pip install cryptography required for SealSig verification"
 
-    fields          = _parse_kv_line(bundle_seal_line)
-    bundle_hash_hex = fields.get("bundle_hash", "")
-    seal_sig_hex    = fields.get("seal_sig", "")
+    fields               = _parse_kv_line(bundle_seal_line)
+    bundle_hash_hex      = fields.get("bundle_hash", "")
+    seal_sig_hex         = fields.get("seal_sig", "")
+    terminal_digest_hex  = fields.get("terminal_digest", "")
+    ph_hex               = fields.get("policy_hash", "")
 
-    if not bundle_hash_hex or not seal_sig_hex:
+    if not bundle_hash_hex or not seal_sig_hex or not terminal_digest_hex:
         return False, "malformed BUNDLE_SEAL line"
 
     # Policy hash check (v2.10+)
     if expected_policy_hash is not None:
-        ph_hex = fields.get("policy_hash", "")
         if not ph_hex or ph_hex == "00" * 32:
             return False, "policy_hash absent or zero-filled — no policy was evaluated"
         if ph_hex.lower() != expected_policy_hash.lower():
@@ -236,12 +246,40 @@ def _verify_seal(
                 f"  got     : {ph_hex}"
             )
 
+    # Recompute bundle_hash from its components (APEX v2.10.0 preimage:
+    # magic ‖ session_id ‖ bootstrap_nonce ‖ signing_pub ‖ terminal_digest ‖
+    # policy_hash — tools/gen_test_vectors.py). This binds policy_hash into the
+    # integrity check: swapping it without re-signing now invalidates the
+    # comparison below, before the signature is ever checked.
+    bundle_magic        = attestation.get("bundle_magic", "VARB")
+    bootstrap_nonce_hex = attestation.get("bootstrap_nonce", "")
+    if not bootstrap_nonce_hex:
+        return False, "bootstrap_nonce unavailable from attestation — cannot verify BundleHash integrity"
+
+    policy_hash_bytes = bytes.fromhex(ph_hex) if ph_hex else b"\x00" * 32
+    preimage = (
+        bundle_magic.encode("ascii")
+        + bytes.fromhex(session_id_hex)
+        + bytes.fromhex(bootstrap_nonce_hex)
+        + bytes.fromhex(attestation["public_key"])
+        + bytes.fromhex(terminal_digest_hex)
+        + policy_hash_bytes
+    )
+    recomputed_hash = hashlib.sha256(preimage).hexdigest()
+    if recomputed_hash.lower() != bundle_hash_hex.lower():
+        return False, (
+            "BundleHash MISMATCH — bundle_hash does not match its components.\n"
+            "  This is the swap-P attack signature: policy_hash (or another field)\n"
+            "  was changed without re-signing. Rejecting.\n"
+            f"  recomputed: {recomputed_hash}\n"
+            f"  presented : {bundle_hash_hex}"
+        )
+
     try:
         pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(attestation["public_key"]))
         pub_key.verify(bytes.fromhex(seal_sig_hex), bytes.fromhex(bundle_hash_hex))
-        ph_hex = fields.get("policy_hash", "")
         ph_note = f"  policy_hash={ph_hex[:16]}…" if ph_hex and ph_hex != "00" * 32 else ""
-        return True, f"SealSig valid — bundle covers all session packets{ph_note}"
+        return True, f"SealSig valid — bundle_hash recomputed and verified, covers all session packets{ph_note}"
     except InvalidSignature:
         return False, "SealSig INVALID — bundle may be tampered"
     except Exception as exc:
@@ -461,7 +499,7 @@ def _run(base_url: str) -> bool:
     _info(f"terminal_digest: {terminal_digest[:20]}…", dim=True)
     _info(f"bundle_hash:     {bundle_hash[:20]}…", dim=True)
 
-    seal_ok, seal_reason = _verify_seal(bundle_seal_line, attestation)
+    seal_ok, seal_reason = _verify_seal(bundle_seal_line, attestation, session_id_hex)
     if seal_ok:
         _ok(f"SealSig: {seal_reason}")
     else:
